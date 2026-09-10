@@ -63,7 +63,7 @@ int EngineRun(const EngineConfig *c, const EngineProject *p, void *context)
         return 1;
     SetConfigFlags(c->windowFlags);
     InitWindow(c->width, c->height, c->title ? c->title : "Core");
-    CoreSetDataRoot(GetApplicationDirectory());
+    CoreSetDataRoot(c->engine_path ? c->engine_path : GetApplicationDirectory());
     if (!IsWindowReady())
         return 1;
     SetExitKey(KEY_NULL);
