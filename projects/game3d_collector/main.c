@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 /* Cube Collector: a minimal 3D game exercising only core/engine.h's loop, input
    buffering and fixed-timestep interpolation. No models, shaders or core render
    helpers are used deliberately, to see what a bare-bones 3D game looks like on

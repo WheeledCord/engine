@@ -1,3 +1,7 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
 /* Falling Dodge: a minimal 2D game exercising only core/engine.h. The engine
    has no 2D-specific module (no sprite batching, no 2D camera, no collision
    helpers) so this is built entirely on raylib's own 2D primitives plus the
