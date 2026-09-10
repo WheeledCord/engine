@@ -20,6 +20,28 @@ static bool Has(const char *s, const char *name)
     }
     return false;
 }
+
+static bool MeetsLimit(GLenum key, const char *name, int need)
+{
+    if (need <= 0)
+        return true;
+    GLint value = 0;
+    glGetIntegerv(key, &value);
+    TraceLog(LOG_INFO, "%s=%d required=%d", name, value, need);
+    if (value >= need)
+        return true;
+    TraceLog(LOG_ERROR, "Insufficient %s: required %d, available %d", name, need, value);
+    return false;
+}
+
+static bool HasExtension(const char *ext, const char *name, const char *reason)
+{
+    if (Has(ext, name))
+        return true;
+    TraceLog(LOG_ERROR, "%s unavailable, required for %s", name, reason);
+    return false;
+}
+
 bool CoreCheckCapabilities(CoreRequirements r)
 {
     TraceLog(LOG_INFO, "GPU: %s / %s / %s / GLSL %s", glGetString(GL_VENDOR), glGetString(GL_RENDERER),
@@ -29,62 +51,66 @@ bool CoreCheckCapabilities(CoreRequirements r)
     while ((error = glGetError()) != GL_NO_ERROR)
         TraceLog(LOG_WARNING, "raylib initialization GL error 0x%x (recorded before capability checks)",
                  error);
+    /* Core's own build contract, not a project's declaration. */
     if (rlGetVersion() != RL_OPENGL_21)
     {
         TraceLog(LOG_ERROR, "Core requires a raylib GRAPHICS_API_OPENGL_21 build");
         return false;
     }
-    const char *ext = (const char *)glGetString(GL_EXTENSIONS);
-    bool fbo = Has(ext, "GL_ARB_framebuffer_object"), dep = Has(ext, "GL_ARB_depth_texture");
-    TraceLog(LOG_INFO, "ARB_texture_float=%d ARB_framebuffer_object=%d ARB_depth_texture=%d",
-             Has(ext, "GL_ARB_texture_float"), fbo, dep);
-    if (r.vertexUniformComponents < CORE_BONE_CAPACITY * 16 + 16)
-        r.vertexUniformComponents = CORE_BONE_CAPACITY * 16 + 16;
-    if (r.fragmentUniformComponents < 5)
-        r.fragmentUniformComponents = 5;
-    if (r.textureUnits < 1)
-        r.textureUnits = 1;
-    if (r.varyingFloats < 6)
-        r.varyingFloats = 6;
-    const GLenum keys[] = {GL_MAX_VERTEX_UNIFORM_COMPONENTS, GL_MAX_FRAGMENT_UNIFORM_COMPONENTS,
-                           GL_MAX_TEXTURE_IMAGE_UNITS, GL_MAX_VARYING_FLOATS, GL_MAX_VERTEX_ATTRIBS};
-    const char *names[] = {"GL_MAX_VERTEX_UNIFORM_COMPONENTS", "GL_MAX_FRAGMENT_UNIFORM_COMPONENTS",
-                           "GL_MAX_TEXTURE_IMAGE_UNITS", "GL_MAX_VARYING_FLOATS", "GL_MAX_VERTEX_ATTRIBS"};
-    int need[] = {r.vertexUniformComponents, r.fragmentUniformComponents, r.textureUnits, r.varyingFloats, 9};
-    bool ok = fbo && dep;
-    for (int i = 0; i < 5; i++)
+
+    /* GPU skinning is core's own path, so core knows what it costs to run. */
+    if (r.gpuSkinning)
     {
-        GLint value = 0;
-        glGetIntegerv(keys[i], &value);
-        TraceLog(LOG_INFO, "%s=%d required=%d", names[i], value, need[i]);
-        if (value < need[i])
-        {
-            TraceLog(LOG_ERROR, "Insufficient %s: required %d, available %d", names[i], need[i], value);
-            ok = false;
-        }
+        int bones = CORE_BONE_CAPACITY * 16 + 16;
+        if (r.vertexUniformComponents < bones)
+            r.vertexUniformComponents = bones;
+        if (r.vertexAttributes < 9)
+            r.vertexAttributes = 9;
     }
-    if (!fbo || !dep)
-        TraceLog(LOG_ERROR,
-                 "Required ARB_framebuffer_object / ARB_depth_texture unavailable (FBO=%d depth=%d)", fbo,
-                 dep);
+
+    bool ok = MeetsLimit(GL_MAX_VERTEX_UNIFORM_COMPONENTS, "GL_MAX_VERTEX_UNIFORM_COMPONENTS",
+                         r.vertexUniformComponents);
+    ok &= MeetsLimit(GL_MAX_FRAGMENT_UNIFORM_COMPONENTS, "GL_MAX_FRAGMENT_UNIFORM_COMPONENTS",
+                     r.fragmentUniformComponents);
+    ok &= MeetsLimit(GL_MAX_TEXTURE_IMAGE_UNITS, "GL_MAX_TEXTURE_IMAGE_UNITS", r.textureUnits);
+    ok &= MeetsLimit(GL_MAX_VARYING_FLOATS, "GL_MAX_VARYING_FLOATS", r.varyingFloats);
+    ok &= MeetsLimit(GL_MAX_VERTEX_ATTRIBS, "GL_MAX_VERTEX_ATTRIBS", r.vertexAttributes);
+
+    if (r.renderTargets || r.sampleableDepth)
+    {
+        const char *ext = (const char *)glGetString(GL_EXTENSIONS);
+        ok &= HasExtension(ext, "GL_ARB_framebuffer_object", "render targets");
+        if (r.sampleableDepth)
+            ok &= HasExtension(ext, "GL_ARB_depth_texture", "sampleable depth");
+    }
     if (!ok)
         return false;
-    RenderTexture probe;
-    if (!MakeRT(&probe, 16, 16, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, true))
-        return false;
-    CoreUnloadRT(&probe);
-    const ShaderFile requiredShader = {"core/shaders/skinning.vs", "core/shaders/textured.fs"};
-    Shader skin = {0};
-    if (!CoreLoadShaders(&requiredShader, 1, &skin))
-        return false;
-    bool gpu = skin.locs[SHADER_LOC_BONE_MATRICES] >= 0 && skin.locs[SHADER_LOC_VERTEX_BONEIDS] >= 0 &&
-               skin.locs[SHADER_LOC_VERTEX_BONEWEIGHTS] >= 0;
-    CoreUnloadShaders(&skin, 1);
-    if (!gpu)
+
+    if (r.renderTargets || r.sampleableDepth)
     {
-        TraceLog(LOG_ERROR, "Required GPU skinning shader interface unavailable");
-        return false;
+        RenderTexture probe;
+        if (!MakeRT(&probe, 16, 16, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, r.sampleableDepth))
+            return false;
+        CoreUnloadRT(&probe);
     }
+
+    if (r.gpuSkinning)
+    {
+        const ShaderFile requiredShader = {"core/shaders/skinning.vs", "core/shaders/textured.fs"};
+        Shader skin = {0};
+        if (!CoreLoadShaders(&requiredShader, 1, &skin))
+            return false;
+        bool gpu = skin.locs[SHADER_LOC_BONE_MATRICES] >= 0 &&
+                   skin.locs[SHADER_LOC_VERTEX_BONEIDS] >= 0 &&
+                   skin.locs[SHADER_LOC_VERTEX_BONEWEIGHTS] >= 0;
+        CoreUnloadShaders(&skin, 1);
+        if (!gpu)
+        {
+            TraceLog(LOG_ERROR, "Required GPU skinning shader interface unavailable");
+            return false;
+        }
+    }
+
     error = glGetError();
     if (error)
     {

@@ -44,7 +44,9 @@ static void DrawEdges(UiRect rect, int width, Color topLeft, Color bottomRight)
     }
 }
 
-// Keep the initial atlas small. Other glyphs are loaded when text first uses them.
+// Printable ASCII is always baked in, so ordinary text never pays for an atlas rebuild mid-frame.
+// The Latin-1 supplement comes with it because the cost is parsing the BDF, not the glyph count:
+// 95 glyphs and 191 glyphs both take about 35 ms. Anything else is loaded when text first uses it.
 static const int *DefaultCodepoints(int *count)
 {
     static int codepoints[95 + 96];
@@ -108,13 +110,35 @@ static bool ResolveThemeFont(UiTheme *theme, bool *owned)
     const char *resolvedFont = theme->fontPath ? CoreResolvePath(theme->fontPath, fontbuf, sizeof fontbuf) : NULL;
     if (!resolvedFont || !FileExists(resolvedFont))
     {
-        TraceLog(LOG_ERROR, "UI: Bitmap font file not found: %s",
-                 theme->fontPath ? theme->fontPath : "(null)");
+        // Report where it actually looked, which is rarely the path that was asked for.
+        TraceLog(LOG_ERROR, "UI: Bitmap font file not found: %s (looked for %s)",
+                 theme->fontPath ? theme->fontPath : "(null)",
+                 resolvedFont ? resolvedFont : "(path too long)");
         return false;
     }
 
+    // A caller's own list is honoured, but printable ASCII is added to it: a rebuild triggered by
+    // ordinary text would be a visible hitch in a game loop.
+    int *requested = NULL;
+    int requestedCount = theme->fontGlyphCount;
+    if (theme->fontCodepoints && requestedCount > 0)
+    {
+        requested = malloc((size_t)(requestedCount + 95) * sizeof(*requested));
+        if (!requested)
+            return false;
+        memcpy(requested, theme->fontCodepoints, (size_t)requestedCount * sizeof(*requested));
+        for (int c = 32; c <= 126; c++)
+        {
+            bool present = false;
+            for (int i = 0; i < requestedCount && !present; i++)
+                present = requested[i] == c;
+            if (!present)
+                requested[requestedCount++] = c;
+        }
+    }
     Font font = LoadFontEx(resolvedFont, theme->fontSize,
-                           (int *)theme->fontCodepoints, theme->fontGlyphCount);
+                           requested ? requested : (int *)theme->fontCodepoints, requestedCount);
+    free(requested);
     Font fallback = GetFontDefault();
     if (!IsFontValid(font) || font.texture.id == fallback.texture.id)
     {
