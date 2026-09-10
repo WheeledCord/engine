@@ -1,9 +1,27 @@
 #include "file.h"
 #include <stdio.h>
 #include <stdlib.h>
+static char s_root[512];
+
+void CoreSetDataRoot(const char *path)
+{
+    if (path && *path)
+        snprintf(s_root, sizeof s_root, "%s", path);
+    else
+        s_root[0] = 0;
+}
+
 char *CoreReadFile(const char *path)
 {
-    FILE *f = path ? fopen(path, "rb") : NULL;
+    if (!path)
+        return NULL;
+    FILE *f = fopen(path, "rb");
+    if (!f && s_root[0] && path[0] != '/')
+    {
+        char buf[1024];
+        snprintf(buf, sizeof buf, "%s/%s", s_root, path);
+        f = fopen(buf, "rb");
+    }
     if (!f)
         return NULL;
     if (fseek(f, 0, SEEK_END))

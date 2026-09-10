@@ -1,4 +1,5 @@
 #include "engine.h"
+#include "file.h"
 #include <math.h>
 #include <string.h>
 void EngineInputAccumulate(EngineInput *p, const EngineInput *f)
@@ -62,6 +63,7 @@ int EngineRun(const EngineConfig *c, const EngineProject *p, void *context)
         return 1;
     SetConfigFlags(c->windowFlags);
     InitWindow(c->width, c->height, c->title ? c->title : "Core");
+    CoreSetDataRoot(GetApplicationDirectory());
     if (!IsWindowReady())
         return 1;
     SetExitKey(KEY_NULL);
