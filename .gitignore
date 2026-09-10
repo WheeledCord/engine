@@ -1,40 +1,11 @@
-# Local build output and generated dependency files
+# Build output
 build/
 *.o
 *.d
 
-# The original game, its content, and development utilities stay outside this repository.
-projects/
-tools/
-spikes/
-main_trench.c
-game_*.h
-level.h
-actor.h
-asset.h
-damage.h
-embed.h
-gib.h
-interact.h
-models.h
-particles.h
-prop.h
-rig.h
-sound.h
-tooltip.h
-worldgen.h
-tweakval.*
-concussion.h
-
-assets/
-assets_ko/
-shaders/
-*.ogg
-*.obj
-*.mtl
-*.rig
-*.png
-*.webp
-
+# Python bytecode from tools/
 __pycache__/
 
+# The UI tool's working file, and raylib's F12 screenshots
+projects/ui_tool/layout.ui
+screenshot*.png

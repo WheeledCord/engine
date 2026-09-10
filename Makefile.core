@@ -1,0 +1,69 @@
+CC ?= cc
+AR ?= ar
+BUILD := build/core
+RLSRC := $(BUILD)/raylib/src
+RLLIB := $(RLSRC)/libraylib.a
+CORE_SRC := $(wildcard core/*.c)
+CORE_OBJ := $(patsubst core/%.c,$(BUILD)/%.o,$(CORE_SRC))
+GAMEPLAY_SRC := $(wildcard gameplay/*.c)
+GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC))
+UI_TOOL_OBJ := $(BUILD)/ui_tool_project.o
+CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21
+LDLIBS := -lm -lpthread -ldl -lGL -lX11
+RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
+.PHONY: all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d
+all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool
+games: $(BUILD)/game3d_collector $(BUILD)/game2d_dodge
+$(RLSRC)/.exported:
+	mkdir -p $(BUILD)/raylib
+	git -C raylib archive HEAD src | tar -x -C $(BUILD)/raylib
+	touch $@
+$(RLLIB): $(RLSRC)/.exported Makefile.core
+	$(MAKE) -C $(RLSRC) GRAPHICS=GRAPHICS_API_OPENGL_21 CUSTOM_CFLAGS='$(RAYLIB_CFLAGS)' -j4 > $(BUILD)/raylib-build.log 2>&1
+boundary: $(RLSRC)/.exported
+	python3 tools/check_core_dependencies.py --cc '$(CC)' --raylib $(RLSRC)
+$(BUILD)/%.o: core/%.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I$(RLSRC) -MMD -MP -c $< -o $@
+$(BUILD)/libcore.a: $(CORE_OBJ)
+	$(AR) rcs $@ $^
+$(BUILD)/gameplay_%.o: gameplay/%.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+$(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ)
+	$(AR) rcs $@ $^
+$(BUILD)/project.o: projects/core_test/main.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+$(BUILD)/gameplay_project.o: projects/gameplay_test/main.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+$(UI_TOOL_OBJ): projects/ui_tool/main.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+$(BUILD)/core_test: $(BUILD)/project.o $(BUILD)/libcore.a $(RLLIB) | boundary
+	$(CC) $^ $(LDLIBS) -o $@
+$(BUILD)/gameplay_test: $(BUILD)/gameplay_project.o $(BUILD)/libgameplay.a $(BUILD)/libcore.a $(RLLIB) | boundary
+	$(CC) $^ $(LDLIBS) -o $@
+$(BUILD)/ui_tool: $(UI_TOOL_OBJ) $(BUILD)/libcore.a $(RLLIB) | boundary
+	$(CC) $^ $(LDLIBS) -o $@
+$(BUILD)/game3d_collector.o: projects/game3d_collector/main.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+$(BUILD)/game3d_collector: $(BUILD)/game3d_collector.o $(BUILD)/libcore.a $(RLLIB) | boundary
+	$(CC) $^ $(LDLIBS) -o $@
+$(BUILD)/game2d_dodge.o: projects/game2d_dodge/main.c $(RLSRC)/.exported | boundary
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+$(BUILD)/game2d_dodge: $(BUILD)/game2d_dodge.o $(BUILD)/libcore.a $(RLLIB) | boundary
+	$(CC) $^ $(LDLIBS) -o $@
+run: $(BUILD)/core_test
+	./$(BUILD)/core_test
+run-ui-tool: $(BUILD)/ui_tool
+	./$(BUILD)/ui_tool
+run-3d: $(BUILD)/game3d_collector
+	./$(BUILD)/game3d_collector
+run-2d: $(BUILD)/game2d_dodge
+	./$(BUILD)/game2d_dodge
+smoke: all
+	./$(BUILD)/core_test --smoke
+	./$(BUILD)/gameplay_test
+	./$(BUILD)/ui_tool --smoke
+gameplay-smoke: $(BUILD)/gameplay_test
+	./$(BUILD)/gameplay_test
+clean:
+	python3 -c 'import shutil; shutil.rmtree("$(BUILD)", ignore_errors=True)'
+-include $(CORE_OBJ:.o=.d) $(GAMEPLAY_OBJ:.o=.d) $(BUILD)/project.d $(BUILD)/gameplay_project.d $(UI_TOOL_OBJ:.o=.d) $(BUILD)/game3d_collector.d $(BUILD)/game2d_dodge.d
