@@ -103,14 +103,16 @@ static bool ResolveThemeFont(UiTheme *theme, bool *owned)
         SetTextureFilter(theme->font.texture, TEXTURE_FILTER_POINT);
         return true;
     }
-    if (!theme->fontPath || !FileExists(theme->fontPath))
+    char fontbuf[1024];
+    const char *resolvedFont = theme->fontPath ? CoreResolvePath(theme->fontPath, fontbuf, sizeof fontbuf) : NULL;
+    if (!resolvedFont || !FileExists(resolvedFont))
     {
         TraceLog(LOG_ERROR, "UI: Bitmap font file not found: %s",
                  theme->fontPath ? theme->fontPath : "(null)");
         return false;
     }
 
-    Font font = LoadFontEx(theme->fontPath, theme->fontSize,
+    Font font = LoadFontEx(resolvedFont, theme->fontSize,
                            (int *)theme->fontCodepoints, theme->fontGlyphCount);
     Font fallback = GetFontDefault();
     if (!IsFontValid(font) || font.texture.id == fallback.texture.id)

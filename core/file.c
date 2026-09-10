@@ -1,6 +1,8 @@
 #include "file.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+
 static char s_root[512];
 
 void CoreSetDataRoot(const char *path)
@@ -9,6 +11,19 @@ void CoreSetDataRoot(const char *path)
         snprintf(s_root, sizeof s_root, "%s", path);
     else
         s_root[0] = 0;
+}
+
+const char *CoreResolvePath(const char *path, char *buf, int buflen)
+{
+    if (!path) return NULL;
+    if (s_root[0] && path[0] != '/')
+    {
+        FILE *f = fopen(path, "rb");
+        if (f) { fclose(f); return path; }
+        snprintf(buf, (size_t)buflen, "%s/%s", s_root, path);
+        return buf;
+    }
+    return path;
 }
 
 char *CoreReadFile(const char *path)
@@ -52,6 +67,7 @@ char *CoreReadFile(const char *path)
     s[n] = 0;
     return s;
 }
+
 void CoreFreeFile(char *text)
 {
     free(text);
