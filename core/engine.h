@@ -29,6 +29,7 @@ typedef struct EngineConfig
     double max_frame_dt; /* zero: no clamp; positive: explicit catch-up time clamp */
     unsigned int windowFlags;
     CoreRequirements requirements;
+    const char *engine_path; /* path to engine root containing core/; NULL: use executable directory */
 } EngineConfig;
 typedef struct EngineProject
 {
