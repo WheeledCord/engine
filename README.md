@@ -46,6 +46,11 @@ contents, so a layout resolves to any window size without anything being scaled:
 and a button stays a button. `projects/ui_tool/README.md` explains the editor,
 `core/README.md` the engine layers.
 
+## License
+
+MPL 2.0, see `LICENSE`. It is per-file copyleft: use the engine inside a larger
+program under whatever terms you like, but changes to these files stay open.
+
 ## Third-party
 
 raylib is under zlib/libpng (`raylib/LICENSE`). The UI font is GNU Unifont under the SIL Open Font
