@@ -13,7 +13,7 @@ void CoreSetDataRoot(const char *path)
         s_root[0] = 0;
 }
 
-const char *CoreResolvePath(const char *path, char *buf, int buflen)
+const char *CoreResolvePath(const char *path, char *buf, size_t buflen)
 {
     if (!path) return NULL;
     if (s_root[0] && path[0] != '/')
