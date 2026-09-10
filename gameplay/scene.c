@@ -1,0 +1,232 @@
+#include "scene.h"
+
+#include "core/file.h"
+
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct SceneReader
+{
+    const char *cursor;
+    const char *end;
+    int line;
+} SceneReader;
+
+static void SkipSpace(SceneReader *reader)
+{
+    for (;;)
+    {
+        while (reader->cursor < reader->end && isspace((unsigned char)*reader->cursor))
+        {
+            if (*reader->cursor++ == '\n')
+                reader->line++;
+        }
+        if (reader->cursor < reader->end && *reader->cursor == '#')
+        {
+            while (reader->cursor < reader->end && *reader->cursor != '\n')
+                reader->cursor++;
+            continue;
+        }
+        if (reader->cursor + 1 < reader->end && reader->cursor[0] == '/' && reader->cursor[1] == '/')
+        {
+            reader->cursor += 2;
+            while (reader->cursor < reader->end && *reader->cursor != '\n')
+                reader->cursor++;
+            continue;
+        }
+        return;
+    }
+}
+
+static char *Token(SceneReader *reader)
+{
+    SkipSpace(reader);
+    if (reader->cursor >= reader->end)
+        return NULL;
+    if (*reader->cursor == '{' || *reader->cursor == '}')
+    {
+        char *token = malloc(2);
+        if (token)
+        {
+            token[0] = *reader->cursor++;
+            token[1] = 0;
+        }
+        return token;
+    }
+    const char *start = reader->cursor;
+    bool quoted = *reader->cursor == '"';
+    if (quoted)
+        start = ++reader->cursor;
+    size_t capacity = 32, length = 0;
+    char *token = malloc(capacity);
+    if (!token)
+        return NULL;
+    while (reader->cursor < reader->end)
+    {
+        char character = *reader->cursor++;
+        if (quoted)
+        {
+            if (character == '"')
+                break;
+            if (character == '\\' && reader->cursor < reader->end)
+            {
+                character = *reader->cursor++;
+                if (character == 'n')
+                    character = '\n';
+            }
+        }
+        else if (isspace((unsigned char)character) || character == '{' || character == '}')
+        {
+            reader->cursor--;
+            break;
+        }
+        if (length + 1 >= capacity)
+        {
+            capacity *= 2;
+            char *grown = realloc(token, capacity);
+            if (!grown)
+            {
+                free(token);
+                return NULL;
+            }
+            token = grown;
+        }
+        token[length++] = character;
+    }
+    if (quoted && (reader->cursor > reader->end || reader->cursor[-1] != '"'))
+    {
+        free(token);
+        return NULL;
+    }
+    (void)start;
+    token[length] = 0;
+    return token;
+}
+
+static bool Expect(SceneReader *reader, const char *expected)
+{
+    char *token = Token(reader);
+    bool matches = token && !strcmp(token, expected);
+    free(token);
+    return matches;
+}
+
+bool GameplaySceneLoad(GameplayWorld *world, const char *path, bool replaceWorld)
+{
+    char *text = CoreReadFile(path);
+    if (!world || !text)
+        return false;
+    if (replaceWorld)
+        GameplayWorldClear(world);
+    SceneReader reader = {text, text + strlen(text), 1};
+    bool ok = true;
+    for (;;)
+    {
+        char *kind = Token(&reader);
+        if (!kind)
+            break;
+        if (strcmp(kind, "entity"))
+        {
+            fprintf(stderr, "%s:%d: expected 'entity'\n", path, reader.line);
+            free(kind);
+            ok = false;
+            break;
+        }
+        free(kind);
+        char *classname = Token(&reader);
+        if (!classname || !Expect(&reader, "{"))
+        {
+            fprintf(stderr, "%s:%d: entity requires classname and '{'\n", path, reader.line);
+            free(classname);
+            ok = false;
+            break;
+        }
+        EntityHandle entity = EntitySpawn(world, classname);
+        if (entity.index == UINT32_MAX)
+        {
+            fprintf(stderr, "%s:%d: unknown classname or entity capacity reached: %s\n", path, reader.line,
+                    classname);
+            free(classname);
+            ok = false;
+            break;
+        }
+        free(classname);
+        for (;;)
+        {
+            char *key = Token(&reader);
+            if (!key)
+            {
+                fprintf(stderr, "%s:%d: unterminated entity\n", path, reader.line);
+                ok = false;
+                break;
+            }
+            if (!strcmp(key, "}"))
+            {
+                free(key);
+                break;
+            }
+            char *value = Token(&reader);
+            if (!value || !EntityKeyValue(world, entity, key, value))
+            {
+                fprintf(stderr, "%s:%d: invalid key/value for %s\n", path, reader.line, key);
+                free(key);
+                free(value);
+                ok = false;
+                break;
+            }
+            free(key);
+            free(value);
+        }
+        if (!ok)
+            break;
+    }
+    CoreFreeFile(text);
+    return ok;
+}
+
+static bool Quote(FILE *file, const char *text)
+{
+    if (fputc('"', file) == EOF)
+        return false;
+    for (; *text; text++)
+    {
+        if (*text == '"' || *text == '\\')
+            if (fputc('\\', file) == EOF)
+                return false;
+        if (*text == '\n')
+        {
+            if (fputs("\\n", file) == EOF)
+                return false;
+        }
+        else if (fputc(*text, file) == EOF)
+            return false;
+    }
+    return fputc('"', file) != EOF;
+}
+
+bool GameplaySceneWrite(const GameplayWorld *world, const char *path)
+{
+    if (!world || !path)
+        return false;
+    FILE *file = fopen(path, "wb");
+    if (!file)
+        return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < world->maxEntities; i++)
+    {
+        const GameplayEntity *slot = &world->entities[i];
+        if (!slot->alive)
+            continue;
+        ok =
+            fputs("entity ", file) != EOF && Quote(file, slot->type->classname) && fputs(" {\n", file) != EOF;
+        for (size_t kv = 0; ok && kv < slot->keyValueCount; kv++)
+            ok = fputs("  ", file) != EOF && Quote(file, slot->keyValues[kv].key) &&
+                 fputc(' ', file) != EOF && Quote(file, slot->keyValues[kv].value) &&
+                 fputc('\n', file) != EOF;
+        ok = ok && fputs("}\n\n", file) != EOF;
+    }
+    ok = ok && !fclose(file);
+    return ok;
+}
