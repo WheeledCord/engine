@@ -1,5 +1,6 @@
 #include "ui_document.h"
 
+#include "file.h"
 #include "ui_containers.h"
 #include "ui_internal.h"
 #include "ui_layout.h"
@@ -689,7 +690,11 @@ bool UiDocumentLoad(UiDocument *document, const char *path)
 {
     if (!document || !path)
         return false;
-    FILE *file = fopen(path, "rb");
+    // Loading follows the engine root so a layout ships with its project; saving never redirects,
+    // because the caller is naming where the file should be written.
+    char resolved[1024];
+    const char *actual = CoreResolvePath(path, resolved, sizeof resolved);
+    FILE *file = actual ? fopen(actual, "rb") : NULL;
     if (!file)
         return false;
     char line[512];

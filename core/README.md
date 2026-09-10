@@ -3,8 +3,14 @@
 Modules are ordinary C translation units, built into `build/core/libcore.a`. Public headers expose raylib-native types. Core includes only its own files, raylib and system headers; projects provide policy and content.
 
 - `engine`: window lifetime, accumulator loop, project callback signatures and input buffering.
-- `capabilities`: required GPU/depth support and limit logging; no fallback renderer.
-- `file`, `shader`: checked disk reads and table-driven GLSL 120 shader loading.
+- `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
+  A project that declares nothing boots with no probe and no shader compiled; declaring
+  `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.
+  Anything declared and unavailable is fatal — there is no fallback renderer.
+- `file`, `shader`: checked disk reads and table-driven GLSL 120 shader loading. `CoreSetDataRoot`
+  names where the engine's own files live so a binary started from another working directory still
+  finds them; `CoreResolvePath` leaves absolute paths and files present in the working directory
+  alone, so a project can override an engine file by shipping its own.
 - `frame_uniforms`: caller-declared names/types/counts, cached locations, per-frame value binding. Missing uniforms are skipped.
 - `render_target`: colour/depth FBO construction and destruction.
 - `world_draw`: model-instance drawing with optional shader override across material slots.
@@ -50,10 +56,17 @@ UI receives the raw `FrameInput` snapshot once during drawing, so interaction is
 number of fixed updates. Nested UI regions intersect their integer clip rectangles and explicitly restore
 the parent scissor because raylib's `EndScissorMode` disables clipping rather than stacking it.
 The default theme reads GNU Unifont's BDF from `core/fonts/`, starts with ASCII and Latin-1, and loads
-additional glyphs on demand. `UiTextWidth` ensures glyphs are loaded before measuring UI text.
+additional glyphs on demand. Printable ASCII is added to whatever list a project supplies, because a
+rebuild triggered by ordinary text would be a visible hitch; Latin-1 rides along because the ~35 ms
+cost is parsing the BDF rather than the glyph count. `UiTextWidth` ensures glyphs are loaded before measuring UI text.
 The raylib build enables its existing BDF loader with a compiler flag; vendored source is unchanged.
 The font is not embedded or copied into project output. Projects can set `UiTheme.fontPath`, request a
 different codepoint list, or pass a loaded `Font` whose lifetime they own.
+
+`EngineRun` sets the data root from `EngineConfig.engine_path`, or the executable's directory when
+that is null, walking up until the engine's own `core/` data is in reach — an executable in a build
+directory sits several levels below it. Shader, font and layout loads resolve through it; writes
+never redirect, since the caller is naming where the file should go.
 
 Ownership: shader tables own loaded shaders; the uniform registry copies names but borrows shaders. MB transfers buffers to raylib when uploaded. Actor borrows its model, clips and aim-joint list, and owns its pose state. Call `ActorUploadPose` immediately before drawing each instance when models are shared. Model loading remains raylib's responsibility; no custom formats or asset conversion are introduced.
 
