@@ -1,0 +1,4 @@
+entity "demo_counter" {
+  "name" "scene counter"
+  "period" "0.20"
+}

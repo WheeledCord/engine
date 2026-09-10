@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Fail the build if actual compiler dependencies of core escape its allowlist."""
+import argparse
+import pathlib
+import shlex
+import subprocess
+import sys
+
+root = pathlib.Path(__file__).resolve().parent.parent
+parser = argparse.ArgumentParser()
+parser.add_argument('--cc', default='cc')
+parser.add_argument('--raylib', required=True)
+parser.add_argument('--probe', type=pathlib.Path, help='Additional translation unit for checking the guard')
+args = parser.parse_args()
+raylib = pathlib.Path(args.raylib).resolve()
+allowed = [(root / 'core').resolve(), raylib, pathlib.Path('/usr/include'), pathlib.Path('/usr/lib'), pathlib.Path('/usr/local/include'), pathlib.Path('/usr/local/lib')]
+files = sorted((root / 'core').glob('*.c')) + sorted((root / 'core').glob('*.h'))
+if args.probe:
+    files.append(args.probe.resolve())
+for source in files:
+    result = subprocess.run(shlex.split(args.cc) + ['-std=c99', '-DGRAPHICS_API_OPENGL_21', '-I' + str(raylib), '-x', 'c', '-M', '-MT', 'core_dependency', str(source)], capture_output=True, text=True)
+    if result.returncode:
+        sys.stderr.write(result.stderr)
+        sys.exit(result.returncode)
+    dependencies = shlex.split(result.stdout.replace('\\\n', ' ').split(':', 1)[1])
+    for dependency in dependencies:
+        path = pathlib.Path(dependency).resolve()
+        if args.probe and path == args.probe.resolve():
+            continue
+        if not any(path == directory or directory in path.parents for directory in allowed):
+            sys.exit(f'Forbidden core dependency: {source.relative_to(root)} -> {path}')
+print('Core dependency boundary: PASS')
