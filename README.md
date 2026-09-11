@@ -24,6 +24,7 @@ and cached after that. If you cloned without `--recurse-submodules`, run
     make -f Makefile.core run           # core_test: skinned character, sampled depth
     make -f Makefile.core games         # two demo games
     make -f Makefile.core run-2d        # one of them
+    make -f Makefile.core run-authoring # scene-spawned mover, input actions, UI capture
     make -f Makefile.core smoke         # build everything and run the checks
 
 Binaries locate the engine's own files relative to themselves, so they can be run from any working
@@ -36,6 +37,18 @@ behaviour rather than pixels. The UI tool's suite drives itself with scripted mo
 clipboard input, and exports screenshots to `build/core/`.
 
 There is no test framework and no CI.
+
+## Writing a project
+
+`EngineApplicationDefault()` provides the application defaults; implement only the callbacks needed.
+The optional standard entry point calls a project-defined `EngineApplicationMain`. Core-only projects
+can use this directly. `GameplayApplication` additionally handles the world, class registration, scene
+loading, systems and cleanup. Entity callbacks receive their payload, input, timing and project context;
+field declarations provide keyvalue parsing before Spawn.
+
+See [the complete authoring example](projects/authoring_demo/README.md),
+[core application/input APIs](core/README.md#application-authoring), and
+[gameplay authoring and migration](gameplay/README.md).
 
 ## UI
 

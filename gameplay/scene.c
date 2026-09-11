@@ -119,8 +119,9 @@ static bool Expect(SceneReader *reader, const char *expected)
 
 bool GameplaySceneLoad(GameplayWorld *world, const char *path, bool replaceWorld)
 {
+    if (!world || !path) return false;
     char *text = CoreReadFile(path);
-    if (!world || !text)
+    if (!text)
         return false;
     if (replaceWorld)
         GameplayWorldClear(world);
@@ -147,16 +148,8 @@ bool GameplaySceneLoad(GameplayWorld *world, const char *path, bool replaceWorld
             ok = false;
             break;
         }
-        EntityHandle entity = EntitySpawn(world, classname);
-        if (entity.index == UINT32_MAX)
-        {
-            fprintf(stderr, "%s:%d: unknown classname or entity capacity reached: %s\n", path, reader.line,
-                    classname);
-            free(classname);
-            ok = false;
-            break;
-        }
-        free(classname);
+        EntityProperty *properties = NULL;
+        size_t count = 0;
         for (;;)
         {
             char *key = Token(&reader);
@@ -172,7 +165,8 @@ bool GameplaySceneLoad(GameplayWorld *world, const char *path, bool replaceWorld
                 break;
             }
             char *value = Token(&reader);
-            if (!value || !EntityKeyValue(world, entity, key, value))
+            EntityProperty *grown = value ? realloc(properties, (count + 1) * sizeof(*properties)) : NULL;
+            if (!grown)
             {
                 fprintf(stderr, "%s:%d: invalid key/value for %s\n", path, reader.line, key);
                 free(key);
@@ -180,9 +174,23 @@ bool GameplaySceneLoad(GameplayWorld *world, const char *path, bool replaceWorld
                 ok = false;
                 break;
             }
-            free(key);
-            free(value);
+            properties = grown;
+            properties[count++] = (EntityProperty){key, value};
         }
+        if (ok)
+        {
+            EntityHandle entity = EntitySpawnWith(world, classname, properties, count);
+            ok = EntityAlive(world, entity);
+            if (!ok) fprintf(stderr, "%s:%d: could not spawn %s (class, properties, Spawn or capacity)\n",
+                             path, reader.line, classname);
+        }
+        for (size_t i = 0; i < count; i++)
+        {
+            free((char *)properties[i].key);
+            free((char *)properties[i].value);
+        }
+        free(properties);
+        free(classname);
         if (!ok)
             break;
     }
@@ -231,6 +239,6 @@ bool GameplaySceneWrite(const GameplayWorld *world, const char *path)
                  fputc('\n', file) != EOF;
         ok = ok && fputs("}\n\n", file) != EOF;
     }
-    ok = ok && !fclose(file);
+    if (fclose(file)) ok = false;
     return ok;
 }
