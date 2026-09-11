@@ -87,6 +87,13 @@ bool UiSetTheme(UiContext *ui, UiTheme theme);
 void UiBeginFrame(UiContext *ui, const EngineInput *input, UiRect screen);
 void UiEndFrame(UiContext *ui);
 bool UiConsumesMouse(const UiContext *ui);
+/* Optional: interact once before simulation, then UiRender inside the drawing pass.
+   Commands copy text and retain buffer capacity between frames. UiEndFrame still required. */
+void UiBeginDeferredFrame(UiContext *ui, const EngineInput *input, UiRect screen);
+EngineInputCapture UiCapture(const UiContext *ui);
+bool UiRender(UiContext *ui);
+/* Draw-only custom content; user data/resources must live until UiRender. Uses the current clip. */
+void UiDrawCustom(UiContext *ui, UiRect rect, UiContentFn draw, void *user);
 
 UiRect UiRectInset(UiRect rect, int amount);
 void UiDrawFrame(UiContext *ui, UiRect rect);

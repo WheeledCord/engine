@@ -26,13 +26,7 @@ static int BorderWidth(UiRect rect, int requested)
     return requested < maximum ? requested : maximum;
 }
 
-static void Fill(UiRect rect, Color color)
-{
-    if (rect.width > 0 && rect.height > 0)
-        DrawRectangle(rect.x, rect.y, rect.width, rect.height, color);
-}
-
-static void DrawEdges(UiRect rect, int width, Color topLeft, Color bottomRight)
+static void DrawEdges(UiContext *ui, UiRect rect, int width, Color topLeft, Color bottomRight)
 {
     width = BorderWidth(rect, width);
     for (int i = 0; i < width; i++)
@@ -41,10 +35,10 @@ static void DrawEdges(UiRect rect, int width, Color topLeft, Color bottomRight)
         int h = rect.height - i * 2;
         if (w <= 0 || h <= 0)
             break;
-        Fill((UiRect){rect.x + i, rect.y + i, w, 1}, topLeft);
-        Fill((UiRect){rect.x + i, rect.y + i, 1, h}, topLeft);
-        Fill((UiRect){rect.x + i, rect.y + rect.height - 1 - i, w, 1}, bottomRight);
-        Fill((UiRect){rect.x + rect.width - 1 - i, rect.y + i, 1, h}, bottomRight);
+        UiFill(ui, (UiRect){rect.x + i, rect.y + i, w, 1}, topLeft);
+        UiFill(ui, (UiRect){rect.x + i, rect.y + i, 1, h}, topLeft);
+        UiFill(ui, (UiRect){rect.x + i, rect.y + rect.height - 1 - i, w, 1}, bottomRight);
+        UiFill(ui, (UiRect){rect.x + rect.width - 1 - i, rect.y + i, 1, h}, bottomRight);
     }
 }
 
@@ -259,6 +253,8 @@ void UiFree(UiContext *ui)
         free(ui->state->menuRects);
         free(ui->state->menuDrawRects);
         free(ui->state->menuSelections);
+        free(ui->state->commands);
+        free(ui->state->commandText);
         free(ui->state);
     }
     *ui = (UiContext){0};
@@ -295,6 +291,8 @@ void UiBeginFrame(UiContext *ui, const EngineInput *input, UiRect screen)
 {
     if (!ui || !ui->state || !input)
         return;
+    ui->state->deferred = false;
+    ui->state->keyboardConsumed = ui->state->focusedId != 0 || ui->state->menuRoot != NULL;
     ui->state->input = *input;
     ui->state->screen = screen;
     ui->state->frameDt = GetFrameTime();
@@ -309,7 +307,7 @@ void UiEndFrame(UiContext *ui)
         return;
     if (ui->state->clip.active)
     {
-        EndScissorMode();
+        if (!ui->state->deferred) EndScissorMode();
         ui->state->clip = (UiClipState){0};
     }
     if (!ui->state->input.mouseDown[MOUSE_BUTTON_LEFT])
@@ -339,19 +337,19 @@ void UiDrawFrame(UiContext *ui, UiRect rect)
 {
     if (!ui || !ui->state)
         return;
-    Fill(rect, ui->theme.face);
+    UiFill(ui, rect, ui->theme.face);
     int width = BorderWidth(rect, ui->theme.frameWidth);
     if (width <= 0)
         return;
-    Fill((UiRect){rect.x, rect.y, rect.width, width}, ui->theme.white);
-    Fill((UiRect){rect.x, rect.y, width, rect.height}, ui->theme.white);
-    Fill((UiRect){rect.x, rect.y + rect.height - 1, rect.width, 1}, ui->theme.black);
-    Fill((UiRect){rect.x + rect.width - 1, rect.y, 1, rect.height}, ui->theme.black);
+    UiFill(ui, (UiRect){rect.x, rect.y, rect.width, width}, ui->theme.white);
+    UiFill(ui, (UiRect){rect.x, rect.y, width, rect.height}, ui->theme.white);
+    UiFill(ui, (UiRect){rect.x, rect.y + rect.height - 1, rect.width, 1}, ui->theme.black);
+    UiFill(ui, (UiRect){rect.x + rect.width - 1, rect.y, 1, rect.height}, ui->theme.black);
     if (width > 1)
     {
-        Fill((UiRect){rect.x + 1, rect.y + rect.height - width, rect.width - 2, width - 1},
+        UiFill(ui, (UiRect){rect.x + 1, rect.y + rect.height - width, rect.width - 2, width - 1},
              ui->theme.darkGrey);
-        Fill((UiRect){rect.x + rect.width - width, rect.y + 1, width - 1, rect.height - 2},
+        UiFill(ui, (UiRect){rect.x + rect.width - width, rect.y + 1, width - 1, rect.height - 2},
              ui->theme.darkGrey);
     }
 }
@@ -360,16 +358,16 @@ void UiDrawIndent(UiContext *ui, UiRect rect)
 {
     if (!ui || !ui->state)
         return;
-    Fill(rect, ui->theme.face);
-    DrawEdges(rect, ui->theme.indentWidth, ui->theme.black, ui->theme.white);
+    UiFill(ui, rect, ui->theme.face);
+    DrawEdges(ui, rect, ui->theme.indentWidth, ui->theme.black, ui->theme.white);
 }
 
 void UiDrawOutset(UiContext *ui, UiRect rect)
 {
     if (!ui || !ui->state)
         return;
-    Fill(rect, ui->theme.face);
-    DrawEdges(rect, ui->theme.outsetWidth, ui->theme.white, ui->theme.black);
+    UiFill(ui, rect, ui->theme.face);
+    DrawEdges(ui, rect, ui->theme.outsetWidth, ui->theme.white, ui->theme.black);
 }
 
 void UiDrawTextRaw(UiContext *ui, int x, int y, const char *text, Color color)
@@ -377,6 +375,11 @@ void UiDrawTextRaw(UiContext *ui, int x, int y, const char *text, Color color)
     if (!ui || !ui->state || !text)
         return;
     EnsureTextGlyphs(ui, text);
+    if (ui->state->deferred)
+    {
+        UiQueueText(ui, x, y + ui->theme.textOffsetY, text, color);
+        return;
+    }
     DrawTextEx(ui->theme.font, text, (Vector2){(float)x, (float)(y + ui->theme.textOffsetY)},
                (float)ui->theme.fontSize,
                (float)ui->theme.textSpacing, color);
@@ -467,7 +470,7 @@ UiClipState UiPushClip(UiContext *ui, UiRect rect)
     if (previous.active)
         rect = UiIntersectRect(previous.rect, rect);
     ui->state->clip = (UiClipState){true, rect};
-    BeginScissorMode(rect.x, rect.y, rect.width, rect.height);
+    if (!ui->state->deferred) BeginScissorMode(rect.x, rect.y, rect.width, rect.height);
     return previous;
 }
 
@@ -475,9 +478,9 @@ void UiRestoreClip(UiContext *ui, UiClipState previous)
 {
     if (!ui || !ui->state)
         return;
-    EndScissorMode();
+    if (!ui->state->deferred) EndScissorMode();
     ui->state->clip = previous;
-    if (previous.active)
+    if (previous.active && !ui->state->deferred)
         BeginScissorMode(previous.rect.x, previous.rect.y, previous.rect.width, previous.rect.height);
 }
 
@@ -583,8 +586,8 @@ void UiDrawTitleBar(UiContext *ui, UiRect rect, const char *title)
 {
     if (!ui || !ui->state || rect.width <= 0 || rect.height <= 0)
         return;
-    DrawRectangle(rect.x, rect.y, rect.width, rect.height, ui->theme.darkGrey);
-    DrawRectangle(rect.x, rect.y + rect.height - 1, rect.width, 1, ui->theme.black);
+    UiFill(ui, (UiRect){rect.x, rect.y, rect.width, rect.height}, ui->theme.darkGrey);
+    UiFill(ui, (UiRect){rect.x, rect.y + rect.height - 1, rect.width, 1}, ui->theme.black);
     if (title)
         UiDrawShadowText(ui, rect.x + ui->theme.padding,
                          rect.y + (rect.height - ui->theme.fontSize) / 2,
@@ -626,7 +629,7 @@ bool UiSliderEx(UiContext *ui, UiRect rect, float *value, float minimum, float m
     }
     UiDrawIndent(ui, rect);
     if (well.width > 0 && well.height > 0)
-        DrawRectangle(well.x, well.y, well.width, well.height, RecessedFace(&ui->theme));
+        UiFill(ui, (UiRect){well.x, well.y, well.width, well.height}, RecessedFace(&ui->theme));
     float fraction = (*value - minimum) / (maximum - minimum);
     if (fraction < 0)
         fraction = 0;
@@ -664,7 +667,7 @@ bool UiCheckboxEx(UiContext *ui, UiRect rect, const char *label, bool *value, bo
     if (*value)
     {
         int inset = ui->theme.indentWidth + 3;
-        Fill(UiRectInset(box, inset), ui->theme.black);
+        UiFill(ui, UiRectInset(box, inset), ui->theme.black);
     }
     UiDrawTextRaw(ui, box.x + box.width + ui->theme.padding,
                   rect.y + (rect.height - ui->theme.fontSize) / 2, label, ui->theme.black);
@@ -775,6 +778,7 @@ bool UiTextField(UiContext *ui, UiRect rect, char *text, size_t capacity)
     if (!state->input.mouseDown[MOUSE_BUTTON_LEFT])
         state->selecting = false;
     bool focused = state->focusedId == id;
+    state->keyboardConsumed |= focused;
     if (focused && state->selecting && state->input.mouseDown[MOUSE_BUTTON_LEFT])
         state->caret = FieldIndexAt(ui, text,
                                    (int)state->input.mousePosition.x - content.x + state->scroll);
@@ -917,13 +921,11 @@ bool UiTextField(UiContext *ui, UiRect rect, char *text, size_t capacity)
         {
             int left = content.x + FieldPrefixWidth(ui, text, from) - state->scroll;
             int right = content.x + FieldPrefixWidth(ui, text, to) - state->scroll;
-            DrawRectangle(left, y + ui->theme.textOffsetY, right - left, ui->theme.fontSize,
-                          ui->theme.darkGrey);
+            UiFill(ui, (UiRect){left, y + ui->theme.textOffsetY, right - left, ui->theme.fontSize}, ui->theme.darkGrey);
         }
         UiDrawTextRaw(ui, content.x - state->scroll, y, text, ui->theme.black);
         if (((int)(GetTime() * 2.0) & 1) == 0)
-            DrawRectangle(content.x + caretX - state->scroll, y + ui->theme.textOffsetY, 1,
-                          ui->theme.fontSize, ui->theme.black);
+            UiFill(ui, (UiRect){content.x + caretX - state->scroll, y + ui->theme.textOffsetY, 1, ui->theme.fontSize}, ui->theme.black);
     }
     else
         UiDrawTextRaw(ui, content.x, y, text, ui->theme.black);
