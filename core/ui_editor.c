@@ -9,6 +9,14 @@
 #include <math.h>
 #include <string.h>
 
+static void UiOutline(UiContext *ui, UiRect r, Color color)
+{
+    UiFill(ui, (UiRect){r.x, r.y, r.width, 1}, color);
+    UiFill(ui, (UiRect){r.x, r.y + r.height - 1, r.width, 1}, color);
+    UiFill(ui, (UiRect){r.x, r.y, 1, r.height}, color);
+    UiFill(ui, (UiRect){r.x + r.width - 1, r.y, 1, r.height}, color);
+}
+
 static int MinInt(int a, int b) { return a < b ? a : b; }
 static int MaxInt(int a, int b) { return a > b ? a : b; }
 static int AbsInt(int a) { return a < 0 ? -a : a; }
@@ -361,8 +369,8 @@ void UiDrawRectSelection(UiContext *ui, UiRect rect)
         return;
     // Two outlines so the selection reads on both the light face and the dark workspace.
     UiRect outer = UiRectInset(rect, -2);
-    DrawRectangleLines(outer.x, outer.y, outer.width, outer.height, ui->theme.white);
-    DrawRectangleLines(rect.x - 1, rect.y - 1, rect.width + 2, rect.height + 2, ui->theme.black);
+    UiOutline(ui, (UiRect){outer.x, outer.y, outer.width, outer.height}, ui->theme.white);
+    UiOutline(ui, (UiRect){rect.x - 1, rect.y - 1, rect.width + 2, rect.height + 2}, ui->theme.black);
     int size = ui->theme.editorHandleSize;
     bool roomy = rect.width >= size * 3 && rect.height >= size * 3;
     static const UiHandle handles[] = {UI_HANDLE_TOP_LEFT,    UI_HANDLE_TOP,
@@ -374,9 +382,8 @@ void UiDrawRectSelection(UiContext *ui, UiRect rect)
         if (!roomy && handles[i] != UI_HANDLE_BOTTOM_RIGHT)
             continue;
         UiRect handle = HandleRect(size, rect, handles[i]);
-        DrawRectangle(handle.x, handle.y, handle.width, handle.height, ui->theme.white);
-        DrawRectangle(handle.x + 1, handle.y + 1, MaxInt(0, handle.width - 2),
-                      MaxInt(0, handle.height - 2), ui->theme.black);
+        UiFill(ui, (UiRect){handle.x, handle.y, handle.width, handle.height}, ui->theme.white);
+        UiFill(ui, (UiRect){handle.x + 1, handle.y + 1, MaxInt(0, handle.width - 2), MaxInt(0, handle.height - 2)}, ui->theme.black);
     }
 }
 
@@ -385,9 +392,7 @@ void UiDrawGuides(UiContext *ui, UiSnapResult guides, Color color)
     if (!ui)
         return;
     if (guides.vertical.active)
-        DrawRectangle(guides.vertical.position, guides.vertical.start, 1,
-                      MaxInt(1, guides.vertical.end - guides.vertical.start), color);
+        UiFill(ui, (UiRect){guides.vertical.position, guides.vertical.start, 1, MaxInt(1, guides.vertical.end - guides.vertical.start)}, color);
     if (guides.horizontal.active)
-        DrawRectangle(guides.horizontal.start, guides.horizontal.position,
-                      MaxInt(1, guides.horizontal.end - guides.horizontal.start), 1, color);
+        UiFill(ui, (UiRect){guides.horizontal.start, guides.horizontal.position, MaxInt(1, guides.horizontal.end - guides.horizontal.start), 1}, color);
 }

@@ -202,10 +202,10 @@ static void DrawArrow(UiContext *ui, UiRect item, Color color, int offset)
 {
     int x = item.x + item.width - ui->theme.padding - 4 + offset;
     int y = item.y + item.height / 2 - 3 + offset;
-    DrawRectangle(x, y, 1, 7, color);
-    DrawRectangle(x + 1, y + 1, 1, 5, color);
-    DrawRectangle(x + 2, y + 2, 1, 3, color);
-    DrawRectangle(x + 3, y + 3, 1, 1, color);
+    UiFill(ui, (UiRect){x, y, 1, 7}, color);
+    UiFill(ui, (UiRect){x + 1, y + 1, 1, 5}, color);
+    UiFill(ui, (UiRect){x + 2, y + 2, 1, 3}, color);
+    UiFill(ui, (UiRect){x + 3, y + 3, 1, 1}, color);
 }
 
 static bool ToggleSubmenu(UiContext *ui, size_t depth, int item)

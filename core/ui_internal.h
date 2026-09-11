@@ -20,6 +20,11 @@ typedef struct UiClipState
 
 struct UiState
 {
+    bool deferred, commandFailed, keyboardConsumed;
+    struct UiCommand *commands;
+    size_t commandCount, commandCapacity;
+    char *commandText;
+    size_t textCount, textCapacity;
     bool ownsFont;
     int *fontCodepoints; // Requested glyphs, including misses, so absent glyphs are tried only once.
     int fontGlyphCount;
@@ -48,6 +53,8 @@ struct UiState
     float frameDt;
 };
 
+void UiFill(UiContext *ui, UiRect rect, Color color);
+void UiQueueText(UiContext *ui, int x, int y, const char *text, Color color);
 bool UiPointInRect(Vector2 point, UiRect rect);
 UiRect UiIntersectRect(UiRect a, UiRect b);
 uint64_t UiPointerId(const void *pointer, uint64_t salt);

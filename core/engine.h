@@ -7,24 +7,7 @@
 #include "capabilities.h"
 #include "raylib.h"
 #include <stdbool.h>
-#define CORE_KEY_COUNT 512
-#define CORE_MOUSE_BUTTON_COUNT 8
-#define CORE_TEXT_INPUT_COUNT 32
-typedef struct EngineInput
-{
-    bool down[CORE_KEY_COUNT], pressed[CORE_KEY_COUNT], released[CORE_KEY_COUNT];
-    bool mouseDown[CORE_MOUSE_BUTTON_COUNT], mousePressed[CORE_MOUSE_BUTTON_COUNT],
-        mouseReleased[CORE_MOUSE_BUTTON_COUNT];
-    Vector2 mousePosition;
-    Vector2 mouseDelta;
-    float wheel;
-    int text[CORE_TEXT_INPUT_COUNT];
-    int textCount;
-} EngineInput;
-/* Merge one frame into pending input. Edges and deltas survive frames without Update. */
-void EngineInputAccumulate(EngineInput *pending, const EngineInput *frame);
-/* After the first Update: clear edges/deltas, preserve held state for further updates. */
-void EngineInputDrain(EngineInput *pending);
+#include "input.h"
 typedef struct EngineConfig
 {
     const char *title;
@@ -43,5 +26,23 @@ typedef struct EngineProject
     void (*Draw)(void *context, float alpha);                           /* inside BeginDrawing/EndDrawing */
     void (*Shutdown)(void *context); /* also called after partially failed Init */
 } EngineProject;
+struct UiContext;
+typedef struct EngineApplication
+{
+    EngineConfig config;
+    EngineProject callbacks;
+    void *context;
+    Color clearColor;
+    struct UiContext *ui; // Optional; a zero-initialised context gets the default theme.
+    void (*BuildUi)(void *context, struct UiContext *ui); // Once before updates; drawing is deferred.
+    EngineInputCapture (*CaptureInput)(void *context, const EngineInput *frame); // Extra project routing.
+} EngineApplication;
+
+EngineConfig EngineConfigDefault(void);
+EngineApplication EngineApplicationDefault(void);
+int EngineRunApplication(const EngineApplication *application);
+/* Define this only when linking the optional core/entry.c instead of your own main.
+   Context, UI and declaration arrays must outlive the returned descriptor. */
+EngineApplication EngineApplicationMain(int argc, char **argv);
 int EngineRun(const EngineConfig *config, const EngineProject *project, void *context);
 #endif
