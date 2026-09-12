@@ -2,11 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+// fsync and fileno are POSIX, outside strict C99.
+#define _POSIX_C_SOURCE 200809L
 #include "file.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #define CORE_ROOT_CAPACITY 512
 #define CORE_ROOT_SEARCH_DEPTH 6
@@ -124,4 +127,34 @@ char *CoreReadFile(const char *path)
 void CoreFreeFile(char *text)
 {
     free(text);
+}
+
+FILE *CoreAtomicBegin(CoreAtomicFile *atomic, const char *path)
+{
+    if (!atomic)
+        return NULL;
+    *atomic = (CoreAtomicFile){0};
+    if (!path || !*path ||
+        (size_t)snprintf(atomic->path, sizeof atomic->path, "%s", path) >= sizeof atomic->path ||
+        (size_t)snprintf(atomic->temporary, sizeof atomic->temporary, "%s.tmp", path) >=
+            sizeof atomic->temporary)
+        return NULL;
+    atomic->file = fopen(atomic->temporary, "wb");
+    return atomic->file;
+}
+
+bool CoreAtomicCommit(CoreAtomicFile *atomic, bool ok)
+{
+    if (!atomic || !atomic->file)
+        return false;
+    // Buffered bytes can still fail to write here, so every step has to be checked before the old
+    // file is given up. fsync makes the rename safe against a crash as well as a full disk.
+    ok = ok && !ferror(atomic->file) && fflush(atomic->file) == 0 && fsync(fileno(atomic->file)) == 0;
+    if (fclose(atomic->file) != 0)
+        ok = false;
+    atomic->file = NULL;
+    if (ok && rename(atomic->temporary, atomic->path) == 0)
+        return true;
+    remove(atomic->temporary);
+    return false;
 }

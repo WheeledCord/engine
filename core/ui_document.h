@@ -11,6 +11,7 @@
 
 #define UI_ELEMENT_LABEL_CAPACITY 64
 #define UI_DOCUMENT_TITLE_CAPACITY 64
+#define UI_ELEMENT_NAME_CAPACITY 32
 
 typedef enum UiElementType
 {
@@ -67,6 +68,9 @@ typedef struct UiElement
     int maxHeight; // 0: no limit
     UiFlow flow; // containers only
     UiTextAlignment textAlignment; // buttons and labels
+    int parent; // index of the containing indent or window, -1 for the surface
+    char name[UI_ELEMENT_NAME_CAPACITY]; // how game code finds it: letters, digits, _ . -
+    unsigned id; // stable while the program runs, so a press survives relabelling or relayout
 } UiElement;
 
 typedef struct UiDocument
@@ -83,6 +87,9 @@ typedef struct UiDocument
     int resolvedWidth;
     int resolvedHeight;
     bool resolvedValid;
+    int activated; // element whose widget clicked or changed in the last draw, -1 for none
+    int *work;     // scratch for the containment tree, rebuilt by each resolve and draw
+    size_t workCapacity;
 } UiDocument;
 
 // Releases any existing contents, then applies the surface description.
@@ -93,9 +100,24 @@ void UiDocumentSetSurface(UiDocument *document, int surfaceWidth, int surfaceHei
 void UiDocumentFree(UiDocument *document);
 bool UiDocumentCopy(UiDocument *destination, const UiDocument *source);
 
+// A new element goes into the innermost existing container that encloses it. After that its parent
+// only changes through UiDocumentSetParent: moving or resizing never reparents anything.
 UiElement *UiDocumentAdd(UiDocument *document, UiElementType type, UiRect rect, const char *label);
+// Refuses a parent that is not a container, or one that would make the element its own ancestor.
+bool UiDocumentSetParent(UiDocument *document, size_t index, int parent);
+bool UiDocumentIsAncestor(const UiDocument *document, int ancestor, size_t index);
+// Removes one element; its children move up to its parent.
 bool UiDocumentRemove(UiDocument *document, size_t index);
+// Removes an element and everything inside it. Returns how many elements went.
+size_t UiDocumentRemoveTree(UiDocument *document, size_t index);
+// Exchanges two positions in the drawing order; parent links follow the elements.
 bool UiDocumentSwap(UiDocument *document, size_t a, size_t b);
+UiElement *UiDocumentFind(UiDocument *document, const char *name);
+// The element that was clicked or changed during the last draw, or NULL.
+const UiElement *UiDocumentActivated(const UiDocument *document);
+// The smallest size a control of this type still shows its label at.
+void UiElementMinimumSize(const UiContext *ui, UiElementType type, const char *label, int *width,
+                          int *height);
 
 bool UiDocumentSave(const UiDocument *document, const char *path);
 bool UiDocumentLoad(UiDocument *document, const char *path);
@@ -110,15 +132,19 @@ UiRect UiDocumentContentRectSized(const UiContext *ui, const UiDocument *documen
 
 // The region a container hands to its contents: an indent's bezel, a window's frame and title bar.
 UiRect UiDocumentContainerContent(const UiContext *ui, const UiElement *element, UiRect rect);
-// Innermost placed container enclosing the element, or -1 when it sits on the surface itself.
+// The element's parent, or -1 when it sits on the surface itself.
 int UiDocumentContainerOf(const UiDocument *document, size_t index);
-// True when a placed indent already encloses this element, so it must not add a second one.
+// True when the element's parent is an indent, so it must not add a second one.
 bool UiDocumentInsideIndent(const UiDocument *document, size_t index);
+// Topmost element under a point in content coordinates, as drawn: children above their container,
+// and nothing counted where its container clips it. rects may be NULL for the authored layout.
+int UiDocumentElementAt(const UiContext *ui, UiDocument *document, const UiRect *rects,
+                        Vector2 point);
 
 // Places every element for a content size other than the authored one. Authored rects are never
 // modified; the returned array is owned by the document and valid until the next resolve.
 const UiRect *UiDocumentResolve(UiContext *ui, UiDocument *document, int width, int height);
-// The smallest content size that keeps every element at or above its minimum. Conservative.
+// The smallest content size that keeps every element at or above its minimum.
 void UiDocumentMinimumSize(const UiContext *ui, const UiDocument *document, int *width,
                            int *height);
 

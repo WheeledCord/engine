@@ -6,6 +6,7 @@
 #define CORE_FILE_H
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdio.h>
 /* Disk-only, NUL-terminated text. Caller releases with CoreFreeFile.
 
    CoreSetDataRoot names where the engine's own files (core/shaders, core/fonts) live, for programs
@@ -21,4 +22,17 @@ void CoreSetDataRoot(const char *path);
 const char *CoreResolvePath(const char *path, char *buf, size_t buflen);
 char *CoreReadFile(const char *path);
 void CoreFreeFile(char *text);
+
+/* Saving writes a temporary file beside the destination and renames it over the destination only
+   after every byte reached the disk, so a failed or interrupted save leaves the old file intact.
+   Write to the returned stream, then pass whether the writing succeeded to CoreAtomicCommit, which
+   closes the stream, checks it, and either replaces the destination or deletes the temporary. */
+typedef struct CoreAtomicFile
+{
+    FILE *file;
+    char path[1024];
+    char temporary[1024];
+} CoreAtomicFile;
+FILE *CoreAtomicBegin(CoreAtomicFile *atomic, const char *path);
+bool CoreAtomicCommit(CoreAtomicFile *atomic, bool ok);
 #endif
