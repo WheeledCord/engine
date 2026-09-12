@@ -9,14 +9,14 @@ RLSRC := $(BUILD)/raylib/src
 RLLIB := $(RLSRC)/libraylib.a
 CORE_SRC := $(filter-out core/entry.c,$(wildcard core/*.c))
 CORE_OBJ := $(patsubst core/%.c,$(BUILD)/%.o,$(CORE_SRC))
-GAMEPLAY_SRC := $(wildcard gameplay/*.c)
-GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC))
+GAMEPLAY_SRC := $(wildcard gameplay/*.c) $(wildcard gameplay/script/*.c)
+GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC)) $(BUILD)/vendor/s7.o
 CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
 RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
 RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
-.PHONY: run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
-all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/authoring_demo $(BUILD)/regression_test
+.PHONY: run-script run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
+all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/authoring_demo $(BUILD)/regression_test $(BUILD)/script_demo
 games: $(BUILD)/game3d_collector $(BUILD)/game2d_dodge
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
 # the export is of that revision, so a submodule update cannot leave stale sources behind.
@@ -39,7 +39,12 @@ $(BUILD)/libcore.a: $(CORE_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(CORE_OBJ)
 $(BUILD)/gameplay_%.o: gameplay/%.c $(RLSRC)/.exported | boundary
-	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $< -o $@
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -Ivendor/s7 -Ivendor/pawn/amx -MMD -MP -c $< -o $@
+# Vendored interpreters are other people's code: they build under their own warning settings.
+$(BUILD)/vendor/s7.o: vendor/s7/s7.c $(RLSRC)/.exported
+	@mkdir -p $(@D)
+	$(CC) -std=gnu11 -O2 -g -w -DWITH_SYSTEM_EXTRAS=0 -DWITH_C_LOADER=0 -c $< -o $@
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(GAMEPLAY_OBJ)
@@ -60,9 +65,12 @@ $(eval $(call core_project,game3d_collector,core))
 $(eval $(call core_project,game2d_dodge,core))
 $(eval $(call core_project,authoring_demo,gameplay,entry))
 $(eval $(call core_project,regression_test,gameplay))
+$(eval $(call core_project,script_demo,gameplay,entry))
 
 run-authoring: $(BUILD)/authoring_demo
 	./$(BUILD)/authoring_demo
+run-script: $(BUILD)/script_demo
+	./$(BUILD)/script_demo
 run: $(BUILD)/core_test
 	./$(BUILD)/core_test
 run-ui-tool: $(BUILD)/ui_tool

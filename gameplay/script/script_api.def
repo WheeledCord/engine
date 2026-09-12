@@ -1,0 +1,112 @@
+/* This Source Code Form is subject to the terms of the Mozilla Public
+ * License, v. 2.0. If a copy of the MPL was not distributed with this
+ * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
+
+/* The binding table: one row per call a script can make. Included several times, each time with
+   SCRIPT_BINDING defined to emit something different — the C prototypes, the table itself, and each
+   frontend's registration. Adding a call here gives it to every language and, later, to the node
+   editor; nothing else has to be touched.
+
+   SCRIPT_BINDING(identifier, script name, result type, help, (SCRIPT_NONE, argument types...))
+
+   The argument types come as one parenthesised list that always begins with SCRIPT_NONE, because
+   C99 cannot pass an empty one. The sentinel is dropped when the table is built. */
+
+// ---- talking to the engine
+SCRIPT_BINDING(log, "log", SCRIPT_NONE, "write a line to the engine log",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(rgba, "rgba", SCRIPT_INT, "pack a colour from r g b a, each 0 to 255",
+               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT, SCRIPT_INT, SCRIPT_INT))
+
+// ---- declaring entity classes, which is how a script becomes a thing in the world
+SCRIPT_BINDING(class_new, "class-new", SCRIPT_BOOL, "start declaring an entity class",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(class_field, "class-field", SCRIPT_BOOL,
+               "add a field to a class: class name, field name, and float vector2 bool or int",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_STRING, SCRIPT_STRING))
+SCRIPT_BINDING(class_on, "class-on", SCRIPT_BOOL,
+               "name the function for an event: class name, spawn think draw or destroy, function",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_STRING, SCRIPT_STRING))
+SCRIPT_BINDING(class_done, "class-done", SCRIPT_BOOL, "register the finished class with the world",
+               (SCRIPT_NONE, SCRIPT_STRING))
+
+// ---- entities
+SCRIPT_BINDING(self, "self", SCRIPT_ENTITY, "the entity whose callback is running", (SCRIPT_NONE))
+SCRIPT_BINDING(spawn, "spawn", SCRIPT_ENTITY, "spawn a class at a position",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2))
+SCRIPT_BINDING(destroy, "destroy", SCRIPT_BOOL, "destroy an entity", (SCRIPT_NONE, SCRIPT_ENTITY))
+SCRIPT_BINDING(alive, "alive?", SCRIPT_BOOL, "is this handle still an entity",
+               (SCRIPT_NONE, SCRIPT_ENTITY))
+SCRIPT_BINDING(classname, "classname", SCRIPT_STRING, "the class an entity was spawned from",
+               (SCRIPT_NONE, SCRIPT_ENTITY))
+SCRIPT_BINDING(think_next, "think-next", SCRIPT_NONE, "run think again on the next step",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(think_after, "think-after", SCRIPT_NONE, "run think again after so many seconds",
+               (SCRIPT_NONE, SCRIPT_FLOAT))
+
+// ---- an entity's own fields
+SCRIPT_BINDING(get_number, "get", SCRIPT_FLOAT, "read a number field of this entity",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(set_number, "set!", SCRIPT_NONE, "write a number field of this entity",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_FLOAT))
+SCRIPT_BINDING(get_vector, "get-vector", SCRIPT_VECTOR2, "read a vector field of this entity",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(set_vector, "set-vector!", SCRIPT_NONE, "write a vector field of this entity",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2))
+
+// ---- the transform every scripted entity carries
+SCRIPT_BINDING(position, "position", SCRIPT_VECTOR2, "where this entity is", (SCRIPT_NONE))
+SCRIPT_BINDING(set_position, "set-position!", SCRIPT_NONE, "put this entity somewhere",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(rotation, "rotation", SCRIPT_FLOAT, "which way this entity faces, in radians",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(rotate, "rotate!", SCRIPT_NONE, "turn by this many radians",
+               (SCRIPT_NONE, SCRIPT_FLOAT))
+SCRIPT_BINDING(move_world, "move-world!", SCRIPT_NONE, "move along the world axes",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(move_local, "move-local!", SCRIPT_NONE, "move along this entity's own axes",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(look_at, "look-at!", SCRIPT_BOOL, "face a point", (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(interpolated, "interpolated", SCRIPT_VECTOR2,
+               "where to draw this entity between steps", (SCRIPT_NONE))
+SCRIPT_BINDING(to_local, "to-local", SCRIPT_VECTOR2, "a point in this entity's own space",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(interpolated_rotation, "interpolated-rotation", SCRIPT_FLOAT,
+               "which way to draw this entity between steps", (SCRIPT_NONE))
+
+// ---- input
+SCRIPT_BINDING(input_vector, "input-vector", SCRIPT_VECTOR2,
+               "movement from WASD and the arrow keys, never longer than one", (SCRIPT_NONE))
+SCRIPT_BINDING(key_down, "key-down?", SCRIPT_BOOL, "is a key held", (SCRIPT_NONE, SCRIPT_INT))
+SCRIPT_BINDING(key_pressed, "key-pressed?", SCRIPT_BOOL, "was a key pressed this step",
+               (SCRIPT_NONE, SCRIPT_INT))
+SCRIPT_BINDING(key_code, "key", SCRIPT_INT, "the code for a key named w or left or space",
+               (SCRIPT_NONE, SCRIPT_STRING))
+
+// ---- time
+SCRIPT_BINDING(step, "dt", SCRIPT_FLOAT, "how long one simulation step is", (SCRIPT_NONE))
+SCRIPT_BINDING(now, "now", SCRIPT_FLOAT, "gameplay time in seconds", (SCRIPT_NONE))
+SCRIPT_BINDING(alpha, "alpha", SCRIPT_FLOAT, "how far between steps this frame is drawing",
+               (SCRIPT_NONE))
+
+// ---- drawing, for what a draw callback would reasonably do
+SCRIPT_BINDING(draw_rect, "draw-rect", SCRIPT_NONE, "a rectangle from centre, size and colour",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT))
+SCRIPT_BINDING(draw_rect_rotated, "draw-rect-rotated", SCRIPT_NONE,
+               "a rectangle from centre, size, radians and colour",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT))
+SCRIPT_BINDING(draw_circle, "draw-circle", SCRIPT_NONE, "a circle from centre, radius and colour",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT))
+SCRIPT_BINDING(draw_line, "draw-line", SCRIPT_NONE, "a line from one point to another, in a colour",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT))
+SCRIPT_BINDING(draw_triangle, "draw-triangle", SCRIPT_NONE, "a triangle from three points and a colour",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT))
+SCRIPT_BINDING(draw_text, "draw-text", SCRIPT_NONE, "text at a position, in a size and colour",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_INT))
+
+// ---- sound and scenes
+SCRIPT_BINDING(play_sound, "play-sound", SCRIPT_BOOL, "play a sound file once",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(load_scene, "load-scene", SCRIPT_BOOL,
+               "replace the world with a scene, once this callback has finished",
+               (SCRIPT_NONE, SCRIPT_STRING))

@@ -13,6 +13,7 @@
 #include "core/ui.h"
 #include "core/ui_document.h"
 #include "gameplay/runtime.h"
+#include "gameplay/script/script_s7.h"
 #include "gameplay/scene.h"
 #include "rlgl.h"
 #include <signal.h>
@@ -21,6 +22,7 @@
 #include <string.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <math.h>
 #include <time.h>
 
 static int failures, checks;
@@ -525,6 +527,49 @@ static void DeferredChecks(void)
     UnloadRenderTexture(deferred);
 }
 
+// ---- scripting: one table, and a language on top of it -----------------------------------------
+static void ScriptChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, ScriptEntitySize(), 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    Check(ScriptS7Open(&host), "the Scheme frontend registers the binding table");
+    bool declared = ScriptS7Eval(
+        "(begin"
+        " (define (t-spawn) (think-next))"
+        " (define (t-think) (move-world! (vec (* (get \"speed\") (dt)) 0)) (think-next))"
+        " (define-entity \"tester\" '((\"speed\" \"float\"))"
+        "   '((\"spawn\" \"t-spawn\") (\"think\" \"t-think\"))))",
+        NULL);
+    EntityProperty properties[] = {{"position", "10 20"}, {"speed", "100"}};
+    EntityHandle entity = EntitySpawnWith(&world, "tester", properties, 2);
+    ScriptEntity *body = EntityData(&world, entity);
+    bool placed = body && body->transform.translation.x == 10 && body->slots[0].as.number == 100;
+    GameplayWorldStep(&world); // one tick of 0.1s at 100 a second
+    Check(declared && placed && body && fabsf(body->transform.translation.x - 20) < 0.001f,
+          "a scripted class takes its fields from a scene and runs its own think");
+
+    char *answer = NULL;
+    bool refused = !ScriptS7Eval("(rotate! \"sideways\")", &answer);
+    free(answer);
+    answer = NULL;
+    bool arity = !ScriptS7Eval("(move-world!)", &answer);
+    free(answer);
+    Check(refused && arity, "the table checks a script's arguments instead of trusting them");
+
+    int count = 0;
+    const ScriptBinding *table = ScriptBindings(&count);
+    bool described = count > 20;
+    for (int i = 0; i < count && described; i++)
+        described = table[i].name && table[i].call && table[i].help &&
+                    table[i].argumentCount >= 0 && table[i].argumentCount <= 8;
+    Check(described, "every row of the table is complete enough for a frontend to register");
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
+}
+
 // ---- the runner: its own window, so it runs as a second pass -------------------------------------
 static int updates;
 static double engineStep, worldStep;
@@ -570,6 +615,7 @@ int main(int argc, char **argv)
     FileChecks();
     ConventionChecks();
     DeferredChecks();
+    ScriptChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();
