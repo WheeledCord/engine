@@ -44,6 +44,72 @@ static EntityContext Context(GameplayWorld *world, EntityHandle entity)
         .alpha = 1};
 }
 
+// ---- a class's own storage ---------------------------------------------------------------------
+static void StorageFree(EntityStorage *storage)
+{
+    free(storage->dense);
+    free(storage->sparse);
+    free(storage->freed);
+    *storage = (EntityStorage){0};
+}
+
+static bool StorageInit(EntityStorage *storage, size_t size, size_t alignment, size_t capacity)
+{
+    *storage = (EntityStorage){0};
+    // Whole multiples of the alignment, so every payload in the array starts where it must.
+    storage->stride = (size + alignment - 1) / alignment * alignment;
+    if (!storage->stride || capacity > SIZE_MAX / storage->stride)
+        return false;
+    storage->dense = calloc(capacity, storage->stride);
+    storage->sparse = malloc(capacity * sizeof(*storage->sparse));
+    storage->freed = malloc(capacity * sizeof(*storage->freed));
+    if (!storage->dense || !storage->sparse || !storage->freed)
+    {
+        StorageFree(storage);
+        return false;
+    }
+    for (size_t i = 0; i < capacity; i++)
+        storage->sparse[i] = ENTITY_NO_PLACE;
+    storage->capacity = capacity;
+    return true;
+}
+
+static void *StorageAcquire(EntityStorage *storage, uint32_t slot)
+{
+    if (storage->sparse[slot] != ENTITY_NO_PLACE)
+        return NULL;
+    uint32_t place;
+    if (storage->freedCount)
+        place = storage->freed[--storage->freedCount];
+    else if (storage->used < storage->capacity)
+        place = (uint32_t)storage->used++;
+    else
+        return NULL;
+    storage->sparse[slot] = place;
+    unsigned char *data = storage->dense + (size_t)place * storage->stride;
+    memset(data, 0, storage->stride);
+    return data;
+}
+
+static void StorageRelease(EntityStorage *storage, uint32_t slot)
+{
+    uint32_t place = storage->sparse[slot];
+    if (place == ENTITY_NO_PLACE)
+        return;
+    memset(storage->dense + (size_t)place * storage->stride, 0, storage->stride);
+    storage->sparse[slot] = ENTITY_NO_PLACE;
+    storage->freed[storage->freedCount++] = place;
+}
+
+// Which storage belongs to an entity's class: the classes never move once one has been spawned.
+static EntityStorage *StorageOf(const GameplayWorld *world, const GameplayEntity *slot)
+{
+    if (!slot || !slot->type)
+        return NULL;
+    size_t index = (size_t)(slot->type - world->classes);
+    return index < world->classCount ? &world->storages[index] : NULL;
+}
+
 static void FreeKeyValues(GameplayEntity *entity)
 {
     for (size_t i = 0; i < entity->keyValueCount; i++)
@@ -60,26 +126,16 @@ bool GameplayWorldInit(GameplayWorld *world, GameplayWorldConfig config)
 {
     if (!world) return false;
     *world = (GameplayWorld){0};
-    if (!config.maxEntities || config.maxEntities > UINT32_MAX || !config.maxEntitySize || !isfinite(config.tickInterval) ||
-        config.tickInterval <= 0)
-        return false;
-    // C99 alignment for ordinary scalar/pointer/vector payloads, including odd-sized structs.
-    union Alignment { long double number; void *pointer; void (*function)(void); };
-    size_t alignment = sizeof(union Alignment);
-    if (config.maxEntitySize > SIZE_MAX - alignment + 1) return false;
-    config.maxEntitySize = (config.maxEntitySize + alignment - 1) / alignment * alignment;
-    if (config.maxEntities > SIZE_MAX / config.maxEntitySize ||
-        config.maxEntities > SIZE_MAX / sizeof(GameplayEntity))
+    if (!config.maxEntities || config.maxEntities > UINT32_MAX || !isfinite(config.tickInterval) ||
+        config.tickInterval <= 0 || config.maxEntities > SIZE_MAX / sizeof(GameplayEntity))
         return false;
     world->entities = calloc(config.maxEntities, sizeof(*world->entities));
-    world->storage = calloc(config.maxEntities, config.maxEntitySize);
-    if (!world->entities || !world->storage)
+    if (!world->entities)
     {
         GameplayWorldFree(world);
         return false;
     }
     world->maxEntities = config.maxEntities;
-    world->maxEntitySize = config.maxEntitySize;
     world->tickInterval = config.tickInterval;
     for (size_t i = 0; i < world->maxEntities; i++)
         world->entities[i].generation = 1;
@@ -102,18 +158,63 @@ void GameplayWorldFree(GameplayWorld *world)
         return;
     GameplayWorldClear(world);
     for (size_t i = 0; i < world->classCount; i++)
+    {
         free((char *)world->classes[i].classname);
+        StorageFree(&world->storages[i]);
+    }
+    free(world->storages);
     free(world->classes);
-    free(world->storage);
     free(world->entities);
     *world = (GameplayWorld){0};
 }
 
+// A class that cannot describe its own payload is refused here, where the reason can be said out
+// loud, rather than being found later as one entity writing over another.
+static bool ClassDescribesItself(const EntityClass *type)
+{
+    size_t alignment = type->alignment ? type->alignment : ENTITY_ALIGNMENT_MAX;
+    if (!type->size)
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: payload size must not be zero", type->classname);
+        return false;
+    }
+    if (alignment & (alignment - 1))
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: alignment %zu is not a power of two", type->classname,
+                 alignment);
+        return false;
+    }
+    if (alignment > ENTITY_ALIGNMENT_MAX)
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: alignment %zu is stricter than anything needs (%zu)",
+                 type->classname, alignment, (size_t)ENTITY_ALIGNMENT_MAX);
+        return false;
+    }
+    if (type->alignment && type->size % type->alignment)
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: size %zu is not a whole number of its alignment %zu",
+                 type->classname, type->size, type->alignment);
+        return false;
+    }
+    if (!EntityFieldsValid(type->fields, type->fieldCount, type->size))
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: a field is duplicated, mistyped, or outside the payload",
+                 type->classname);
+        return false;
+    }
+    return true;
+}
+
 bool EntityRegister(GameplayWorld *world, EntityClass type)
 {
-    if (!world || !world->storage || world->registrySealed || !type.classname || !type.classname[0] || !type.size || type.size > world->maxEntitySize ||
-        EntityClassFind(world, type.classname) ||
-        !EntityFieldsValid(type.fields, type.fieldCount, type.size))
+    if (!world || !world->entities || world->registrySealed || !type.classname || !type.classname[0])
+        return false;
+    if (EntityClassFind(world, type.classname))
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: already registered", type.classname);
+        return false;
+    }
+    if (!ClassDescribesItself(&type))
         return false;
     if (world->classCount == world->classCapacity)
     {
@@ -122,11 +223,24 @@ bool EntityRegister(GameplayWorld *world, EntityClass type)
         if (!classes)
             return false;
         world->classes = classes;
+        EntityStorage *storages = realloc(world->storages, capacity * sizeof(*storages));
+        if (!storages)
+            return false;
+        world->storages = storages;
         world->classCapacity = capacity;
     }
     char *name = Duplicate(type.classname);
     if (!name)
         return false;
+    // The class brings its own size, so its entities live in storage of exactly that shape.
+    if (!StorageInit(&world->storages[world->classCount], type.size,
+                     type.alignment ? type.alignment : ENTITY_ALIGNMENT_MAX, world->maxEntities))
+    {
+        TraceLog(LOG_ERROR, "Entity class %s: no room for %zu entities of %zu bytes", type.classname,
+                 world->maxEntities, type.size);
+        free(name);
+        return false;
+    }
     type.classname = name;
     world->classes[world->classCount++] = type;
     return true;
@@ -170,8 +284,13 @@ EntityHandle EntitySpawnWith(GameplayWorld *world, const char *classname,
         slot->type = type;
         slot->scheduledThinkTick = UINT64_MAX;
         slot->lastThinkTick = world->tickCount;
-        void *data = world->storage + i * world->maxEntitySize;
-        memset(data, 0, world->maxEntitySize);
+        void *data = StorageAcquire(&world->storages[(size_t)(type - world->classes)], (uint32_t)i);
+        if (!data)
+        {
+            slot->alive = false;
+            slot->type = NULL;
+            return ENTITY_NULL;
+        }
         if (type->defaults) memcpy(data, type->defaults, type->size);
         EntityHandle entity = {(uint32_t)i, slot->generation};
         for (size_t kv = 0; kv < count; kv++)
@@ -208,12 +327,15 @@ bool EntityDestroy(GameplayWorld *world, EntityHandle entity)
     slot->started = false;
     slot->destroying = false;
     slot->alive = false;
-    slot->type = NULL;
     slot->scheduledThinkTick = UINT64_MAX;
     slot->generation++;
     if (!slot->generation)
         slot->generation = 1;
-    memset(world->storage + entity.index * world->maxEntitySize, 0, world->maxEntitySize);
+    // The payload goes back to its own class's storage, which is found through the type.
+    EntityStorage *storage = StorageOf(world, slot);
+    if (storage)
+        StorageRelease(storage, entity.index);
+    slot->type = NULL;
     return true;
 }
 
@@ -224,12 +346,16 @@ bool EntityAlive(const GameplayWorld *world, EntityHandle entity)
 
 void *EntityData(GameplayWorld *world, EntityHandle entity)
 {
-    return Lookup(world, entity) ? world->storage + entity.index * world->maxEntitySize : NULL;
+    GameplayEntity *slot = Lookup(world, entity);
+    EntityStorage *storage = StorageOf(world, slot);
+    if (!storage || storage->sparse[entity.index] == ENTITY_NO_PLACE)
+        return NULL;
+    return storage->dense + (size_t)storage->sparse[entity.index] * storage->stride;
 }
 
 const void *EntityDataConst(const GameplayWorld *world, EntityHandle entity)
 {
-    return LookupConst(world, entity) ? world->storage + entity.index * world->maxEntitySize : NULL;
+    return EntityData((GameplayWorld *)world, entity);
 }
 
 const char *EntityClassname(const GameplayWorld *world, EntityHandle entity)

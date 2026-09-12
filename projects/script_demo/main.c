@@ -63,7 +63,6 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
     static GameplayRuntime runtime;
     GameplayProject project = GameplayProjectDefault();
     project.config.title = pawn ? "Scripted demo (Pawn)" : "Scripted demo (Scheme)";
-    project.entitySize = ScriptEntitySize(); // classes arrive from the script, not a table
     project.scene = "projects/script_demo/start.scene";
     project.Init = Init;
     project.Update = Update;

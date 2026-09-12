@@ -425,7 +425,7 @@ static void FileChecks(void)
     UiDocumentFree(&d);
 
     GameplayWorld world = {0};
-    GameplayWorldInit(&world, (GameplayWorldConfig){8, 16, 0.1});
+    GameplayWorldInit(&world, (GameplayWorldConfig){8, 0.1});
     EntityRegister(&world, (EntityClass){.classname = "thing", .size = 16, .KeyValue = KeyValue});
     snprintf(path, sizeof path, "%s", Scratch("regression_unterminated.scene"));
     f = fopen(path, "w");
@@ -532,7 +532,7 @@ static void DeferredChecks(void)
 static void ScriptChecks(void)
 {
     GameplayWorld world = {0};
-    GameplayWorldInit(&world, (GameplayWorldConfig){16, ScriptEntitySize(), 0.1});
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
     ScriptHost host;
     ScriptHostInit(&host, &world);
     Check(ScriptS7Open(&host), "the Scheme frontend registers the binding table");
@@ -575,7 +575,7 @@ static void ScriptChecks(void)
     ScriptPawnName("move-world!", name, sizeof name);
     bool spelled = !strcmp(name, "move_world");
     GameplayWorld pawnWorld = {0};
-    GameplayWorldInit(&pawnWorld, (GameplayWorldConfig){16, ScriptEntitySize(), 0.1});
+    GameplayWorldInit(&pawnWorld, (GameplayWorldConfig){16, 0.1});
     ScriptHost pawnHost;
     ScriptHostInit(&pawnHost, &pawnWorld);
     bool opened = ScriptPawnOpen(&pawnHost, "projects/regression_test/tester.amx");
@@ -589,6 +589,79 @@ static void ScriptChecks(void)
     ScriptPawnClose();
     ScriptHostFree(&pawnHost);
     GameplayWorldFree(&pawnWorld);
+}
+
+// ---- per-class storage: no shared block to run over ---------------------------------------------
+typedef struct Tiny
+{
+    int marker;
+} Tiny;
+
+static void StorageChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    ScriptS7Open(&host);
+
+    // Registered first and tiny: this is what used to decide the stride for everybody.
+    EntityRegister(&world, (EntityClass){.classname = "tiny",
+                                         .size = sizeof(Tiny),
+                                         .alignment = ENTITY_ALIGNMENT_OF(Tiny)});
+    // A scripted class with every field a declaration allows, twenty times the size of the other.
+    bool declared = ScriptS7Eval(
+        "(define-entity \"big\""
+        " '((\"a\" \"float\") (\"b\" \"float\") (\"c\" \"float\") (\"d\" \"float\")"
+        "   (\"e\" \"float\") (\"f\" \"float\") (\"g\" \"float\") (\"h\" \"float\"))"
+        " '())",
+        NULL);
+
+    EntityHandle before = EntitySpawn(&world, "tiny");
+    Tiny *first = EntityData(&world, before);
+    if (first)
+        first->marker = 0x5a5a5a;
+    EntityProperty properties[] = {{"a", "1"}, {"b", "2"}, {"c", "3"}, {"d", "4"},
+                                   {"e", "5"}, {"f", "6"}, {"g", "7"}, {"h", "8"}};
+    EntityHandle big = EntitySpawnWith(&world, "big", properties, 8);
+    EntityHandle after = EntitySpawn(&world, "tiny");
+    Tiny *second = EntityData(&world, after);
+    if (second)
+        second->marker = 0xa5a5a5;
+
+    ScriptEntity *payload = EntityData(&world, big);
+    bool whole = declared && payload && first && second;
+    for (int i = 0; i < 8 && whole; i++)
+        whole = payload->slots[i].as.number == (float)(i + 1);
+    Check(whole && first->marker == 0x5a5a5a && second->marker == 0xa5a5a5 &&
+              sizeof(ScriptEntity) > sizeof(Tiny) * 8,
+          "a class far larger than its neighbours keeps every field, and touches nobody else's");
+
+    // Spawning from C and from the REPL are the same path, so both agree about handles.
+    char expression[64];
+    snprintf(expression, sizeof expression, "(alive? %d)", ScriptHostIdOf(big));
+    char *answer = NULL;
+    ScriptS7Eval(expression, &answer);
+    bool sees = answer && !strcmp(answer, "#t");
+    free(answer);
+    answer = NULL;
+    EntityDestroy(&world, big);
+    ScriptS7Eval(expression, &answer);
+    bool gone = answer && !strcmp(answer, "#f");
+    free(answer);
+    Check(sees && gone && !EntityAlive(&world, big),
+          "a handle means the same thing to C and to a script, before and after the entity goes");
+
+    // A class that cannot describe its own payload is refused, loudly, at registration.
+    bool refused = !EntityRegister(&world, (EntityClass){.classname = "no-size", .size = 0}) &&
+                   !EntityRegister(&world, (EntityClass){.classname = "odd-alignment",
+                                                         .size = 16, .alignment = 3}) &&
+                   !EntityRegister(&world, (EntityClass){.classname = "ragged-size",
+                                                         .size = 10, .alignment = 8});
+    Check(refused, "a class whose size and alignment disagree cannot be registered");
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
 }
 
 // ---- the runner: its own window, so it runs as a second pass -------------------------------------
@@ -637,6 +710,7 @@ int main(int argc, char **argv)
     ConventionChecks();
     DeferredChecks();
     ScriptChecks();
+    StorageChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

@@ -5,6 +5,7 @@
 #define GAMEPLAY_ENTITY_H
 #include "core/engine.h"
 #include "fields.h"
+#include <stddef.h>
 #include <stdint.h>
 
 typedef struct GameplayWorld GameplayWorld;
@@ -29,10 +30,18 @@ typedef void (*EntityThinkFn)(EntityContext *entity);
 typedef void (*EntityDrawFn)(EntityContext *entity);
 typedef void (*EntityDestroyFn)(EntityContext *entity);
 
+/* C99 has no alignof; this is the usual stand-in, and what a class declares about its payload. */
+#define ENTITY_ALIGNMENT_OF(type) offsetof(struct { char first; type second; }, second)
+// The strictest alignment an ordinary payload can need: scalars, pointers and vectors.
+#define ENTITY_ALIGNMENT_MAX (sizeof(union { long double number; void *pointer; void (*call)(void); }))
+
 typedef struct EntityClass
 {
     const char *classname;
     size_t size;
+    /* What the payload needs, from ENTITY_ALIGNMENT_OF. Zero asks for the strictest alignment the
+       platform has. Anything else must be a power of two that size is a whole number of. */
+    size_t alignment;
     const void *defaults;      // Optional payload-sized value copied before properties; borrowed.
     const EntityField *fields; // Borrowed immutable declarations, alive as long as the world.
     size_t fieldCount;
@@ -54,12 +63,25 @@ typedef struct GameplayEntity
     EntitySceneKeyValue *keyValues;
 } GameplayEntity;
 
+/* Each class keeps its own entities' payloads, so no class can reach another's. sparse maps an
+   entity's slot to its place in dense; a freed place is kept for the next entity of that class
+   rather than being closed up, because compacting would move a payload a running callback is
+   holding a pointer to. */
+#define ENTITY_NO_PLACE UINT32_MAX
+typedef struct EntityStorage
+{
+    unsigned char *dense;
+    uint32_t *sparse; // one per entity slot
+    uint32_t *freed;  // places to hand out again before taking a new one
+    size_t stride, used, freedCount, capacity;
+} EntityStorage;
+
 struct GameplayWorld
 {
     GameplayEntity *entities;
-    unsigned char *storage;
     EntityClass *classes;
-    size_t maxEntities, maxEntitySize, classCount, classCapacity;
+    EntityStorage *storages; // one for each class, in step with classes
+    size_t maxEntities, classCount, classCapacity;
     uint64_t tickCount;
     double tickInterval;
     void *context;
@@ -69,7 +91,8 @@ struct GameplayWorld
 
 typedef struct GameplayWorldConfig
 {
-    size_t maxEntities, maxEntitySize;
+    // How many entities can exist at once. A class brings its own payload size when it registers.
+    size_t maxEntities;
     double tickInterval;
 } GameplayWorldConfig;
 

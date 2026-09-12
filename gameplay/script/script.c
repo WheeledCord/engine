@@ -146,6 +146,8 @@ bool ScriptClassRegister(ScriptHost *host, ScriptClass *type)
     type->defaults.previous = type->defaults.transform;
     EntityClass declaration = {.classname = type->name,
                                .size = sizeof(ScriptEntity),
+                               // A scripted class carries its own shape like any other.
+                               .alignment = ENTITY_ALIGNMENT_OF(ScriptEntity),
                                .defaults = &type->defaults,
                                .fields = type->fields,
                                .fieldCount = type->fieldCount,

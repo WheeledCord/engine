@@ -114,7 +114,7 @@ static void AuthoringChecks(Test *test)
     EntityClass type = {.classname = "probe", .size = sizeof(Probe), .defaults = &defaults,
         .fields = fields, .fieldCount = 2, .Spawn = ProbeSpawn, .Destroy = ProbeDestroy, .Think = ProbeThink};
     GameplayWorld world = {0};
-    bool ok = GameplayWorldInit(&world, (GameplayWorldConfig){8, sizeof(Probe), 0.1}) &&
+    bool ok = GameplayWorldInit(&world, (GameplayWorldConfig){8, 0.1}) &&
               EntityRegister(&world, type);
     Check(test, ok, "authoring world setup");
     if (!ok) { GameplayWorldFree(&world); return; }
@@ -227,7 +227,7 @@ int main(void)
     Test test = {0};
     GameplayWorld world = {0};
     GameplaySystems systems = {0};
-    bool started = GameplayWorldInit(&world, (GameplayWorldConfig){8, sizeof(Counter), 0.1}) &&
+    bool started = GameplayWorldInit(&world, (GameplayWorldConfig){8, 0.1}) &&
                    EntityRegister(&world, (EntityClass){.classname = "demo_counter", .size = sizeof(Counter),
                        .defaults = &counterDefaults, .fields = counterFields,
                        .fieldCount = sizeof counterFields / sizeof counterFields[0], .Spawn = Spawn, .Think = Think}) &&
