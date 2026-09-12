@@ -25,6 +25,8 @@ and cached after that. If you cloned without `--recurse-submodules`, run
     make -f Makefile.core games         # two demo games
     make -f Makefile.core run-2d        # one of them
     make -f Makefile.core run-authoring # scene-spawned mover, input actions, UI capture
+    make -f Makefile.core run-script    # the same mover, written in Scheme, with a live REPL
+    make -f Makefile.core run-script-pawn # and again in Pawn, over the same bindings
     make -f Makefile.core smoke         # build everything and run the checks
 
 Binaries locate the engine's own files relative to themselves, so they can be run from any working
@@ -51,6 +53,14 @@ field declarations provide keyvalue parsing before Spawn.
 See [the complete authoring example](projects/authoring_demo/README.md),
 [core application/input APIs](core/README.md#application-authoring), and
 [gameplay authoring and migration](gameplay/README.md).
+
+## Scripting
+
+Scheme and Pawn, over one binding table. The script-facing API is described once as data, and each
+language is a loop over that table rather than a set of hand-written bindings, so a call is bound
+once however many languages read it. `gameplay/script/README.md` explains the arrangement;
+`projects/script_demo` is the authoring demo's entity written in each language, with no C left that
+knows what a mover is.
 
 ## UI
 
