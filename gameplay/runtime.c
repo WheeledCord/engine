@@ -16,7 +16,7 @@ static bool Init(void *context)
         TraceLog(LOG_ERROR, "Gameplay: supply a class table and a positive fixed_dt");
         return false;
     }
-    size_t size = 1;
+    size_t size = p->entitySize > 0 ? p->entitySize : 1;
     for (size_t i = 0; i < p->classCount; i++)
         if (p->classes[i].size > size)
             size = p->classes[i].size;
