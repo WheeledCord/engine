@@ -13,6 +13,7 @@
 #include "core/ui.h"
 #include "core/ui_document.h"
 #include "gameplay/runtime.h"
+#include "gameplay/script/script_pawn.h"
 #include "gameplay/script/script_s7.h"
 #include "gameplay/scene.h"
 #include "rlgl.h"
@@ -568,6 +569,26 @@ static void ScriptChecks(void)
     ScriptS7Close();
     ScriptHostFree(&host);
     GameplayWorldFree(&world);
+
+    // The other frontend, over the same table: the same entity, written in Pawn.
+    char name[32];
+    ScriptPawnName("move-world!", name, sizeof name);
+    bool spelled = !strcmp(name, "move_world");
+    GameplayWorld pawnWorld = {0};
+    GameplayWorldInit(&pawnWorld, (GameplayWorldConfig){16, ScriptEntitySize(), 0.1});
+    ScriptHost pawnHost;
+    ScriptHostInit(&pawnHost, &pawnWorld);
+    bool opened = ScriptPawnOpen(&pawnHost, "projects/regression_test/tester.amx");
+    EntityProperty pawnProperties[] = {{"position", "10 20"}, {"speed", "100"}};
+    EntityHandle pawnEntity = EntitySpawnWith(&pawnWorld, "tester-pawn", pawnProperties, 2);
+    ScriptEntity *pawnBody = EntityData(&pawnWorld, pawnEntity);
+    GameplayWorldStep(&pawnWorld);
+    Check(spelled && opened && pawnBody && pawnBody->slots[0].as.number == 100 &&
+              fabsf(pawnBody->transform.translation.x - 20) < 0.001f,
+          "the same entity in Pawn runs against the same table, with no second set of bindings");
+    ScriptPawnClose();
+    ScriptHostFree(&pawnHost);
+    GameplayWorldFree(&pawnWorld);
 }
 
 // ---- the runner: its own window, so it runs as a second pass -------------------------------------

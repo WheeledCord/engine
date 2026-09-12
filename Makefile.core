@@ -10,13 +10,15 @@ RLLIB := $(RLSRC)/libraylib.a
 CORE_SRC := $(filter-out core/entry.c,$(wildcard core/*.c))
 CORE_OBJ := $(patsubst core/%.c,$(BUILD)/%.o,$(CORE_SRC))
 GAMEPLAY_SRC := $(wildcard gameplay/*.c) $(wildcard gameplay/script/*.c)
-GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC)) $(BUILD)/vendor/s7.o
+GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC)) $(BUILD)/vendor/s7.o \
+	$(BUILD)/vendor/amx.o $(BUILD)/vendor/amxaux.o $(BUILD)/vendor/amxfloat.o $(PAWN_VM_EXTRA)
 CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
 RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
 RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
-.PHONY: run-script run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
-all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/authoring_demo $(BUILD)/regression_test $(BUILD)/script_demo
+.PHONY: run-script run-script-pawn run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
+all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/authoring_demo $(BUILD)/regression_test \
+	$(BUILD)/script_demo projects/script_demo/mover.amx projects/regression_test/tester.amx
 games: $(BUILD)/game3d_collector $(BUILD)/game2d_dodge
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
 # the export is of that revision, so a submodule update cannot leave stale sources behind.
@@ -40,11 +42,47 @@ $(BUILD)/libcore.a: $(CORE_OBJ) Makefile.core
 	$(AR) rcs $@ $(CORE_OBJ)
 $(BUILD)/gameplay_%.o: gameplay/%.c $(RLSRC)/.exported | boundary
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -I. -I$(RLSRC) -Ivendor/s7 -Ivendor/pawn/amx -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -Ivendor/s7 -Ivendor/pawn/amx -Ivendor/pawn/linux -DPAWN_CELL_SIZE=32 -MMD -MP -c $< -o $@
 # Vendored interpreters are other people's code: they build under their own warning settings.
 $(BUILD)/vendor/s7.o: vendor/s7/s7.c $(RLSRC)/.exported
 	@mkdir -p $(@D)
 	$(CC) -std=gnu11 -O2 -g -w -DWITH_SYSTEM_EXTRAS=0 -DWITH_C_LOADER=0 -c $< -o $@
+# Pawn's assembly core is 32-bit x86 only; everywhere else runs its portable C VM. Override with
+# PAWN_CORE=asm on a 32-bit build, which is rejected outright on anything the assembly cannot serve.
+PAWN_CORE ?= $(if $(filter i%86,$(shell uname -m)),asm,c)
+ifeq ($(PAWN_CORE),asm)
+  ifeq ($(filter i%86,$(shell uname -m)),)
+    $(error PAWN_CORE=asm needs a 32-bit x86 target; this is $(shell uname -m))
+  endif
+  PAWN_VM_FLAGS := -DAMX_ASM
+  PAWN_VM_EXTRA := $(BUILD)/vendor/amxexec.o
+else
+  PAWN_VM_FLAGS :=
+  PAWN_VM_EXTRA :=
+endif
+$(BUILD)/vendor/amx%.o: vendor/pawn/amx/amx%.c $(RLSRC)/.exported
+	@mkdir -p $(@D)
+	$(CC) -std=gnu99 -O2 -g -w -DPAWN_CELL_SIZE=32 $(PAWN_VM_FLAGS) -Ivendor/pawn/amx -Ivendor/pawn/linux -c $< -o $@
+$(BUILD)/vendor/amx.o: vendor/pawn/amx/amx.c $(RLSRC)/.exported
+	@mkdir -p $(@D)
+	$(CC) -std=gnu99 -O2 -g -w -DPAWN_CELL_SIZE=32 $(PAWN_VM_FLAGS) -Ivendor/pawn/amx -Ivendor/pawn/linux -c $< -o $@
+# The Pawn compiler, built as a tool of the build rather than something to install.
+PAWNCC_SRC := $(wildcard vendor/pawn/compiler/sc[1-7].c) vendor/pawn/compiler/scexpand.c \
+	vendor/pawn/compiler/sci18n.c vendor/pawn/compiler/sclist.c vendor/pawn/compiler/scmemfil.c \
+	vendor/pawn/compiler/scstate.c vendor/pawn/compiler/scvars.c vendor/pawn/compiler/lstring.c \
+	vendor/pawn/compiler/memfile.c vendor/pawn/amx/keeloq.c vendor/pawn/linux/binreloc.c
+$(BUILD)/pawncc: $(PAWNCC_SRC)
+	@mkdir -p $(@D)
+	$(CC) -std=gnu99 -O2 -w -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration \
+		-Wno-error=int-conversion -DLINUX -DENABLE_BINRELOC -DHAVE_STDINT_H \
+		-Ivendor/pawn/compiler -Ivendor/pawn/amx -Ivendor/pawn/linux $^ -o $@ -lm
+# A Pawn script is compiled against declarations written from the binding table, so the two cannot
+# fall out of step.
+$(BUILD)/engine.inc: $(BUILD)/script_demo
+	@mkdir -p $(@D)
+	./$(BUILD)/script_demo --write-pawn-include $@
+%.amx: %.pwn $(BUILD)/pawncc $(BUILD)/engine.inc
+	./$(BUILD)/pawncc -i$(BUILD) -ivendor/pawn/include -o$@ $<
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(GAMEPLAY_OBJ)
@@ -71,6 +109,8 @@ run-authoring: $(BUILD)/authoring_demo
 	./$(BUILD)/authoring_demo
 run-script: $(BUILD)/script_demo
 	./$(BUILD)/script_demo
+run-script-pawn: $(BUILD)/script_demo projects/script_demo/mover.amx
+	./$(BUILD)/script_demo --pawn
 run: $(BUILD)/core_test
 	./$(BUILD)/core_test
 run-ui-tool: $(BUILD)/ui_tool
