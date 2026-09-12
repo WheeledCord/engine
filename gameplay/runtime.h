@@ -12,8 +12,6 @@ typedef struct GameplayProject
     EngineConfig config;
     const EntityClass *classes;
     size_t classCount, maxEntities;
-    // Room to reserve in every entity's payload for classes that appear later, as a script's do.
-    size_t entitySize;
     const char *scene;
     void *context;
     struct UiContext *ui;

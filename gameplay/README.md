@@ -1,14 +1,25 @@
 # Gameplay
 
-Gameplay depends on core. Core never includes gameplay or a project. Entities remain fixed flat slots
+Gameplay depends on core. Core never includes gameplay or a project. Entities are fixed flat slots
 with generational handles and ordinary C payloads. There is no mandatory transform or base class.
+
+Each class keeps its own entities' payloads, in storage shaped by the size that class declared: a
+sparse map from an entity's slot to its place in that class's array. Nothing is shared between
+classes, so no class can reach another's memory however large its payload is, and a world no longer
+has to be told up front how big the biggest payload will be. A place left by a destroyed entity is
+handed to the next one of that class rather than being closed up, because compacting would move a
+payload while a callback is holding a pointer to it.
 
 ## Authoring
 
 See `projects/authoring_demo/main.c` for a complete moving entity and application.
 
-An EntityClass declares classname, payload size, optional copied defaults, optional fields, and only
-the callbacks it implements. Use designated initializers. Registration copies the classname and class
+An EntityClass declares classname, payload size and alignment, optional copied defaults, optional
+fields, and only the callbacks it implements. Alignment comes from `ENTITY_ALIGNMENT_OF(Type)`;
+leaving it zero asks for the strictest the platform has. A class whose size is zero, whose alignment
+is not a power of two, or whose size is not a whole number of its declared alignment is refused when
+it registers, with the reason in the log, rather than being found later as one entity writing over
+another. Use designated initializers. Registration copies the classname and class
 record; defaults and field metadata are borrowed and must outlive the world. All registration happens
 before the first spawn, so live entities cannot retain pointers invalidated by registry growth.
 
@@ -65,8 +76,7 @@ the world, but never a partially configured instance. Replacing a scene destroys
 
 `GameplayProjectDefault()` and `GameplayApplication(&runtime, project)` connect a project to the core
 application runner. Supply a class table, optional scene, context and whichever hooks are needed.
-The adapter derives the aligned storage stride from the largest class. Capacity defaults to 1024 slots
-and is configurable. Gameplay timing comes from the configuration the engine is actually running, so changing the
+Capacity defaults to 1024 slots and is configurable; payload sizes come from the classes themselves. Gameplay timing comes from the configuration the engine is actually running, so changing the
 descriptor after `GameplayApplication` returns moves the entity tick with it instead of leaving the
 two out of step. Variable-only applications use core directly.
 

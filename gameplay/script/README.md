@@ -44,7 +44,8 @@ entity "mover" {
 }
 ```
 
-A project makes room for classes that do not exist yet with `project.entitySize = ScriptEntitySize()`.
+A scripted class brings its own size and alignment when it registers, like any other class, so a
+project does not have to reserve room for classes that do not exist yet.
 
 ## Scheme
 

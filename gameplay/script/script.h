@@ -69,8 +69,6 @@ struct ScriptHost
 /* One host per program: entity callbacks reach it through EntityClass, which carries no user data
    of its own. Init points that at this host and Free clears it. */
 bool ScriptHostInit(ScriptHost *host, GameplayWorld *world);
-// What a project puts in GameplayProject.entitySize so scripted classes fit.
-static inline size_t ScriptEntitySize(void) { return sizeof(ScriptEntity); }
 void ScriptHostFree(ScriptHost *host);
 ScriptHost *ScriptHostActive(void);
 
