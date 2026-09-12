@@ -60,6 +60,7 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
         else if (!strcmp(argv[i], "--write-pawn-include") && i + 1 < argc)
             exit(ScriptPawnWriteInclude(argv[i + 1]) ? 0 : 1);
     }
+    SetTraceLogLevel(LOG_WARNING); // so the REPL prompt is not buried in raylib's startup
     static GameplayRuntime runtime;
     GameplayProject project = GameplayProjectDefault();
     project.config.title = pawn ? "Scripted demo (Pawn)" : "Scripted demo (Scheme)";
@@ -68,10 +69,5 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
     project.Update = Update;
     project.BeforeDraw = BeforeDraw;
     project.Shutdown = Shutdown;
-    if (!pawn)
-    {
-        printf("s7 REPL: type an expression, for example (spawn \"mover\" (vec 200 200))\n> ");
-        fflush(stdout);
-    }
     return GameplayApplication(&runtime, project);
 }
