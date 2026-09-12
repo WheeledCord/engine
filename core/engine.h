@@ -41,6 +41,9 @@ typedef struct EngineApplication
 EngineConfig EngineConfigDefault(void);
 EngineApplication EngineApplicationDefault(void);
 int EngineRunApplication(const EngineApplication *application);
+/* The configuration the running application was started with, or NULL outside a run. Layers above
+   core read their timestep from here rather than keeping a second copy that can drift. */
+const EngineConfig *EngineRunningConfig(void);
 /* Define this only when linking the optional core/entry.c instead of your own main.
    Context, UI and declaration arrays must outlive the returned descriptor. */
 EngineApplication EngineApplicationMain(int argc, char **argv);
