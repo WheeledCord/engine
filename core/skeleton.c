@@ -4,13 +4,8 @@
 
 #include "skeleton.h"
 #include "raymath.h"
+#include "transform.h" // TransformMatrix: one scale-rotation-translation order for the whole engine
 #include <string.h>
-static Matrix TransformMatrix(Transform t)
-{
-    return MatrixMultiply(
-        MatrixMultiply(MatrixScale(t.scale.x, t.scale.y, t.scale.z), QuaternionToMatrix(t.rotation)),
-        MatrixTranslate(t.translation.x, t.translation.y, t.translation.z));
-}
 static bool InvertibleScale(Vector3 s)
 {
     return fabsf(s.x) > 0.000001f && fabsf(s.y) > 0.000001f && fabsf(s.z) > 0.000001f;

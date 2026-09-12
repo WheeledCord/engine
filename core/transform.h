@@ -8,7 +8,8 @@
 #include <stdbool.h>
 
 /* Plain transforms, no entities, hierarchy, ownership or physics. All angles in radians.
-   3D uses raylib Transform: +X right, +Y up, -Z forward. Rotation must be a unit quaternion.
+   3D uses raylib Transform: +Z forward, +Y up, -X right, as FpsCamera, ActorLookAt and glTF
+   models already do. Rotation must be a unit quaternion.
    Initialise with TransformIdentity (a zero scale/quaternion is NOT an identity).
    Local movement/directions use rotation only, so object scale cannot change movement speed. */
 Transform TransformIdentity(void);
@@ -25,7 +26,7 @@ Vector3 TransformPoint(Transform transform, Vector3 point);
 /* Zero scale is not invertible: false, with localPoint left untouched. */
 bool TransformInversePoint(Transform transform, Vector3 point, Vector3 *localPoint);
 Matrix TransformMatrix(Transform transform);
-/* Faces local -Z toward target. False leaves rotation unchanged for coincident target,
+/* Faces local +Z toward target. False leaves rotation unchanged for coincident target,
    zero up, or up parallel to the viewing direction. Does not move or scale the object. */
 bool TransformLookAt(Transform *transform, Vector3 target, Vector3 up);
 
