@@ -187,7 +187,7 @@ void UiContextMenu(UiContext *ui, UiRect triggerArea, const char *contextName,
         return;
     UiState *state = ui->state;
     if (!state->input.mousePressed[MOUSE_BUTTON_RIGHT] ||
-        !UiPointInRect(state->input.mousePosition, triggerArea))
+        !UiHit(ui, triggerArea))
         return;
     state->menuRoot = menu;
     state->menuContextTitle = contextName;

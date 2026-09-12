@@ -8,6 +8,7 @@
 #include "engine.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stddef.h>
 
 #define CORE_UI_DEFAULT_FONT_PATH "core/fonts/unifont-17.0.04.bdf"
@@ -87,6 +88,10 @@ bool UiSetTheme(UiContext *ui, UiTheme theme);
 void UiBeginFrame(UiContext *ui, const EngineInput *input, UiRect screen);
 void UiEndFrame(UiContext *ui);
 bool UiConsumesMouse(const UiContext *ui);
+/* The next button, slider or checkbox uses this identity instead of the one derived from its label
+   (buttons) or value pointer (sliders, checkboxes), so a press survives a relabel or relayout.
+   Text fields are always identified by their buffer. */
+void UiNextId(UiContext *ui, uint64_t id);
 /* Optional: interact once before simulation, then UiRender inside the drawing pass.
    Commands copy text and retain buffer capacity between frames. UiEndFrame still required. */
 void UiBeginDeferredFrame(UiContext *ui, const EngineInput *input, UiRect screen);
