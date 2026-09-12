@@ -3,7 +3,8 @@
 Lays out `core/ui` widgets on a defined surface and saves them as a `UiDocument` that a game loads
 and draws through the same code path. Run from the repository root:
 
-    make -f Makefile.core run-ui-tool
+    make -f Makefile.core run-ui-tool           # opens projects/ui_tool/layout.ui
+    ./build/core/ui_tool path/to/layout.ui      # or any other file
 
 ## The surface
 
@@ -35,8 +36,13 @@ With **Snap** on, a dragged element locks onto:
 
 ## Containers
 
-Indent and Window elements are containers, and an element whose centre is inside one is arranged
-against **that** container rather than the surface. Inside an indent there is no padding and no gap:
+Indent and Window elements are containers. An element belongs to one because it was placed or
+dropped in it, not because of where its rectangle happens to sit: dragging it into a well puts it
+in, dragging it out takes it out, and nothing else moves it. Properties shows what it is in.
+Moving a container takes its contents with it, and duplicating or deleting one includes them.
+Raise and Lower swap an element with the next one sharing its container, which is the only order
+that shows, because contents are always drawn over the container they are in and clipped to it.
+An element arranges and snaps against **that** container rather than the surface. Inside an indent there is no padding and no gap:
 contents sit flush against the bezel and flush against each other, which is what `UiGroup` produces
 in code — a face gap outside, one indent, contents flush within it. A Window element reserves its
 frame and title bar the same way. So dragging a button into a well locks it to the well's inner
@@ -48,6 +54,12 @@ container: `L C R` and `T M B` align, `Fill` spans the content width, `Row` sets
 row height, and `Stack` puts the element under the previous one sharing its x and width. `Dup`,
 `Raise`, `Lower`, `Delete` and `Undo` follow. Right-clicking the surface opens the same commands as a
 nested menu.
+
+Properties scrolls when it does not fit, with the wheel or the arrows on its bar, and every edit in
+it can be undone: typing into a box is one step, ending when the box loses focus. **Name** is what
+game code looks an element up by, and what `UiDocumentActivated` reports when it is used, so one
+layout can hold several buttons and the game can tell them apart. **File** is the layout Save and
+Load use, and it can be typed over.
 
 Properties is real text entry throughout: click into a box to place the caret, drag to select,
 `Ctrl+A` select all, `Ctrl+C`/`Ctrl+X`/`Ctrl+V` through the system clipboard, arrows and `Home`/`End`
@@ -117,6 +129,9 @@ to row or column, or to `nothing` when you want the contents left exactly where 
 remainder is spread a pixel at a time, so the unconstrained cells differ by at most one and never
 leave a hole. A window element leaves its contents alone.
 
+Siblings that stretch stop at their own minimums, so shrinking a window never runs them into each
+other, and the minimum the document reports is the size they actually fit in.
+
 **Minimum sizes** (`w` and `h` in Properties) stop a layout collapsing. The editor works the first
 one out from the label — the text width plus room for padding and bevels — and writes it into the
 box, where you can read it and type over it. It follows the label while you rename, and stops
@@ -173,16 +188,18 @@ the surface and the right of the status bar both say which mode you are in.
 Text, versioned, one element per line, tab before the label:
 
 ```
-core_ui_document 5
+core_ui_document 6
 surface <width> <height> <style>	<title>
-<type> <x> <y> <w> <h> <value> <checked> <anchors> <minW> <minH> <flow> <maxW> <maxH> <textX> <textY>	<label>
+<type> <x> <y> <w> <h> <value> <checked> <anchors> <minW> <minH> <flow> <maxW> <maxH> <textX> <textY> <parent> <name>	<label>
 ```
 
-Version 1 files (no surface line) and version 2 files (no anchors) still load, taking the same
-default anchors as a new element. Versions 3 and 4 also load. Layouts without text alignment
-keep centred buttons and left-aligned labels, vertically centred. Version 5 adds maximum
-width/height and horizontal/vertical text alignment after the flow field. Alignment values
-are 0 (start), 1 (centre), 2 (end).
+`parent` is the line number of the containing element counting from zero, or -1 for the surface;
+`name` is `-` when there is none. Versions 1 to 5 still load, and their containment is read off the
+geometry once, as they were drawn. Version 5 files carry text alignment, version 3 and 4 maximum
+sizes, version 2 anchors, and version 1 none of it; anything missing takes the default a new
+element would get. Alignment values are 0 (start), 1 (centre), 2 (end). A line that cannot be read
+fails the whole load rather than being skipped, and saving replaces the file only once it is
+completely written.
 `projects/game2d_dodge/menu.ui` is a layout built here and loaded by that game.
 
 ## Checks

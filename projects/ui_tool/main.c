@@ -20,6 +20,7 @@
 #include <string.h>
 
 #define LAYOUT_PATH "projects/ui_tool/layout.ui"
+#define PATH_CAPACITY 200
 #define UNDO_CAPACITY 32
 #define MARGIN 8
 #define PALETTE_WIDTH 176
@@ -125,6 +126,12 @@ typedef struct Tool
     bool grid;
     bool quit;
     char status[96];
+    char path[PATH_CAPACITY]; // the layout file Save and Load use
+    int inspectorScroll;
+    int inspectorHeight; // what the properties column needed last frame
+    UiDocument pending;  // the document as it was before the edit being typed
+    bool pendingValid;
+    const void *editKey; // the field that edit belongs to
 
     bool smoke;
     unsigned atlas; // font texture id, to notice a rebuild during the smoke run
@@ -205,11 +212,8 @@ static void ClearUndo(Tool *tool)
     tool->undoCount = 0;
 }
 
-static void PushUndo(Tool *tool)
+static void PushSnapshot(Tool *tool, UiDocument snapshot)
 {
-    UiDocument snapshot = {0};
-    if (!UiDocumentCopy(&snapshot, &tool->document))
-        return;
     if (tool->undoCount == UNDO_CAPACITY)
     {
         UiDocumentFree(&tool->undo[0]);
@@ -217,6 +221,42 @@ static void PushUndo(Tool *tool)
         tool->undoCount--;
     }
     tool->undo[tool->undoCount++] = snapshot;
+}
+
+static void PushUndo(Tool *tool)
+{
+    UiDocument snapshot = {0};
+    if (UiDocumentCopy(&snapshot, &tool->document))
+        PushSnapshot(tool, snapshot);
+}
+
+// Typing is one edit, not one per keystroke: the document is remembered when a box takes focus and
+// filed as an undo step the first time that box changes anything.
+static void BeginEdit(Tool *tool, const void *key)
+{
+    if (tool->editKey == key)
+        return;
+    if (tool->pendingValid)
+        UiDocumentFree(&tool->pending);
+    tool->pendingValid = UiDocumentCopy(&tool->pending, &tool->document);
+    tool->editKey = key;
+}
+
+static void CommitEdit(Tool *tool)
+{
+    if (!tool->pendingValid)
+        return;
+    PushSnapshot(tool, tool->pending);
+    tool->pending = (UiDocument){0};
+    tool->pendingValid = false;
+}
+
+static void EndEdit(Tool *tool)
+{
+    if (tool->pendingValid)
+        UiDocumentFree(&tool->pending);
+    tool->pendingValid = false;
+    tool->editKey = NULL;
 }
 
 static void Undo(Tool *tool)
@@ -245,62 +285,91 @@ static bool IsContainer(UiElementType type)
     return type == UI_ELEMENT_INDENT || type == UI_ELEMENT_WINDOW;
 }
 
-// The rectangle an element is arranged and snapped within: its innermost container, or the surface.
-static UiRect ArrangeBounds(const Tool *tool, UiRect rect, int ignore, int *gap)
+// Where a dragged rectangle would land: the innermost container holding its centre. An element
+// cannot fall into itself or into anything it contains.
+static int DropTarget(const Tool *tool, UiRect rect, int moving)
 {
-    UiRect bounds = ContentBounds(tool);
-    *gap = tool->ui.theme.containerGap;
     Vector2 centre = {(float)(rect.x + rect.width / 2), (float)(rect.y + rect.height / 2)};
-    long best = 0;
+    int best = -1;
+    long smallest = 0;
     for (size_t i = 0; i < tool->document.count; i++)
     {
         const UiElement *element = &tool->document.elements[i];
-        if ((int)i == ignore || !IsContainer(element->type) || !PointIn(element->rect, centre))
+        if ((int)i == moving || !IsContainer(element->type) || !PointIn(element->rect, centre) ||
+            (moving >= 0 && UiDocumentIsAncestor(&tool->document, moving, i)))
             continue;
         UiRect content = ContainerContent(tool, element);
         long area = (long)content.width * content.height;
-        if (content.width <= 0 || content.height <= 0 || (best && area >= best))
+        if (content.width <= 0 || content.height <= 0 || (best >= 0 && area >= smallest))
             continue;
-        best = area;
-        bounds = content;
-        *gap = 0;
+        best = (int)i;
+        smallest = area;
     }
-    return bounds;
+    return best;
 }
 
-// What a control needs to still show its own label. The editor works this out and writes it into
-// the element's minimum, where it is visible in Properties and can be typed over.
+// The region a container hands its contents, or the whole surface.
+static UiRect BoundsOf(const Tool *tool, int container, int *gap)
+{
+    *gap = container >= 0 ? 0 : tool->ui.theme.containerGap;
+    if (container < 0)
+        return ContentBounds(tool);
+    return ContainerContent(tool, &tool->document.elements[container]);
+}
+
+// While dragging, the element belongs wherever it is being dropped; otherwise to its own parent.
+static UiRect ArrangeBounds(const Tool *tool, UiRect rect, int ignore, int *gap)
+{
+    return BoundsOf(tool, DropTarget(tool, rect, ignore), gap);
+}
+
+static UiRect ParentBounds(const Tool *tool, int index, int *gap)
+{
+    return BoundsOf(tool, UiDocumentContainerOf(&tool->document, (size_t)index), gap);
+}
+
+// Contents travel with the container they are in, as they do in any other layout editor.
+static void MoveElement(Tool *tool, int index, int dx, int dy)
+{
+    if (index < 0 || index >= (int)tool->document.count || (!dx && !dy))
+        return;
+    tool->document.elements[index].rect.x += dx;
+    tool->document.elements[index].rect.y += dy;
+    for (size_t i = 0; i < tool->document.count; i++)
+        if (UiDocumentIsAncestor(&tool->document, index, i))
+        {
+            tool->document.elements[i].rect.x += dx;
+            tool->document.elements[i].rect.y += dy;
+        }
+}
+
+static void PlaceElement(Tool *tool, int index, UiRect rect)
+{
+    if (index < 0 || index >= (int)tool->document.count)
+        return;
+    UiRect was = tool->document.elements[index].rect;
+    MoveElement(tool, index, rect.x - was.x, rect.y - was.y);
+    tool->document.elements[index].rect.width = rect.width;
+    tool->document.elements[index].rect.height = rect.height;
+}
+
+// Drops the element into whatever now holds its centre, and says so: parents only change here.
+static void Reparent(Tool *tool, int index)
+{
+    if (index < 0)
+        return;
+    int target = DropTarget(tool, tool->document.elements[index].rect, index);
+    if (target == UiDocumentContainerOf(&tool->document, (size_t)index))
+        return;
+    if (!UiDocumentSetParent(&tool->document, (size_t)index, target))
+        return;
+    Say(tool, "%s moved into %s", ElementName(tool->document.elements[index].type),
+        target >= 0 ? ElementName(tool->document.elements[target].type) : "the surface");
+}
+
 static void LabelMinimum(Tool *tool, const UiElement *element, int *width, int *height)
 {
-    const UiTheme *theme = &tool->ui.theme;
-    int text = UiTextWidth(&tool->ui, element->label);
-    switch (element->type)
-    {
-        case UI_ELEMENT_LABEL:
-            *width = text;
-            *height = theme->fontSize;
-            return;
-        case UI_ELEMENT_CHECKBOX:
-            *width = theme->checkboxSize + theme->padding + text;
-            *height = theme->itemHeight;
-            return;
-        case UI_ELEMENT_SLIDER:
-            *width = theme->sliderKnobWidth * 3;
-            *height = theme->itemHeight;
-            return;
-        case UI_ELEMENT_INDENT:
-            *width = theme->indentWidth * 2 + theme->itemHeight;
-            *height = theme->indentWidth * 2 + theme->itemHeight;
-            return;
-        case UI_ELEMENT_WINDOW:
-            *width = theme->frameWidth * 2 + theme->padding * 2 + text;
-            *height = theme->frameWidth * 2 + theme->titleHeight + theme->itemHeight;
-            return;
-        default:
-            *width = text + theme->padding * 2 + (theme->indentWidth + theme->outsetWidth) * 2;
-            *height = theme->itemHeight;
-            return;
-    }
+    UiElementMinimumSize(&tool->ui, element->type, element->label, width, height);
 }
 
 static UiRect DefaultRect(const Tool *tool, UiElementType type, int x, int y)
@@ -327,11 +396,19 @@ static void AddAt(Tool *tool, UiElementType type, int x, int y)
         rect = UiClampRect(rect, ContentBounds(tool), 8);
     }
     PushUndo(tool);
+    int target = DropTarget(tool, rect, -1);
     UiElement *element = UiDocumentAdd(&tool->document, type, rect, ElementName(type));
     if (element)
     {
+        int index = (int)tool->document.count - 1;
+        UiDocumentSetParent(&tool->document, (size_t)index, target);
+        if (target >= 0)
+        {
+            int gap = 0;
+            element->rect = UiClampRect(element->rect, BoundsOf(tool, target, &gap), 8);
+        }
         LabelMinimum(tool, element, &element->minWidth, &element->minHeight);
-        tool->selected = (int)tool->document.count - 1;
+        tool->selected = index;
         Say(tool, "Added %s at %d,%d  minimum %dx%d", ElementName(type), rect.x, rect.y,
             element->minWidth, element->minHeight);
     }
@@ -339,16 +416,16 @@ static void AddAt(Tool *tool, UiElementType type, int x, int y)
 
 static void Save(Tool *tool)
 {
-    bool ok = UiDocumentSave(&tool->document, LAYOUT_PATH);
-    Say(tool, "%s %s", ok ? "Saved" : "Save failed", LAYOUT_PATH);
+    bool ok = UiDocumentSave(&tool->document, tool->path);
+    Say(tool, "%s %s", ok ? "Saved" : "Save failed", tool->path);
 }
 
 static void Load(Tool *tool)
 {
     PushUndo(tool);
-    bool ok = UiDocumentLoad(&tool->document, LAYOUT_PATH);
+    bool ok = UiDocumentLoad(&tool->document, tool->path);
     tool->selected = ok && tool->document.count ? 0 : -1;
-    Say(tool, "%s %s", ok ? "Loaded" : "Load failed", LAYOUT_PATH);
+    Say(tool, "%s %s", ok ? "Loaded" : "Load failed (see the log)", tool->path);
 }
 
 // Integer factors only: a UI built from single-pixel bevels cannot survive a fractional scale.
@@ -362,6 +439,57 @@ static void SetZoom(Tool *tool, int zoom)
     tool->pan.y = tool->pan.y * (float)next / (float)tool->zoom;
     tool->zoom = next;
     Say(tool, "Zoom %dx", tool->zoom);
+}
+
+// Copies an element and everything inside it, keeping the shape of the tree.
+static int DuplicateTree(Tool *tool, int index, int dx, int dy)
+{
+    size_t count = tool->document.count;
+    int *map = malloc(count * sizeof(*map));
+    if (!map)
+        return -1;
+    for (size_t i = 0; i < count; i++)
+        map[i] = -1;
+    int root = -1;
+    for (size_t i = 0; i < count; i++)
+    {
+        if ((int)i != index && !UiDocumentIsAncestor(&tool->document, index, i))
+            continue;
+        UiElement source = tool->document.elements[i];
+        UiRect rect = {source.rect.x + dx, source.rect.y + dy, source.rect.width, source.rect.height};
+        UiElement *copy = UiDocumentAdd(&tool->document, source.type, rect, source.label);
+        if (!copy)
+            break;
+        unsigned id = copy->id;
+        int at = (int)tool->document.count - 1;
+        *copy = source;
+        copy->rect = rect;
+        copy->id = id; // a copy is its own element, not the one it was copied from
+        map[i] = at;
+        if ((int)i == index)
+            root = at;
+    }
+    for (size_t i = 0; i < count; i++)
+    {
+        if (map[i] < 0)
+            continue;
+        int parent = tool->document.elements[i].parent;
+        int inherited = parent >= 0 && parent < (int)count && map[parent] >= 0 ? map[parent] : parent;
+        UiDocumentSetParent(&tool->document, (size_t)map[i], (int)i == index ? parent : inherited);
+    }
+    free(map);
+    return root;
+}
+
+// Raise and Lower move an element past the next thing sharing its container; nothing else can be
+// between them on screen, because contents are always drawn over the container they are in.
+static int Sibling(const Tool *tool, int index, int direction)
+{
+    int parent = UiDocumentContainerOf(&tool->document, (size_t)index);
+    for (int i = index + direction; i >= 0 && i < (int)tool->document.count; i += direction)
+        if (UiDocumentContainerOf(&tool->document, (size_t)i) == parent)
+            return i;
+    return -1;
 }
 
 static void RunAction(Tool *tool, ToolAction action)
@@ -395,38 +523,42 @@ static void RunAction(Tool *tool, ToolAction action)
     }
     // Alignment happens inside whatever contains the element, flush to its bezel.
     int gap = 0;
-    UiRect bounds = ArrangeBounds(tool, element->rect, tool->selected, &gap);
+    UiRect bounds = ParentBounds(tool, tool->selected, &gap);
     const char *where = gap ? "the surface" : "its container";
     PushUndo(tool);
     switch (action)
     {
         case ACTION_ALIGN_LEFT:
-            element->rect.x = bounds.x;
+            MoveElement(tool, tool->selected, bounds.x - element->rect.x, 0);
             Say(tool, "Aligned left in %s", where);
             break;
         case ACTION_ALIGN_CENTRE:
-            element->rect.x = bounds.x + (bounds.width - element->rect.width) / 2;
+            MoveElement(tool, tool->selected,
+                        bounds.x + (bounds.width - element->rect.width) / 2 - element->rect.x, 0);
             Say(tool, "Centred horizontally in %s", where);
             break;
         case ACTION_ALIGN_RIGHT:
-            element->rect.x = bounds.x + bounds.width - element->rect.width;
+            MoveElement(tool, tool->selected,
+                        bounds.x + bounds.width - element->rect.width - element->rect.x, 0);
             Say(tool, "Aligned right in %s", where);
             break;
         case ACTION_ALIGN_TOP:
-            element->rect.y = bounds.y;
+            MoveElement(tool, tool->selected, 0, bounds.y - element->rect.y);
             Say(tool, "Aligned top in %s", where);
             break;
         case ACTION_ALIGN_MIDDLE:
-            element->rect.y = bounds.y + (bounds.height - element->rect.height) / 2;
+            MoveElement(tool, tool->selected, 0,
+                        bounds.y + (bounds.height - element->rect.height) / 2 - element->rect.y);
             Say(tool, "Centred vertically in %s", where);
             break;
         case ACTION_ALIGN_BOTTOM:
-            element->rect.y = bounds.y + bounds.height - element->rect.height;
+            MoveElement(tool, tool->selected, 0,
+                        bounds.y + bounds.height - element->rect.height - element->rect.y);
             Say(tool, "Aligned bottom in %s", where);
             break;
         case ACTION_FILL_WIDTH:
-            element->rect.x = bounds.x;
-            element->rect.width = bounds.width;
+            PlaceElement(tool, tool->selected,
+                         (UiRect){bounds.x, element->rect.y, bounds.width, element->rect.height});
             Say(tool, "Filled the width of %s", where);
             break;
         case ACTION_ROW_HEIGHT:
@@ -434,62 +566,66 @@ static void RunAction(Tool *tool, ToolAction action)
             Say(tool, "Set one row high (%d px)", tool->ui.theme.itemHeight);
             break;
         case ACTION_STACK:
-            if (tool->selected > 0)
+        {
+            int above = Sibling(tool, tool->selected, -1);
+            if (above >= 0)
             {
-                UiRect above = tool->document.elements[tool->selected - 1].rect;
-                element->rect.x = above.x;
-                element->rect.width = above.width;
-                element->rect.y = above.y + above.height + gap;
+                UiRect over = tool->document.elements[above].rect;
+                PlaceElement(tool, tool->selected,
+                             (UiRect){over.x, over.y + over.height + gap, over.width,
+                                      element->rect.height});
                 Say(tool, "Stacked under %s with a %d px gap",
-                    ElementName(tool->document.elements[tool->selected - 1].type), gap);
+                    ElementName(tool->document.elements[above].type), gap);
             }
             else
                 Say(tool, "Nothing above to stack under");
             break;
+        }
         case ACTION_DUPLICATE:
         {
-            UiElement copy = *element;
-            copy.rect.y += copy.rect.height + gap;
-            UiElement *added = UiDocumentAdd(&tool->document, copy.type, copy.rect, copy.label);
-            if (added)
+            UiElementType type = element->type;
+            int copy = DuplicateTree(tool, tool->selected, 0, element->rect.height + gap);
+            if (copy >= 0)
             {
-                *added = copy;
-                tool->selected = (int)tool->document.count - 1;
-                element = added;
-                Say(tool, "Duplicated %s", ElementName(copy.type));
+                tool->selected = copy;
+                element = &tool->document.elements[copy];
+                Say(tool, "Duplicated %s", ElementName(type));
             }
             break;
         }
         case ACTION_RAISE:
-            if (UiDocumentSwap(&tool->document, (size_t)tool->selected, (size_t)tool->selected + 1))
-            {
-                tool->selected++;
-                Say(tool, "Raised");
-            }
-            element = NULL;
-            break;
         case ACTION_LOWER:
-            if (tool->selected > 0 &&
-                UiDocumentSwap(&tool->document, (size_t)tool->selected, (size_t)tool->selected - 1))
+        {
+            int other = Sibling(tool, tool->selected, action == ACTION_RAISE ? 1 : -1);
+            if (other >= 0 && UiDocumentSwap(&tool->document, (size_t)tool->selected, (size_t)other))
             {
-                tool->selected--;
-                Say(tool, "Lowered");
+                tool->selected = other;
+                Say(tool, action == ACTION_RAISE ? "Raised" : "Lowered");
             }
+            else
+                Say(tool, "Nothing to swap with in the same container");
             element = NULL;
             break;
+        }
         case ACTION_DELETE:
-            if (UiDocumentRemove(&tool->document, (size_t)tool->selected))
+        {
+            size_t gone = UiDocumentRemoveTree(&tool->document, (size_t)tool->selected);
+            if (gone)
             {
                 tool->selected = MinInt(tool->selected, (int)tool->document.count - 1);
-                Say(tool, "Deleted");
+                if (gone > 1)
+                    Say(tool, "Deleted, with %d elements inside it", (int)gone - 1);
+                else
+                    Say(tool, "Deleted");
             }
             element = NULL;
             break;
+        }
         default:
             break;
     }
     if (element)
-        element->rect = UiClampRect(element->rect, bounds, 8);
+        PlaceElement(tool, tool->selected, UiClampRect(element->rect, bounds, 8));
 }
 
 static void MenuAddButton(void *user)
@@ -668,9 +804,10 @@ static void DrawPaletteContents(UiContext *ui, UiRect content, void *user)
 
 // A real text box you can type into, select in and paste into, with steppers beside it. The buffer
 // tracks the value while the box is not being edited, so both routes stay in step.
-static bool NumberRow(UiContext *ui, UiRect rect, const char *name, int *value, char *buffer,
+static bool NumberRow(Tool *tool, UiRect rect, const char *name, int *value, char *buffer,
                       size_t capacity, int step, int minimum, int maximum)
 {
+    UiContext *ui = &tool->ui;
     int side = ui->theme.itemHeight;
     UiRect label = {rect.x, rect.y, side, rect.height};
     UiRect box = {rect.x + side, rect.y, MaxInt(0, rect.width - side * 3 - ui->theme.containerGap),
@@ -682,12 +819,15 @@ static bool NumberRow(UiContext *ui, UiRect rect, const char *name, int *value, 
         snprintf(buffer, capacity, "%d", *value);
 
     bool changed = false;
+    if (UiTextFieldFocused(ui, buffer))
+        BeginEdit(tool, buffer);
     if (UiTextField(ui, box, buffer, capacity))
     {
         char *end = NULL;
         long typed = strtol(buffer, &end, 10);
         if (end != buffer)
         {
+            CommitEdit(tool);
             *value = ClampInt((int)typed, minimum, maximum);
             changed = true;
         }
@@ -696,6 +836,7 @@ static bool NumberRow(UiContext *ui, UiRect rect, const char *name, int *value, 
     UiRect inner = UiRectInset(steppers, ui->theme.indentWidth);
     if (UiButtonBare(ui, (UiRect){inner.x, inner.y, inner.width / 2, inner.height}, "-"))
     {
+        PushUndo(tool);
         *value = ClampInt(*value - step, minimum, maximum);
         changed = true;
     }
@@ -704,6 +845,7 @@ static bool NumberRow(UiContext *ui, UiRect rect, const char *name, int *value, 
                               inner.height},
                      "+"))
     {
+        PushUndo(tool);
         *value = ClampInt(*value + step, minimum, maximum);
         changed = true;
     }
@@ -733,10 +875,42 @@ static void TextAlignmentRow(Tool *tool, UiRect row, const char *label, UiAlign 
     }
 }
 
+// A vertical bar for a panel whose contents do not fit: arrows at the ends, a thumb between them.
+static void ScrollBar(Tool *tool, UiRect rect, int visible)
+{
+    UiContext *ui = &tool->ui;
+    int side = MinInt(rect.width, ui->theme.itemHeight);
+    int most = MaxInt(0, tool->inspectorHeight - visible);
+    UiRect up = {rect.x, rect.y, rect.width, side};
+    UiRect down = {rect.x, rect.y + rect.height - side, rect.width, side};
+    UiRect track = {rect.x, rect.y + side, rect.width, MaxInt(0, rect.height - side * 2)};
+    UiDrawIndent(ui, track);
+    if (most > 0 && track.height > 2)
+    {
+        int inner = track.height - 2;
+        int thumb = MaxInt(8, inner * visible / MaxInt(1, tool->inspectorHeight));
+        int travel = inner - thumb;
+        UiDrawOutset(ui, (UiRect){track.x + 1, track.y + 1 + travel * tool->inspectorScroll / most,
+                                  MaxInt(0, track.width - 2), thumb});
+    }
+    if (UiButton(ui, up, "^"))
+        tool->inspectorScroll -= ui->theme.itemHeight;
+    if (UiButton(ui, down, "v"))
+        tool->inspectorScroll += ui->theme.itemHeight;
+}
+
 static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
 {
     Tool *tool = user;
-    UiLayout column = UiColumn(ui, UiRectInset(content, ui->theme.containerGap));
+    int most = MaxInt(0, tool->inspectorHeight - content.height);
+    tool->inspectorScroll = ClampInt(tool->inspectorScroll, 0, most);
+    UiRect body = content;
+    if (most > 0)
+        body.width = MaxInt(0, body.width - ui->theme.itemHeight - ui->theme.containerGap);
+    UiRect area = UiRectInset(body, ui->theme.containerGap);
+    area.y -= tool->inspectorScroll;
+    area.height += tool->inspectorScroll;
+    UiLayout column = UiColumn(ui, area);
     UiElement *element = Selected(tool);
     if (!element)
         UiLabel(ui, UiLayoutNext(ui, &column, 0), "Nothing selected");
@@ -750,8 +924,11 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
         int wasWidth = 0;
         int wasHeight = 0;
         LabelMinimum(tool, element, &wasWidth, &wasHeight);
+        if (UiTextFieldFocused(ui, element->label))
+            BeginEdit(tool, element->label);
         if (UiTextField(ui, tool->labelField, element->label, sizeof element->label))
         {
+            CommitEdit(tool);
             // A minimum still matching the old label is the editor's, so it follows the new one.
             int nowWidth = 0;
             int nowHeight = 0;
@@ -761,6 +938,27 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
             if (element->minHeight == wasHeight)
                 element->minHeight = nowHeight;
         }
+        // The name game code looks the element up by, and the container it belongs to.
+        UiRect nameRow = UiLayoutNext(ui, &column, 0);
+        int nameWidth = UiTextWidth(ui, "Name") + ui->theme.padding;
+        UiLabel(ui, (UiRect){nameRow.x, nameRow.y, nameWidth, nameRow.height}, "Name");
+        if (UiTextFieldFocused(ui, element->name))
+            BeginEdit(tool, element->name);
+        if (UiTextField(ui, (UiRect){nameRow.x + nameWidth, nameRow.y,
+                                     MaxInt(0, nameRow.width - nameWidth), nameRow.height},
+                        element->name, sizeof element->name))
+        {
+            CommitEdit(tool);
+            for (char *c = element->name; *c; c++)
+                if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                      (*c >= '0' && *c <= '9') || *c == '_' || *c == '.' || *c == '-'))
+                    *c = '_';
+        }
+        int parent = UiDocumentContainerOf(&tool->document, (size_t)tool->selected);
+        char inside[64];
+        snprintf(inside, sizeof inside, "In: %s", parent < 0 ? "the surface"
+                                                             : ElementName(tool->document.elements[parent].type));
+        UiLabel(ui, UiLayoutNext(ui, &column, 0), inside);
         UiRect bounds = ContentBounds(tool);
         int step = tool->snap && tool->gridStep > 1 ? tool->gridStep : 1;
         if (element->type == UI_ELEMENT_BUTTON || element->type == UI_ELEMENT_LABEL)
@@ -772,17 +970,26 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
             TextAlignmentRow(tool, UiLayoutNext(ui, &column, 0), "Text Y",
                              &element->textAlignment.vertical, vertical);
         }
-        bool moved = NumberRow(ui, UiLayoutNext(ui, &column, 0), "X", &element->rect.x,
+        int wasX = element->rect.x;
+        int wasY = element->rect.y;
+        bool moved = NumberRow(tool, UiLayoutNext(ui, &column, 0), "X", &element->rect.x,
                                tool->entry[0], sizeof tool->entry[0], step, -4096, 4096);
-        moved |= NumberRow(ui, UiLayoutNext(ui, &column, 0), "Y", &element->rect.y, tool->entry[1],
+        moved |= NumberRow(tool, UiLayoutNext(ui, &column, 0), "Y", &element->rect.y, tool->entry[1],
                            sizeof tool->entry[1], step, -4096, 4096);
-        moved |= NumberRow(ui, UiLayoutNext(ui, &column, 0), "W", &element->rect.width,
+        if (element->rect.x != wasX || element->rect.y != wasY)
+        {
+            int dx = element->rect.x - wasX, dy = element->rect.y - wasY;
+            element->rect.x = wasX;
+            element->rect.y = wasY;
+            MoveElement(tool, tool->selected, dx, dy);
+        }
+        moved |= NumberRow(tool, UiLayoutNext(ui, &column, 0), "W", &element->rect.width,
                            tool->entry[2], sizeof tool->entry[2], step, 8, 4096);
-        moved |= NumberRow(ui, UiLayoutNext(ui, &column, 0), "H", &element->rect.height,
+        moved |= NumberRow(tool, UiLayoutNext(ui, &column, 0), "H", &element->rect.height,
                            tool->entry[3], sizeof tool->entry[3], step, 8, 4096);
         if (moved)
         {
-            element->rect = UiClampRect(element->rect, bounds, 8);
+            PlaceElement(tool, tool->selected, UiClampRect(element->rect, bounds, 8));
             Say(tool, "%s at %d,%d  %dx%d", ElementName(element->type), element->rect.x,
                 element->rect.y, element->rect.width, element->rect.height);
         }
@@ -805,6 +1012,7 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
                 flags = (UiButtonFlags)(flags | UI_BUTTON_DOWN);
             if (UiButtonEx(ui, cell, anchorNames[i], flags))
             {
+                PushUndo(tool);
                 element->anchors ^= anchorBits[i];
                 Say(tool, "Anchors: %s%s%s%s",
                     element->anchors & UI_ANCHOR_LEFT ? "left " : "",
@@ -814,14 +1022,14 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
             }
         }
         UiLabel(ui, UiLayoutNext(ui, &column, 0), "Least");
-        NumberRow(ui, UiLayoutNext(ui, &column, 0), "w", &element->minWidth, tool->entry[4],
+        NumberRow(tool, UiLayoutNext(ui, &column, 0), "w", &element->minWidth, tool->entry[4],
                   sizeof tool->entry[4], step, 0, 4096);
-        NumberRow(ui, UiLayoutNext(ui, &column, 0), "h", &element->minHeight, tool->entry[5],
+        NumberRow(tool, UiLayoutNext(ui, &column, 0), "h", &element->minHeight, tool->entry[5],
                   sizeof tool->entry[5], step, 0, 4096);
         UiLabel(ui, UiLayoutNext(ui, &column, 0), "Most (0 for no limit)");
-        NumberRow(ui, UiLayoutNext(ui, &column, 0), "w", &element->maxWidth, tool->entry[8],
+        NumberRow(tool, UiLayoutNext(ui, &column, 0), "w", &element->maxWidth, tool->entry[8],
                   sizeof tool->entry[8], step, 0, 4096);
-        NumberRow(ui, UiLayoutNext(ui, &column, 0), "h", &element->maxHeight, tool->entry[9],
+        NumberRow(tool, UiLayoutNext(ui, &column, 0), "h", &element->maxHeight, tool->entry[9],
                   sizeof tool->entry[9], step, 0, 4096);
         if (IsContainer(element->type))
         {
@@ -829,6 +1037,7 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
                                               "Shares: nothing"};
             if (UiButton(ui, UiLayoutNext(ui, &column, 0), flowNames[element->flow]))
             {
+                PushUndo(tool);
                 element->flow = (UiFlow)((element->flow + 1) % UI_FLOW_COUNT);
                 Say(tool, "%s divides its contents: %s", ElementName(element->type),
                     flowNames[element->flow]);
@@ -838,20 +1047,26 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
 
     UiRect divider = UiLayoutNext(ui, &column, ui->theme.containerGap);
     DrawRectangle(divider.x, divider.y + 1, divider.width, 1, ui->theme.darkGrey);
+    UiLabel(ui, UiLayoutNext(ui, &column, 0), "File");
+    UiTextField(ui, UiLayoutNext(ui, &column, 0), tool->path, sizeof tool->path);
     UiLabel(ui, UiLayoutNext(ui, &column, 0), "Surface");
-    UiTextField(ui, UiLayoutNext(ui, &column, 0), tool->document.title,
-                sizeof tool->document.title);
+    if (UiTextFieldFocused(ui, tool->document.title))
+        BeginEdit(tool, tool->document.title);
+    if (UiTextField(ui, UiLayoutNext(ui, &column, 0), tool->document.title,
+                    sizeof tool->document.title))
+        CommitEdit(tool);
     if (UiButton(ui, UiLayoutNext(ui, &column, 0), StyleName(tool->document.style)))
     {
+        PushUndo(tool);
         tool->document.style =
             (UiSurfaceStyle)((tool->document.style + 1) % UI_SURFACE_STYLE_COUNT);
         Say(tool, "Surface style: %s", StyleName(tool->document.style));
     }
     int width = tool->document.surfaceWidth;
     int height = tool->document.surfaceHeight;
-    bool resized = NumberRow(ui, UiLayoutNext(ui, &column, 0), "W", &width, tool->entry[6],
+    bool resized = NumberRow(tool, UiLayoutNext(ui, &column, 0), "W", &width, tool->entry[6],
                              sizeof tool->entry[6], ui->theme.itemHeight / 2, 16, 4096);
-    resized |= NumberRow(ui, UiLayoutNext(ui, &column, 0), "H", &height, tool->entry[7],
+    resized |= NumberRow(tool, UiLayoutNext(ui, &column, 0), "H", &height, tool->entry[7],
                          sizeof tool->entry[7], ui->theme.itemHeight / 2, 16, 4096);
     if (resized)
     {
@@ -859,6 +1074,12 @@ static void DrawInspectorContents(UiContext *ui, UiRect content, void *user)
                              tool->document.title);
         Say(tool, "Surface %dx%d", tool->document.surfaceWidth, tool->document.surfaceHeight);
     }
+    tool->inspectorHeight = column.cursor + ui->theme.containerGap * 2;
+    if (most > 0)
+        ScrollBar(tool, (UiRect){content.x + content.width - ui->theme.itemHeight, content.y,
+                                 ui->theme.itemHeight, content.height}, content.height);
+    if (!UiTextFieldActive(ui))
+        EndEdit(tool);
 }
 
 static bool EnsureScratch(Tool *tool, size_t needed)
@@ -903,12 +1124,11 @@ static UiRect ToScreen(const Tool *tool, UiRect rect)
                     canvas.height * tool->zoom};
 }
 
+// Picks what the pointer is actually over, as core draws it: contents above their container.
 static int ElementAt(Tool *tool, Vector2 point)
 {
-    for (size_t i = tool->document.count; i-- > 0;)
-        if (PointIn(ToCanvas(tool, tool->document.elements[i].rect), point))
-            return (int)i;
-    return -1;
+    Vector2 local = {point.x - tool->content.x, point.y - tool->content.y};
+    return UiDocumentElementAt(&tool->ui, &tool->document, NULL, local);
 }
 
 static void EditSurface(Tool *tool)
@@ -962,11 +1182,13 @@ static void EditSurface(Tool *tool)
     UiEditRect(&tool->ui, tool->content, &rect, &tool->rectEditor, &config, &tool->guides);
     if (before == UI_HANDLE_NONE && tool->rectEditor.handle != UI_HANDLE_NONE)
         PushUndo(tool);
-    element->rect = (UiRect){rect.x - tool->content.x, rect.y - tool->content.y, rect.width,
-                             rect.height};
+    PlaceElement(tool, tool->selected,
+                 (UiRect){rect.x - tool->content.x, rect.y - tool->content.y, rect.width, rect.height});
     if (tool->rectEditor.handle != UI_HANDLE_NONE)
         Say(tool, "%s at %d,%d  %dx%d", ElementName(element->type), element->rect.x,
             element->rect.y, element->rect.width, element->rect.height);
+    else if (before == UI_HANDLE_MOVE)
+        Reparent(tool, tool->selected); // let go of a drag: it belongs where it was dropped
 }
 
 static UiRect GripRect(const Tool *tool, UiRect outer)
@@ -1134,11 +1356,8 @@ static void Nudge(Tool *tool, int dx, int dy, bool resize)
         element->rect.height += dy;
     }
     else
-    {
-        element->rect.x += dx;
-        element->rect.y += dy;
-    }
-    element->rect = UiClampRect(element->rect, ContentBounds(tool), 8);
+        MoveElement(tool, tool->selected, dx, dy);
+    PlaceElement(tool, tool->selected, UiClampRect(element->rect, ContentBounds(tool), 8));
     Say(tool, "%s at %d,%d  %dx%d", ElementName(element->type), element->rect.x, element->rect.y,
         element->rect.width, element->rect.height);
 }
@@ -1360,7 +1579,9 @@ static void SmokeChecks(Tool *tool)
         {
             well->anchors = UI_ANCHOR_LEFT | UI_ANCHOR_RIGHT | UI_ANCHOR_TOP;
             well->flow = UI_FLOW_ROW;
+            // Parents are explicit: moving a rectangle into the well does not adopt it.
             sized.elements[0].rect = (UiRect){1, 1, 66, 28};
+            UiDocumentSetParent(&sized, 0, 3);
             UiDocumentAdd(&sized, UI_ELEMENT_BUTTON, (UiRect){67, 1, 66, 28}, "Two");
             UiDocumentAdd(&sized, UI_ELEMENT_BUTTON, (UiRect){133, 1, 66, 28}, "Three");
             rects = UiDocumentResolve(&tool->ui, &sized, 301, 100);
@@ -2124,7 +2345,7 @@ static bool Init(void *context)
         return false;
     tool->gridStep = tool->ui.theme.containerGap;
     // Smoke runs must not depend on whatever layout happens to be on disk.
-    if (tool->smoke || !UiDocumentLoad(&tool->document, LAYOUT_PATH))
+    if (tool->smoke || !UiDocumentLoad(&tool->document, tool->path))
     {
         UiDocumentInit(&tool->document, 320, 200, UI_SURFACE_WINDOW, "Layout");
         int gap = tool->ui.theme.containerGap;
@@ -2135,7 +2356,7 @@ static bool Init(void *context)
         Say(tool, "New layout");
     }
     else
-        Say(tool, "Loaded %s", LAYOUT_PATH);
+        Say(tool, "Loaded %s", tool->path);
     if (tool->smoke)
         SmokeChecks(tool);
     return true;
@@ -2183,6 +2404,10 @@ static void Draw(void *context, float alpha)
                             theme->containerGap * 4 + theme->indentWidth * 2)};
     tool->inspector.rect = (UiRect){screen.width - INSPECTOR_WIDTH - MARGIN, panelTop,
                                     INSPECTOR_WIDTH, MaxInt(0, panelBottom - panelTop)};
+
+    // The wheel scrolls whichever panel it is over, and zooms only over the workspace.
+    if (tool->input.wheel != 0 && PointIn(tool->inspector.rect, tool->input.mousePosition))
+        tool->inspectorScroll -= (int)tool->input.wheel * theme->itemHeight;
 
     int workspaceX = tool->palette.rect.x + PALETTE_WIDTH + MARGIN;
     tool->workspace = (UiRect){workspaceX, panelTop,
@@ -2296,6 +2521,8 @@ static void Shutdown(void *context)
 {
     Tool *tool = context;
     ClearUndo(tool);
+    if (tool->pendingValid)
+        UiDocumentFree(&tool->pending);
     if (tool->canvas.id)
         UnloadRenderTexture(tool->canvas);
     free(tool->scratch);
@@ -2308,13 +2535,16 @@ static void Shutdown(void *context)
 int main(int argc, char **argv)
 {
     Tool tool = {0};
+    snprintf(tool.path, sizeof tool.path, "%s", LAYOUT_PATH);
     for (int i = 1; i < argc; i++)
     {
         if (!strcmp(argv[i], "--smoke"))
             tool.smoke = true;
+        else if (argv[i][0] != '-')
+            snprintf(tool.path, sizeof tool.path, "%s", argv[i]);
         else
         {
-            fprintf(stderr, "Usage: %s [--smoke]\n", argv[0]);
+            fprintf(stderr, "Usage: %s [--smoke] [layout.ui]\n", argv[0]);
             return 1;
         }
     }
