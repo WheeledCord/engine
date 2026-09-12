@@ -110,7 +110,7 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
     project.config.title = "Authoring demo";
     project.classes = classes;
     project.classCount = 1;
-    project.scene = "projects/authoring_demo/start.scene";
+    project.scene = "scenes/start.scene";
     project.context = text;
     project.ui = &ui;
     project.BuildUi = BuildUi;

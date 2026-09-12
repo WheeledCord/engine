@@ -1,0 +1,9 @@
+# What this project is. Nothing about how to build it, and nothing about where the engine is:
+# engine-build finds the SDK through pkg-config, ENGINE_SDK, or ./sdk.
+name authoring_demo
+
+module entry
+module gameplay
+
+source src/*.c
+scenes scenes
