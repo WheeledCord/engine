@@ -1,4 +1,4 @@
-core_ui_document 2
+core_ui_document 6
 surface 180 57 2	Game Over
-3 3 3 174 24 0.5 0	Out of lives
-0 3 30 174 24 0.5 0	Restart
+3 3 3 174 24 0.5 0 5 0 0 3 0 0 0 1 -1 -	Out of lives
+0 3 30 174 24 0.5 0 5 0 0 3 0 0 1 1 -1 restart	Restart

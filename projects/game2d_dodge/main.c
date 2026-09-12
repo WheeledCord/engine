@@ -10,6 +10,7 @@
    loads and draws it with the core/ui runtime instead of hand-drawn text. */
 #include "core/engine.h"
 #include "core/ui.h"
+#include <string.h>
 #include "core/ui_document.h"
 #include "raymath.h"
 #include <stdio.h>
@@ -151,9 +152,11 @@ static void Draw(void *context, float alpha)
         UiBeginFrame(&g->ui, &g->frameInput, screen);
         UiRect menu = UiDocumentOuterRect(&g->ui, &g->menu, (Vector2){0, 0});
         Vector2 origin = {(float)((SCREEN_W - menu.width) / 2), (float)((SCREEN_H - menu.height) / 2)};
-        bool clicked = UiDocumentDraw(&g->ui, &g->menu, origin, true);
+        UiDocumentDraw(&g->ui, &g->menu, origin, true);
         UiEndFrame(&g->ui);
-        if (clicked)
+        // The layout says which button this is, so adding another one to it changes nothing here.
+        const UiElement *pressed = UiDocumentActivated(&g->menu);
+        if (pressed && !strcmp(pressed->name, "restart"))
             g->restartRequested = true;
     }
 }
