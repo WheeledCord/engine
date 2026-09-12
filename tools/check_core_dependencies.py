@@ -12,6 +12,8 @@ import sys
 root = pathlib.Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser()
 parser.add_argument('--cc', default='cc')
+parser.add_argument('--cflags', default='-std=c99 -DGRAPHICS_API_OPENGL_21',
+                    help="the flags core is compiled with, so conditional includes are seen as the build sees them")
 parser.add_argument('--raylib', required=True)
 parser.add_argument('--probe', type=pathlib.Path, help='Additional translation unit for checking the guard')
 args = parser.parse_args()
@@ -21,7 +23,7 @@ files = sorted((root / 'core').glob('*.c')) + sorted((root / 'core').glob('*.h')
 if args.probe:
     files.append(args.probe.resolve())
 for source in files:
-    result = subprocess.run(shlex.split(args.cc) + ['-std=c99', '-DGRAPHICS_API_OPENGL_21', '-I' + str(raylib), '-x', 'c', '-M', '-MT', 'core_dependency', str(source)], capture_output=True, text=True)
+    result = subprocess.run(shlex.split(args.cc) + shlex.split(args.cflags) + ['-I' + str(raylib), '-x', 'c', '-M', '-MT', 'core_dependency', str(source)], capture_output=True, text=True)
     if result.returncode:
         sys.stderr.write(result.stderr)
         sys.exit(result.returncode)
@@ -31,5 +33,6 @@ for source in files:
         if args.probe and path == args.probe.resolve():
             continue
         if not any(path == directory or directory in path.parents for directory in allowed):
-            sys.exit(f'Forbidden core dependency: {source.relative_to(root)} -> {path}')
+            name = source.relative_to(root) if root in source.parents else source
+            sys.exit(f'Forbidden core dependency: {name} -> {path}')
 print('Core dependency boundary: PASS')
