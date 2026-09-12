@@ -44,8 +44,10 @@ void TransformRotateWorld(Transform *t, Vector3 axis, float radians)
     t->rotation = QuaternionNormalize(QuaternionMultiply(turn, t->rotation));
 }
 
-Vector3 TransformForward(Transform t) { return TransformDirection(t, (Vector3){0, 0, -1}); }
-Vector3 TransformRight(Transform t) { return TransformDirection(t, (Vector3){1, 0, 0}); }
+Vector3 TransformForward(Transform t) { return TransformDirection(t, (Vector3){0, 0, 1}); }
+// Right-handed with +Z forward and +Y up puts the object's right on -X, which is also the way
+// FpsCamera strafes at yaw zero.
+Vector3 TransformRight(Transform t) { return TransformDirection(t, (Vector3){-1, 0, 0}); }
 Vector3 TransformUp(Transform t) { return TransformDirection(t, (Vector3){0, 1, 0}); }
 
 Vector3 TransformPoint(Transform t, Vector3 point)
@@ -78,8 +80,13 @@ bool TransformLookAt(Transform *t, Vector3 target, Vector3 up)
     up = Vector3Normalize(up);
     if (Vector3LengthSqr(Vector3CrossProduct(direction, up)) < 1e-12f)
         return false;
-    Matrix view = MatrixLookAt((Vector3){0}, direction, up);
-    t->rotation = QuaternionNormalize(QuaternionInvert(QuaternionFromMatrix(view)));
+    // Columns are where the local axes end up: local +Z on the target, local +Y as close to the
+    // given up as the direction allows.
+    Vector3 x = Vector3Normalize(Vector3CrossProduct(up, direction));
+    Vector3 y = Vector3CrossProduct(direction, x);
+    Matrix basis = {x.x, y.x, direction.x, 0, x.y, y.y, direction.y, 0,
+                    x.z, y.z, direction.z, 0, 0,   0,   0,           1};
+    t->rotation = QuaternionNormalize(QuaternionFromMatrix(basis));
     return true;
 }
 

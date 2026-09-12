@@ -179,8 +179,8 @@ static void TransformChecks(Test *test)
     Transform t = TransformIdentity();
     t.scale = (Vector3){2, 3, -4};
     TransformRotateWorld(&t, (Vector3){0, 1, 0}, PI / 2);
-    TransformMoveLocal(&t, (Vector3){0, 0, -5});
-    Check(test, Vector3Distance(t.translation, (Vector3){-5, 0, 0}) < 1e-5f,
+    TransformMoveLocal(&t, (Vector3){0, 0, 5}); // forward is +Z
+    Check(test, Vector3Distance(t.translation, (Vector3){5, 0, 0}) < 1e-5f,
           "local forward follows rotation without scaling movement speed");
     TransformMoveWorld(&t, (Vector3){0, 0, 2});
     Vector3 point = {1, 2, 3}, world = TransformPoint(t, point), local = {0};
@@ -192,7 +192,7 @@ static void TransformChecks(Test *test)
           "singular transform rejects inverse without writing output");
     Check(test, TransformLookAt(&t, Vector3Add(t.translation, (Vector3){2, 1, -3}), (Vector3){0, 1, 0}) &&
                 Vector3Distance(TransformForward(t), Vector3Normalize((Vector3){2, 1, -3})) < 1e-5f,
-          "look-at points negative Z toward the target");
+          "look-at points the forward axis at the target");
     Quaternion previous = t.rotation;
     Check(test, !TransformLookAt(&t, t.translation, (Vector3){0, 1, 0}) && QuaternionEquals(previous, t.rotation),
           "coincident look target preserves orientation");
@@ -200,8 +200,8 @@ static void TransformChecks(Test *test)
     TransformRotateWorld(&a, (Vector3){0, 1, 0}, PI / 2); b = a;
     TransformRotateLocal(&a, (Vector3){1, 0, 0}, PI / 2);
     TransformRotateWorld(&b, (Vector3){1, 0, 0}, PI / 2);
-    Check(test, Vector3Distance(TransformForward(a), (Vector3){0, 1, 0}) < 1e-5f &&
-                Vector3Distance(TransformForward(b), (Vector3){-1, 0, 0}) < 1e-5f,
+    Check(test, Vector3Distance(TransformForward(a), (Vector3){0, -1, 0}) < 1e-5f &&
+                Vector3Distance(TransformForward(b), (Vector3){1, 0, 0}) < 1e-5f,
           "local and world rotation use their declared axes");
     Transform2D t2 = Transform2DIdentity();
     t2.scale = (Vector2){-2, 3};
