@@ -11,11 +11,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Token returns NULL both at the end and on a bad token, so it says which through this flag.
 typedef struct SceneReader
 {
     const char *cursor;
     const char *end;
     int line;
+    bool failed;
 } SceneReader;
 
 static void SkipSpace(SceneReader *reader)
@@ -64,16 +66,23 @@ static char *Token(SceneReader *reader)
     if (quoted)
         start = ++reader->cursor;
     size_t capacity = 32, length = 0;
+    bool closed = false;
     char *token = malloc(capacity);
     if (!token)
+    {
+        reader->failed = true;
         return NULL;
+    }
     while (reader->cursor < reader->end)
     {
         char character = *reader->cursor++;
         if (quoted)
         {
             if (character == '"')
+            {
+                closed = true;
                 break;
+            }
             if (character == '\\' && reader->cursor < reader->end)
             {
                 character = *reader->cursor++;
@@ -92,6 +101,7 @@ static char *Token(SceneReader *reader)
             char *grown = realloc(token, capacity);
             if (!grown)
             {
+                reader->failed = true;
                 free(token);
                 return NULL;
             }
@@ -99,8 +109,9 @@ static char *Token(SceneReader *reader)
         }
         token[length++] = character;
     }
-    if (quoted && (reader->cursor > reader->end || reader->cursor[-1] != '"'))
+    if (quoted && !closed)
     {
+        reader->failed = true;
         free(token);
         return NULL;
     }
@@ -125,13 +136,20 @@ bool GameplaySceneLoad(GameplayWorld *world, const char *path, bool replaceWorld
         return false;
     if (replaceWorld)
         GameplayWorldClear(world);
-    SceneReader reader = {text, text + strlen(text), 1};
+    SceneReader reader = {text, text + strlen(text), 1, false};
     bool ok = true;
     for (;;)
     {
         char *kind = Token(&reader);
         if (!kind)
+        {
+            if (reader.failed)
+            {
+                fprintf(stderr, "%s:%d: unterminated or unreadable token\n", path, reader.line);
+                ok = false;
+            }
             break;
+        }
         if (strcmp(kind, "entity"))
         {
             fprintf(stderr, "%s:%d: expected 'entity'\n", path, reader.line);
@@ -222,7 +240,8 @@ bool GameplaySceneWrite(const GameplayWorld *world, const char *path)
 {
     if (!world || !path)
         return false;
-    FILE *file = fopen(path, "wb");
+    CoreAtomicFile atomic;
+    FILE *file = CoreAtomicBegin(&atomic, path);
     if (!file)
         return false;
     bool ok = true;
@@ -239,6 +258,5 @@ bool GameplaySceneWrite(const GameplayWorld *world, const char *path)
                  fputc('\n', file) != EOF;
         ok = ok && fputs("}\n\n", file) != EOF;
     }
-    if (fclose(file)) ok = false;
-    return ok;
+    return CoreAtomicCommit(&atomic, ok);
 }
