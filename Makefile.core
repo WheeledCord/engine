@@ -9,15 +9,17 @@ RLSRC := $(BUILD)/raylib/src
 RLLIB := $(RLSRC)/libraylib.a
 CORE_SRC := $(filter-out core/entry.c,$(wildcard core/*.c))
 CORE_OBJ := $(patsubst core/%.c,$(BUILD)/%.o,$(CORE_SRC))
-GAMEPLAY_SRC := $(wildcard gameplay/*.c) $(wildcard gameplay/script/*.c)
-GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC)) $(BUILD)/vendor/s7.o \
+GAMEPLAY_SRC := $(wildcard gameplay/*.c)
+GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC))
+SCRIPT_SRC := $(wildcard gameplay/script/*.c)
+SCRIPT_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(SCRIPT_SRC)) $(BUILD)/vendor/s7.o \
 	$(BUILD)/vendor/amx.o $(BUILD)/vendor/amxaux.o $(BUILD)/vendor/amxfloat.o $(PAWN_VM_EXTRA)
 CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
 RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
 RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
-.PHONY: run-script run-script-pawn run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
-all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/authoring_demo $(BUILD)/regression_test \
+.PHONY: sdk install sdk-example run-script run-script-pawn run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
+all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/regression_test \
 	$(BUILD)/script_demo projects/script_demo/mover.amx projects/regression_test/tester.amx
 games: $(BUILD)/game3d_collector $(BUILD)/game2d_dodge
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
@@ -86,13 +88,16 @@ $(BUILD)/engine.inc: $(BUILD)/script_demo
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(GAMEPLAY_OBJ)
+$(BUILD)/libscript.a: $(SCRIPT_OBJ) Makefile.core
+	rm -f $@
+	$(AR) rcs $@ $(SCRIPT_OBJ)
 # One declaration per project: name, core|gameplay, optional entry.
 # Every projects/<name>/*.c is built; projects can keep a custom main by omitting entry.
 define core_project
 $(BUILD)/projects/$(1)/%.o: projects/$(1)/%.c $(RLSRC)/.exported | boundary
 	mkdir -p $$(@D)
 	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $$< -o $$@
-$(BUILD)/$(1): $(patsubst projects/$(1)/%.c,$(BUILD)/projects/$(1)/%.o,$(wildcard projects/$(1)/*.c)) $(if $(filter entry,$(3)),$(BUILD)/entry.o) $(if $(filter gameplay,$(2)),$(BUILD)/libgameplay.a) $(BUILD)/libcore.a $(RLLIB) | boundary
+$(BUILD)/$(1): $(patsubst projects/$(1)/%.c,$(BUILD)/projects/$(1)/%.o,$(wildcard projects/$(1)/*.c)) $(if $(filter entry,$(3)),$(BUILD)/entry.o) $(if $(filter gameplay,$(2)),$(BUILD)/libscript.a $(BUILD)/libgameplay.a) $(BUILD)/libcore.a $(RLLIB) | boundary
 	$(CC) $$^ $(LDLIBS) -o $$@
 endef
 
@@ -101,12 +106,52 @@ $(eval $(call core_project,gameplay_test,gameplay))
 $(eval $(call core_project,ui_tool,core))
 $(eval $(call core_project,game3d_collector,core))
 $(eval $(call core_project,game2d_dodge,core))
-$(eval $(call core_project,authoring_demo,gameplay,entry))
 $(eval $(call core_project,regression_test,gameplay))
 $(eval $(call core_project,script_demo,gameplay,entry))
 
-run-authoring: $(BUILD)/authoring_demo
-	./$(BUILD)/authoring_demo
+# ---- the SDK a project outside this repository builds against --------------------------------
+# Everything a project needs and nothing of this repository's own layout: headers, static libraries,
+# the runtime data the engine loads, the Pawn compiler and its declarations, and the tools that build
+# a project. It is written somewhere of its own, never into a project's own directory.
+SDK ?= $(BUILD)/sdk
+PREFIX ?= $(HOME)/.local
+SDK_HEADERS := $(filter-out core/ui_internal.h,$(wildcard core/*.h)) $(wildcard gameplay/*.h) \
+	$(wildcard gameplay/script/*.h)
+sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/pawncc $(BUILD)/engine.inc
+	rm -rf $(SDK)
+	mkdir -p $(SDK)/include/core $(SDK)/include/gameplay/script $(SDK)/lib/pkgconfig $(SDK)/bin \
+		$(SDK)/share/engine/src $(SDK)/share/engine/pawn
+	cp $(filter core/%,$(SDK_HEADERS)) $(SDK)/include/core/
+	cp $(filter gameplay/%.h,$(SDK_HEADERS)) $(SDK)/include/gameplay/ 2>/dev/null || true
+	cp gameplay/script/*.h gameplay/script/script_api.def $(SDK)/include/gameplay/script/
+	cp $(RLSRC)/raylib.h $(RLSRC)/raymath.h $(RLSRC)/rlgl.h $(SDK)/include/
+	cp $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(SDK)/lib/
+	# In the tree this file sits beside engine.h; in an SDK it is included the way a project does.
+	sed 's|#include "engine.h"|#include "core/engine.h"|' core/entry.c > $(SDK)/share/engine/src/entry.c
+	cp -r core/fonts core/shaders $(SDK)/share/engine/
+	cp $(BUILD)/engine.inc vendor/pawn/include/*.inc vendor/pawn/include/*.INC $(SDK)/share/engine/pawn/
+	# pawncc lives beside its own includes, not in bin/: it works out where its standard includes
+	# are from its own location, and from bin/ that search reaches include/core, a directory it
+	# would open as though it were the core.inc it is looking for, and then read forever.
+	cp $(BUILD)/pawncc $(SDK)/share/engine/pawn/
+	cp tools/engine_build.py $(SDK)/bin/engine-build
+	cp tools/engine_new.py $(SDK)/bin/engine-new
+	chmod +x $(SDK)/bin/engine-build $(SDK)/bin/engine-new
+	python3 tools/write_engine_pc.py --prefix "$(abspath $(SDK))" --out $(SDK)/lib/pkgconfig/engine.pc
+	@echo "SDK in $(SDK); build a project with $(SDK)/bin/engine-build <project dir>"
+# Installing is the same tree somewhere lasting, with the paths inside engine.pc pointing there.
+install: sdk
+	mkdir -p $(PREFIX)
+	cp -r $(SDK)/include $(SDK)/lib $(SDK)/bin $(SDK)/share $(PREFIX)/
+	python3 tools/write_engine_pc.py --prefix "$(abspath $(PREFIX))" --out $(PREFIX)/lib/pkgconfig/engine.pc
+	@echo "Installed to $(PREFIX). PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig"
+# The example project, built the way anyone outside this repository would build one.
+sdk-example: sdk
+	$(SDK)/bin/engine-build examples/authoring_demo --sdk $(SDK)
+
+# The example lives outside this repository's own projects, so it runs the way anyone else's does.
+run-authoring: sdk
+	$(SDK)/bin/engine-build examples/authoring_demo --sdk $(SDK) --run
 run-script: $(BUILD)/script_demo
 	./$(BUILD)/script_demo
 run-script-pawn: $(BUILD)/script_demo projects/script_demo/mover.amx

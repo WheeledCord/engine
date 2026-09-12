@@ -54,6 +54,36 @@ See [the complete authoring example](projects/authoring_demo/README.md),
 [core application/input APIs](core/README.md#application-authoring), and
 [gameplay authoring and migration](gameplay/README.md).
 
+## Building a game with it
+
+The engine builds an SDK: headers, static libraries, its runtime data, the Pawn toolchain, and a
+pkg-config file describing them.
+
+    make -f Makefile.core sdk                  # build/core/sdk
+    make -f Makefile.core install PREFIX=~/.local
+
+A project lives anywhere and says only what it is, in an `engine.project` manifest — no build rules
+and no path into the engine:
+
+    name authoring_demo
+
+    module entry
+    module gameplay
+
+    source src/*.c
+    scenes scenes
+
+`engine-build` reads it, finds the SDK (named with `--sdk`, in `ENGINE_SDK`, vendored at `./sdk`, or
+installed and found through pkg-config), links one static binary, puts the project's content and the
+engine's runtime data beside it so it runs from anywhere, and checks that nothing has reached past
+the SDK into the engine's own files.
+
+    engine-new ~/games/mine --language scheme
+    engine-build ~/games/mine        # add --sdk <dir> when nothing is installed
+    ~/games/mine/build/mine
+
+`examples/authoring_demo` is a project of exactly that shape, built the way anyone else's would be.
+
 ## Scripting
 
 Scheme and Pawn, over one binding table. The script-facing API is described once as data, and each
