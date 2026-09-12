@@ -1,6 +1,5 @@
 # Build output
 build/
-examples/*/build/
 *.o
 *.d
 
@@ -13,6 +12,3 @@ __pycache__/
 # The UI tool's working file, and raylib's F12 screenshots
 projects/ui_tool/layout.ui
 screenshot*.png
-
-# Other engines' source, kept locally for reference
-ref/

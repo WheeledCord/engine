@@ -1,4 +1,0 @@
-entity "mover" {
-    "position" "360 260"
-    "speed" "220"
-}
