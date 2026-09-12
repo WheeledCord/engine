@@ -18,10 +18,8 @@ CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
 RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
 RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
-.PHONY: sdk install sdk-example run-script run-script-pawn run-authoring all run run-ui-tool smoke gameplay-smoke clean boundary games run-3d run-2d FORCE
-all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/ui_tool $(BUILD)/regression_test \
-	$(BUILD)/script_demo projects/script_demo/mover.amx projects/regression_test/tester.amx
-games: $(BUILD)/game3d_collector $(BUILD)/game2d_dodge
+.PHONY: sdk install sdk-example run-authoring all run smoke gameplay-smoke clean boundary FORCE
+all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/regression_test projects/regression_test/tester.amx
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
 # the export is of that revision, so a submodule update cannot leave stale sources behind.
 FORCE:
@@ -80,9 +78,9 @@ $(BUILD)/pawncc: $(PAWNCC_SRC)
 		-Ivendor/pawn/compiler -Ivendor/pawn/amx -Ivendor/pawn/linux $^ -o $@ -lm
 # A Pawn script is compiled against declarations written from the binding table, so the two cannot
 # fall out of step.
-$(BUILD)/engine.inc: $(BUILD)/script_demo
+$(BUILD)/engine.inc: $(BUILD)/pawn_include
 	@mkdir -p $(@D)
-	./$(BUILD)/script_demo --write-pawn-include $@
+	./$(BUILD)/pawn_include $@
 %.amx: %.pwn $(BUILD)/pawncc $(BUILD)/engine.inc
 	./$(BUILD)/pawncc -i$(BUILD) -ivendor/pawn/include -o$@ $<
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
@@ -103,11 +101,8 @@ endef
 
 $(eval $(call core_project,core_test,core))
 $(eval $(call core_project,gameplay_test,gameplay))
-$(eval $(call core_project,ui_tool,core))
-$(eval $(call core_project,game3d_collector,core))
-$(eval $(call core_project,game2d_dodge,core))
 $(eval $(call core_project,regression_test,gameplay))
-$(eval $(call core_project,script_demo,gameplay,entry))
+$(eval $(call core_project,pawn_include,gameplay))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
@@ -145,29 +140,19 @@ install: sdk
 	cp -r $(SDK)/include $(SDK)/lib $(SDK)/bin $(SDK)/share $(PREFIX)/
 	python3 tools/write_engine_pc.py --prefix "$(abspath $(PREFIX))" --out $(PREFIX)/lib/pkgconfig/engine.pc
 	@echo "Installed to $(PREFIX). PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig"
-# The example project, built the way anyone outside this repository would build one.
+# A project outside this repository, built the way any of them is. The games and the editor live
+# in the workspace beside the engine, so this is where they are unless told otherwise.
+WORKSPACE ?= ..
 sdk-example: sdk
-	$(SDK)/bin/engine-build examples/authoring_demo --sdk $(SDK)
+	$(SDK)/bin/engine-build $(WORKSPACE)/Games/authoring-demo --sdk $(SDK)
 
-# The example lives outside this repository's own projects, so it runs the way anyone else's does.
 run-authoring: sdk
-	$(SDK)/bin/engine-build examples/authoring_demo --sdk $(SDK) --run
-run-script: $(BUILD)/script_demo
-	./$(BUILD)/script_demo
-run-script-pawn: $(BUILD)/script_demo projects/script_demo/mover.amx
-	./$(BUILD)/script_demo --pawn
+	$(SDK)/bin/engine-build $(WORKSPACE)/Games/authoring-demo --sdk $(SDK) --run
 run: $(BUILD)/core_test
 	./$(BUILD)/core_test
-run-ui-tool: $(BUILD)/ui_tool
-	./$(BUILD)/ui_tool
-run-3d: $(BUILD)/game3d_collector
-	./$(BUILD)/game3d_collector
-run-2d: $(BUILD)/game2d_dodge
-	./$(BUILD)/game2d_dodge
 smoke: all
 	./$(BUILD)/core_test --smoke
 	./$(BUILD)/gameplay_test
-	./$(BUILD)/ui_tool --smoke
 	./$(BUILD)/regression_test
 	./$(BUILD)/regression_test --runner
 gameplay-smoke: $(BUILD)/gameplay_test

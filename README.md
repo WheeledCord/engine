@@ -2,6 +2,15 @@
 
 A C engine built on raylib, targeting OpenGL 2.1.
 
+This is the engine. The games and the editor built with it live beside it in the workspace, each a
+project of its own:
+
+    trenchengine/
+      engine/        this repository
+      references/    other engines, kept to read
+      Games/         dodge, collector, scripted-mover, authoring-demo
+      Tools/         ui-editor
+
 `core/` is the engine: window and main loop, input, shaders, render targets, mesh building,
 skeletons and animation, an FPS camera, and an immediate-mode UI. A project declares the GPU
 capabilities it needs and core checks those and nothing else. `gameplay/` is an optional entity
@@ -20,23 +29,19 @@ raylib is a submodule, compiled from source into `build/` on the first build (ab
 and cached after that. If you cloned without `--recurse-submodules`, run
 `git submodule update --init` first.
 
-    make -f Makefile.core run-ui-tool   # UI layout editor
     make -f Makefile.core run           # core_test: skinned character, sampled depth
-    make -f Makefile.core games         # two demo games
-    make -f Makefile.core run-2d        # one of them
-    make -f Makefile.core run-authoring # scene-spawned mover, input actions, UI capture
-    make -f Makefile.core run-script    # the same mover, written in Scheme, with a live REPL
-    make -f Makefile.core run-script-pawn # and again in Pawn, over the same bindings
     make -f Makefile.core smoke         # build everything and run the checks
+    make -f Makefile.core sdk           # the SDK games are built against
+    make -f Makefile.core run-authoring # build and run a game from the workspace, through the SDK
 
 Binaries locate the engine's own files relative to themselves, so they can be run from any working
 directory.
 
 ## Checks
 
-`make -f Makefile.core smoke` runs four suites and exits non-zero on failure. One of them,
+`make -f Makefile.core smoke` runs three suites and exits non-zero on failure. One of them,
 `regression_test`, holds a check for every bug that has been found and fixed here, so they stay
-fixed. They check
+fixed. The UI editor carries its own suite, run from the editor: `ui-editor --smoke`. They check
 behaviour rather than pixels. The UI tool's suite drives itself with scripted mouse, keyboard and
 clipboard input, and exports screenshots to `build/core/`.
 
@@ -82,15 +87,16 @@ the SDK into the engine's own files.
     engine-build ~/games/mine        # add --sdk <dir> when nothing is installed
     ~/games/mine/build/mine
 
-`examples/authoring_demo` is a project of exactly that shape, built the way anyone else's would be.
+Everything in `Games/` and `Tools/` is a project of exactly that shape, built the way anyone else's
+would be.
 
 ## Scripting
 
 Scheme and Pawn, over one binding table. The script-facing API is described once as data, and each
 language is a loop over that table rather than a set of hand-written bindings, so a call is bound
 once however many languages read it. `gameplay/script/README.md` explains the arrangement;
-`projects/script_demo` is the authoring demo's entity written in each language, with no C left that
-knows what a mover is.
+`Games/scripted-mover` is the same entity written in each language, with no C left that knows what a
+mover is.
 
 ## UI
 
