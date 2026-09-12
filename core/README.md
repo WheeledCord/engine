@@ -3,17 +3,20 @@
 Modules are ordinary C translation units, built into `build/core/libcore.a`. Public headers expose raylib-native types. Core includes only its own files, raylib and system headers; projects provide policy and content.
 
 - `engine`: window lifetime, accumulator loop, project callback signatures and input buffering.
-- `transform`: optional local/world movement, rotation, coordinate conversion and bounded turning for
-  2D/3D plain transforms. [Usage and raymath equivalents](TRANSFORMS.md).
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
   A project that declares nothing boots with no probe and no shader compiled; declaring
   `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.
   Anything declared and unavailable is fatal — there is no fallback renderer.
-- `file`, `shader`: checked disk reads and table-driven GLSL 120 shader loading. `CoreSetDataRoot`
+- `file`, `shader`: checked disk reads, atomic saves and table-driven GLSL 120 shader loading.
+  `CoreAtomicBegin`/`CoreAtomicCommit` write beside the destination and rename over it once the
+  bytes are on disk, so a save that fails leaves the previous file untouched. `CoreSetDataRoot`
   names where the engine's own files live so a binary started from another working directory still
   finds them; `CoreResolvePath` leaves absolute paths and files present in the working directory
   alone, so a project can override an engine file by shipping its own.
-- `frame_uniforms`: caller-declared names/types/counts, cached locations, per-frame value binding. Missing uniforms are skipped.
+- `frame_uniforms`: caller-declared names/types/counts, cached locations, per-frame value binding.
+  Missing uniforms are skipped. Textures take units of their own above the ones raylib uses for
+  material maps and its batch, so a bound frame texture stays bound across every world draw; a card
+  without the units fails the declaration instead of sampling something else.
 - `render_target`: colour/depth FBO construction and destruction.
 - `world_draw`: model-instance drawing with optional shader override across material slots.
 - `mesh_builder`: explicit position/normal/UV emission, quad helpers and directional mapping math.
@@ -21,17 +24,26 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
 - `animation`: per-instance playback, explicit FPS, frame sampling, quaternion pose blending, aim and GPU pose upload.
 - `fps_camera`: movement smoothing, accepted-distance gait, footfall events, breath/bob and viewmodel sway. Input mappings and collision/terrain policy belong to callers.
 - `viewmodel`: one scoped projection/depth function and camera-space transform helper.
+- `transform`: local/world movement, rotation, conversion and bounded turning. Forward is +Z, up
+  +Y, right -X, matching FpsCamera, ActorLookAt and glTF models. [Usage](TRANSFORMS.md).
 - `ui`: integer-pixel bevel primitives, immediate widgets, single-line text editing with caret,
   selection and system clipboard, nested clipped indent regions
-  and an externally loaded bitmap font. A normal button creates its compact indent automatically;
+  and an externally loaded bitmap font. Widgets only answer to the pointer where they are visible:
+  a control clipped away by a panel takes no clicks. A button that stops accepting input mid-press
+  reports nothing, and the keyboard is released as soon as a focused field stops being drawn.
+  `UiNextId` gives a widget an identity of the caller's choosing, so a press survives relabelling. A normal button creates its compact indent automatically;
   `UiButtonBare` is the explicit escape hatch for flush button stacks already inside one indent.
 - `ui_layout`: standard-gap row and column cursors, equal cells and conventional grouped indents.
 - `ui_document`: a saved layout — a sized, styled surface plus its elements — with versioned
   plain-text load/save, drawn by editor and runtime through one call so it looks the same in both.
-  Chrome and elements are separable for editors that draw between them. Elements carry anchors,
-  minimum sizes and an optional container flow; `UiDocumentResolve` places them for any other content
-  size in one integer pass, leaving the authored rectangles alone, and `UiDocumentMinimumSize`
-  reports how small the layout may go.
+  Chrome and elements are separable for editors that draw between them. Every element names its
+  container outright, so moving or resizing one never changes what holds it; contents are drawn over
+  their container and clipped to it. Elements carry anchors, minimum and maximum sizes and an
+  optional container flow; `UiDocumentResolve` places them for any other content size in one integer
+  pass, leaving the authored rectangles alone. Siblings that stretch divide the change and stop at
+  their own minimums without ever overlapping, and `UiDocumentMinimumSize` reports the size that
+  actually fits. An element can carry a name, and `UiDocumentActivated` tells a game which one was
+  used, so one layout can hold more than one button.
 - `ui_editor`: topmost rectangle picking, eight-handle move/resize, selection handles, and snapping
   to a grid, to other rectangles' edges and centres, to the conventional gap and to whole rows,
   reporting the guide lines it matched. Snap distances, grid pitch and what counts as conventional
