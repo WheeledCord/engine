@@ -34,6 +34,10 @@ struct UiState
     uint64_t activeId;
     uint64_t focusedId;
     bool focusClaimed;
+    bool focusSeen;       // the focused field was drawn this frame
+    uint64_t nextId;      // UiNextId: identity for the next widget, 0 when unset
+    uint64_t seenIds[256]; // label hashes already used this frame, to number repeats
+    int seenCount;
     int caret;     // byte offset of the insertion point in the focused field
     int selection; // byte offset of the other end of the selection
     int scroll;    // pixels the focused field is scrolled by, so the caret stays visible
@@ -56,6 +60,12 @@ struct UiState
 void UiFill(UiContext *ui, UiRect rect, Color color);
 void UiQueueText(UiContext *ui, int x, int y, const char *text, Color color);
 bool UiPointInRect(Vector2 point, UiRect rect);
+// The pointer is over rect and over the visible part of it: inside the active clip, if any.
+bool UiHit(const UiContext *ui, UiRect rect);
+// Takes the identity set by UiNextId, or returns derived when none was set.
+uint64_t UiTakeId(UiContext *ui, uint64_t derived, uint64_t salt);
+// Identity from a label, numbered by how often that label has already appeared this frame.
+uint64_t UiLabelId(UiContext *ui, const char *label, uint64_t salt);
 UiRect UiIntersectRect(UiRect a, UiRect b);
 uint64_t UiPointerId(const void *pointer, uint64_t salt);
 uint64_t UiWidgetId(const char *label, UiRect rect, uint64_t salt);

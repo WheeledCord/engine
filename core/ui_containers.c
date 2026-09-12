@@ -54,8 +54,8 @@ void UiDrawPanel(UiContext *ui, UiPanel *panel, const char *title, UiContentFn d
                         panel->rect.y + ui->theme.frameWidth,
                         panel->rect.width - ui->theme.frameWidth * 2,
                         ui->theme.titleHeight};
-    bool titleHot = UiPointInRect(state->input.mousePosition, titleRect);
-    if (UiPointInRect(state->input.mousePosition, panel->rect))
+    bool titleHot = UiHit(ui, titleRect);
+    if (UiHit(ui, panel->rect))
         UiMarkMouse(ui);
     if (panel->draggable && UiInputAllowed(ui) && titleHot &&
         state->input.mousePressed[MOUSE_BUTTON_LEFT] && !state->activeId)
@@ -87,7 +87,7 @@ void UiDrawDock(UiContext *ui, UiDock *dock)
         tile->rect = (UiRect){dock->x, dock->y + (int)i * dock->tileSize, dock->tileSize,
                               dock->tileSize};
         UiDrawFrame(ui, tile->rect);
-        if (UiPointInRect(ui->state->input.mousePosition, tile->rect))
+        if (UiHit(ui, tile->rect))
             UiMarkMouse(ui);
         UiRect content = UiRectInset(tile->rect, ui->theme.frameWidth);
         UiClipState previous = UiPushClip(ui, content);

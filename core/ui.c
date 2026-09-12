@@ -299,6 +299,9 @@ void UiBeginFrame(UiContext *ui, const EngineInput *input, UiRect screen)
     ui->state->clip = (UiClipState){0};
     ui->state->mouseConsumed = ui->state->menuRoot != NULL || ui->state->activeId != 0;
     ui->state->focusClaimed = false;
+    ui->state->focusSeen = false;
+    ui->state->nextId = 0;
+    ui->state->seenCount = 0;
 }
 
 void UiEndFrame(UiContext *ui)
@@ -314,6 +317,9 @@ void UiEndFrame(UiContext *ui)
         ui->state->activeId = 0;
     // Focus is dropped only once every field has had its say, so the last one drawn cannot steal it.
     if (ui->state->input.mousePressed[MOUSE_BUTTON_LEFT] && !ui->state->focusClaimed)
+        ui->state->focusedId = 0;
+    // A field the project stopped drawing cannot keep the keyboard.
+    if (!ui->state->focusSeen)
         ui->state->focusedId = 0;
 }
 
@@ -461,6 +467,42 @@ void UiMarkMouse(UiContext *ui)
         ui->state->mouseConsumed = true;
 }
 
+bool UiHit(const UiContext *ui, UiRect rect)
+{
+    if (!ui || !ui->state || !UiPointInRect(ui->state->input.mousePosition, rect))
+        return false;
+    return !ui->state->clip.active || UiPointInRect(ui->state->input.mousePosition, ui->state->clip.rect);
+}
+
+void UiNextId(UiContext *ui, uint64_t id)
+{
+    if (ui && ui->state)
+        ui->state->nextId = id;
+}
+
+uint64_t UiTakeId(UiContext *ui, uint64_t derived, uint64_t salt)
+{
+    uint64_t id = ui->state->nextId;
+    ui->state->nextId = 0;
+    if (!id)
+        return derived;
+    id = (id ^ salt) * 1099511628211ULL;
+    return id ? id : 1;
+}
+
+uint64_t UiLabelId(UiContext *ui, const char *label, uint64_t salt)
+{
+    uint64_t base = UiWidgetId(label, (UiRect){0}, salt);
+    UiState *s = ui->state;
+    uint64_t repeat = 0;
+    for (int i = 0; i < s->seenCount; i++)
+        repeat += s->seenIds[i] == base;
+    if (s->seenCount < (int)(sizeof s->seenIds / sizeof s->seenIds[0]))
+        s->seenIds[s->seenCount++] = base;
+    uint64_t id = (base ^ (repeat * 0x9e3779b97f4a7c15ULL)) * 1099511628211ULL;
+    return id ? id : 1;
+}
+
 UiClipState UiPushClip(UiContext *ui, UiRect rect)
 {
     UiClipState previous = {0};
@@ -507,15 +549,17 @@ bool UiButtonControl(UiContext *ui, UiRect rect, const char *label, uint64_t id,
     if (!ui || !ui->state || !label)
         return false;
     UiState *state = ui->state;
-    bool hot = enabled && UiPointInRect(state->input.mousePosition, rect);
+    bool hot = enabled && UiHit(ui, rect);
     if (hot && interactive)
         UiMarkMouse(ui);
     bool inputAllowed = allowWhileMenuOpen || UiInputAllowed(ui);
     if (interactive && inputAllowed && hot && state->input.mousePressed[MOUSE_BUTTON_LEFT] &&
         !state->activeId)
         state->activeId = id;
-    bool held = state->activeId == id && state->input.mouseDown[MOUSE_BUTTON_LEFT];
-    bool clicked = state->activeId == id && hot && state->input.mouseReleased[MOUSE_BUTTON_LEFT];
+    // A button that stops taking input mid-press neither shows the press nor reports the click.
+    bool held = interactive && state->activeId == id && state->input.mouseDown[MOUSE_BUTTON_LEFT];
+    bool clicked = interactive && state->activeId == id && hot &&
+                   state->input.mouseReleased[MOUSE_BUTTON_LEFT];
     Color text = enabled ? ui->theme.black : ui->theme.darkGrey;
     bool down = (toggleVisual && clicked) ? !forcedDown : (held || forcedDown);
     // The control's own 1 px bevel: lit top-left at rest, inverted while held, face grey either way.
@@ -557,7 +601,8 @@ bool UiButtonAligned(UiContext *ui, UiRect rect, const char *label, UiButtonFlag
         UiDrawIndent(ui, rect);
         button = UiRectInset(rect, ui->theme.indentWidth);
     }
-    return UiButtonControl(ui, button, label, UiWidgetId(label, rect, 0x425554544f4eULL),
+    return UiButtonControl(ui, button, label,
+                           UiTakeId(ui, UiLabelId(ui, label, 0x425554544f4eULL), 0x425554544f4eULL),
                            !(flags & UI_BUTTON_DISABLED),
                            !(flags & (UI_BUTTON_DISABLED | UI_BUTTON_NO_INPUT)),
                            flags & UI_BUTTON_DOWN, false,
@@ -605,8 +650,8 @@ bool UiSliderEx(UiContext *ui, UiRect rect, float *value, float minimum, float m
     if (!ui || !ui->state || !value || !isfinite(minimum) || !isfinite(maximum) || maximum <= minimum)
         return false;
     UiState *state = ui->state;
-    uint64_t id = UiPointerId(value, 0x534c49444552ULL);
-    bool hot = interactive && UiPointInRect(state->input.mousePosition, rect);
+    uint64_t id = UiTakeId(ui, UiPointerId(value, 0x534c49444552ULL), 0x534c49444552ULL);
+    bool hot = interactive && UiHit(ui, rect);
     if (hot || (interactive && state->activeId == id))
         UiMarkMouse(ui);
     if (interactive && UiInputAllowed(ui) && hot && state->input.mousePressed[MOUSE_BUTTON_LEFT] &&
@@ -650,8 +695,8 @@ bool UiCheckboxEx(UiContext *ui, UiRect rect, const char *label, bool *value, bo
     if (!ui || !ui->state || !label || !value)
         return false;
     UiState *state = ui->state;
-    uint64_t id = UiPointerId(value, 0x434845434bULL);
-    bool hot = interactive && UiPointInRect(state->input.mousePosition, rect);
+    uint64_t id = UiTakeId(ui, UiPointerId(value, 0x434845434bULL), 0x434845434bULL);
+    bool hot = interactive && UiHit(ui, rect);
     if (hot)
         UiMarkMouse(ui);
     if (interactive && UiInputAllowed(ui) && hot && state->input.mousePressed[MOUSE_BUTTON_LEFT] &&
@@ -753,7 +798,7 @@ bool UiTextField(UiContext *ui, UiRect rect, char *text, size_t capacity)
     EnsureTextGlyphs(ui, text);
     UiState *state = ui->state;
     uint64_t id = UiPointerId(text, 0x544558544649454cULL);
-    bool hot = UiPointInRect(state->input.mousePosition, rect);
+    bool hot = UiHit(ui, rect);
     if (hot)
         UiMarkMouse(ui);
     // Padding is horizontal breathing room only: insetting the height as well would clip the tops
@@ -779,6 +824,7 @@ bool UiTextField(UiContext *ui, UiRect rect, char *text, size_t capacity)
         state->selecting = false;
     bool focused = state->focusedId == id;
     state->keyboardConsumed |= focused;
+    state->focusSeen |= focused;
     if (focused && state->selecting && state->input.mouseDown[MOUSE_BUTTON_LEFT])
         state->caret = FieldIndexAt(ui, text,
                                    (int)state->input.mousePosition.x - content.x + state->scroll);
@@ -963,7 +1009,7 @@ void UiIndent(UiContext *ui, UiRect rect, UiContentFn draw, void *user)
     if (!ui || !ui->state)
         return;
     UiDrawIndent(ui, rect);
-    if (UiPointInRect(ui->state->input.mousePosition, rect))
+    if (UiHit(ui, rect))
         UiMarkMouse(ui);
     UiRect content = UiRectInset(rect, ui->theme.indentWidth);
     UiClipState previous = UiPushClip(ui, content);
