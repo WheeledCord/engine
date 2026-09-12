@@ -7,7 +7,11 @@ static bool Init(void *context)
 {
     GameplayRuntime *r = context;
     const GameplayProject *p = &r->project;
-    if (p->config.fixed_dt <= 0 || (p->classCount && !p->classes))
+    // The engine's own configuration decides the step, so editing the descriptor after
+    // GameplayApplication returns cannot leave entities ticking at a different rate.
+    const EngineConfig *running = EngineRunningConfig();
+    double step = running ? running->fixed_dt : p->config.fixed_dt;
+    if (step <= 0 || (p->classCount && !p->classes))
     {
         TraceLog(LOG_ERROR, "Gameplay: supply a class table and a positive fixed_dt");
         return false;
@@ -17,7 +21,7 @@ static bool Init(void *context)
         if (p->classes[i].size > size)
             size = p->classes[i].size;
     if (!GameplayWorldInit(&r->world,
-                           (GameplayWorldConfig){p->maxEntities, size, p->config.fixed_dt}))
+                           (GameplayWorldConfig){p->maxEntities, size, step}))
     {
         TraceLog(LOG_ERROR, "Gameplay: invalid world capacity or allocation failure");
         return false;
@@ -96,7 +100,8 @@ EngineApplication GameplayApplication(GameplayRuntime *runtime, GameplayProject 
     EngineApplication app = EngineApplicationDefault();
     if (!runtime)
     {
-        app.config.width = 0;
+        TraceLog(LOG_ERROR, "Gameplay: GameplayApplication needs a runtime to own the world");
+        app.config.width = 0; // refused by EngineRunApplication, which logs the reason too
         return app;
     }
     *runtime = (GameplayRuntime){.project = project};

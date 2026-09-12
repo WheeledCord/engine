@@ -53,7 +53,9 @@ entity "classname" {
 }
 ```
 
-Quoted values support escaped backslash, quote and newline. Comments begin with # or //.
+Quoted values support escaped backslash, quote and newline. Comments begin with # or //. A token
+that is never closed is an error rather than the end of the file, and the writer replaces a scene
+only once the whole file is written, so a failed save keeps the old one.
 The writer preserves explicitly supplied configuration, including subsequent EntityKeyValue edits;
 it does not serialize arbitrary live simulation state or copy implicit defaults into the file.
 Setting the same key replaces its source value. Failed loads can leave earlier complete entities in
@@ -64,8 +66,9 @@ the world, but never a partially configured instance. Replacing a scene destroys
 `GameplayProjectDefault()` and `GameplayApplication(&runtime, project)` connect a project to the core
 application runner. Supply a class table, optional scene, context and whichever hooks are needed.
 The adapter derives the aligned storage stride from the largest class. Capacity defaults to 1024 slots
-and is configurable. It uses `config.fixed_dt` as the single source of gameplay timing; variable-only
-applications continue to use core directly.
+and is configurable. Gameplay timing comes from the configuration the engine is actually running, so changing the
+descriptor after `GameplayApplication` returns moves the entity tick with it instead of leaving the
+two out of step. Variable-only applications use core directly.
 
 Order:
 

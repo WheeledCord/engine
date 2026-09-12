@@ -50,6 +50,10 @@ int EngineRun(const EngineConfig *config, const EngineProject *project, void *co
     return EngineRunApplication(&application);
 }
 
+static const EngineConfig *runningConfig;
+
+const EngineConfig *EngineRunningConfig(void) { return runningConfig; }
+
 int EngineRunApplication(const EngineApplication *application)
 {
     if (!application) { TraceLog(LOG_ERROR, "Engine: missing application descriptor"); return 1; }
@@ -67,6 +71,7 @@ int EngineRunApplication(const EngineApplication *application)
         TraceLog(LOG_ERROR, "Engine: BuildUi needs a UiContext");
         return 1;
     }
+    runningConfig = c;
     SetConfigFlags(c->windowFlags);
     InitWindow(c->width, c->height, c->title ? c->title : "Core");
     if (!IsWindowReady()) return 1;
@@ -141,5 +146,6 @@ int EngineRunApplication(const EngineApplication *application)
     if (p->Shutdown) p->Shutdown(context);
     if (ownsUi) UiFree(application->ui);
     CloseWindow();
+    runningConfig = NULL;
     return result;
 }

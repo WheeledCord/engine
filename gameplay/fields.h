@@ -21,6 +21,8 @@ typedef enum EntityFieldType
 typedef struct EntityField
 {
     const char *name;
+    // ENTITY_STRING means a char array inside the payload. A char * member would pass the size
+    // check and then be overwritten with the text itself, so declare the array, not a pointer.
     EntityFieldType type;
     size_t offset, size;
     bool ranged; // Numeric limits also apply to each vector component.
