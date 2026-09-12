@@ -279,6 +279,15 @@ void ScriptS7Repl(ScriptHost *host)
     (void)host;
     if (!state.scheme)
         return;
+    // The prompt belongs to the REPL, and it waits until the window is up: raylib says a great deal
+    // while it starts, and anything printed before that scrolls away unseen.
+    static bool greeted;
+    if (!greeted)
+    {
+        greeted = true;
+        printf("\ns7 REPL on the running world. Try (spawn \"mover\" (vec 200 200))\n> ");
+        fflush(stdout);
+    }
     for (;;)
     {
         fd_set readable;

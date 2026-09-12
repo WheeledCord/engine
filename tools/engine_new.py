@@ -82,6 +82,7 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
+    SetTraceLogLevel(LOG_WARNING); // so the script REPL's prompt is not buried in raylib's startup
     static GameplayRuntime runtime;
     GameplayProject project = GameplayProjectDefault();
     project.config.title = "%(name)s";

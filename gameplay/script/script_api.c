@@ -57,7 +57,10 @@ static Color Unpack(int rgba)
 SCRIPT_BODY(log)
 {
     (void)host;
-    TraceLog(LOG_INFO, "SCRIPT %s", a[0].as.string);
+    // A script printing is the script talking to whoever is running it, so it is not the engine's
+    // log and does not disappear when the engine is asked to be quiet.
+    printf("%s\n", a[0].as.string);
+    fflush(stdout);
     return ScriptNone();
 }
 

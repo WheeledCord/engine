@@ -13,7 +13,7 @@
    C99 cannot pass an empty one. The sentinel is dropped when the table is built. */
 
 // ---- talking to the engine
-SCRIPT_BINDING(log, "log", SCRIPT_NONE, "write a line to the engine log",
+SCRIPT_BINDING(log, "log", SCRIPT_NONE, "print a line to the terminal",
                (SCRIPT_NONE, SCRIPT_STRING))
 SCRIPT_BINDING(rgba, "rgba", SCRIPT_INT, "pack a colour from r g b a, each 0 to 255",
                (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT, SCRIPT_INT, SCRIPT_INT))
