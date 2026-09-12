@@ -32,7 +32,9 @@ directory.
 
 ## Checks
 
-`make -f Makefile.core smoke` runs three suites and exits non-zero on failure. They check
+`make -f Makefile.core smoke` runs four suites and exits non-zero on failure. One of them,
+`regression_test`, holds a check for every bug that has been found and fixed here, so they stay
+fixed. They check
 behaviour rather than pixels. The UI tool's suite drives itself with scripted mouse, keyboard and
 clipboard input, and exports screenshots to `build/core/`.
 
