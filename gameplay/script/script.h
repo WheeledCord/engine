@@ -16,6 +16,7 @@
 #define SCRIPT_CLASS_FIELDS 8
 #define SCRIPT_CLASS_CAPACITY 32
 #define SCRIPT_SOUND_CAPACITY 16
+#define SCRIPT_ADDED_CAPACITY 32 // calls a game may add on top of the engine's
 
 // The payload every scripted entity carries: a transform, where it was a step ago so drawing can
 // interpolate, and the fields the class declared.
@@ -60,6 +61,8 @@ struct ScriptHost
     char pendingScene[256]; // a scene a script asked for, loaded once callbacks are finished
     ScriptClass classes[SCRIPT_CLASS_CAPACITY];
     size_t classCount;
+    const ScriptBinding *added[SCRIPT_ADDED_CAPACITY]; // the game's own calls, borrowed
+    int addedCount;
     char soundPaths[SCRIPT_SOUND_CAPACITY][128];
     Sound sounds[SCRIPT_SOUND_CAPACITY];
     size_t soundCount;

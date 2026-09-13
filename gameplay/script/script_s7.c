@@ -139,8 +139,10 @@ static bool FromScheme(s7_scheme *sc, s7_pointer p, ScriptType wanted, ScriptVal
 // ---- one dispatcher, one trampoline per row ---------------------------------------------------
 static s7_pointer Dispatch(s7_scheme *sc, int index, s7_pointer args)
 {
-    const ScriptBinding *table = ScriptBindings(NULL);
-    const ScriptBinding *binding = &table[index];
+    const ScriptBinding *binding = ScriptBindingAt(state.host, index);
+    if (!binding)
+        return s7_error(sc, s7_make_symbol(sc, "engine-error"),
+                        s7_list(sc, 1, s7_make_string(sc, "no such engine call")));
     ScriptValue values[8];
     int count = (int)s7_list_length(sc, args);
     if (count > (int)(sizeof values / sizeof values[0]))
@@ -165,6 +167,20 @@ static s7_pointer Dispatch(s7_scheme *sc, int index, s7_pointer args)
     }
 #include "script_api.def"
 #undef SCRIPT_BINDING
+
+/* A game's own calls are not known when this is compiled, so a pool of trampolines waits for them.
+   Each one carries its place in the table, which is the engine's rows followed by the game's. */
+#define S7_ADDED(i)                                                                                \
+    static s7_pointer S7_added##i(s7_scheme *sc, s7_pointer args)                                  \
+    {                                                                                              \
+        return Dispatch(sc, SCRIPT_INDEX_COUNT + i, args);                                         \
+    }
+S7_ADDED(0) S7_ADDED(1) S7_ADDED(2) S7_ADDED(3) S7_ADDED(4) S7_ADDED(5) S7_ADDED(6) S7_ADDED(7)
+S7_ADDED(8) S7_ADDED(9) S7_ADDED(10) S7_ADDED(11) S7_ADDED(12) S7_ADDED(13) S7_ADDED(14) S7_ADDED(15)
+S7_ADDED(16) S7_ADDED(17) S7_ADDED(18) S7_ADDED(19) S7_ADDED(20) S7_ADDED(21) S7_ADDED(22) S7_ADDED(23)
+S7_ADDED(24) S7_ADDED(25) S7_ADDED(26) S7_ADDED(27) S7_ADDED(28) S7_ADDED(29) S7_ADDED(30) S7_ADDED(31)
+#undef S7_ADDED
+static const s7_function addedTrampolines[] = {S7_added0, S7_added1, S7_added2, S7_added3, S7_added4, S7_added5, S7_added6, S7_added7, S7_added8, S7_added9, S7_added10, S7_added11, S7_added12, S7_added13, S7_added14, S7_added15, S7_added16, S7_added17, S7_added18, S7_added19, S7_added20, S7_added21, S7_added22, S7_added23, S7_added24, S7_added25, S7_added26, S7_added27, S7_added28, S7_added29, S7_added30, S7_added31};
 
 // define-entity is sugar over the class-* rows, not an engine call of its own: the shape of a
 // declaration is a language's business, and every frontend spells it its own way.
@@ -219,17 +235,26 @@ bool ScriptS7Open(ScriptHost *host)
         return false;
     state.host = host;
     state.language = (ScriptLanguage){"s7", &state, CallFunction};
-    int count = 0;
-    const ScriptBinding *table = ScriptBindings(&count);
-    // The whole frontend: every row, registered the way Scheme wants it.
     static const s7_function trampolines[] = {
 #define SCRIPT_BINDING(id, name, result, help, types) S7_##id,
 #include "script_api.def"
 #undef SCRIPT_BINDING
     };
+    int count = ScriptBindingCount(host);
+    if (count > SCRIPT_INDEX_COUNT + (int)(sizeof addedTrampolines / sizeof addedTrampolines[0]))
+    {
+        TraceLog(LOG_ERROR, "Script: more added calls than there are trampolines for them");
+        return false;
+    }
+    // The whole frontend: every row, the engine's and the game's, registered the way Scheme wants.
     for (int i = 0; i < count; i++)
-        s7_define_function(state.scheme, table[i].name, trampolines[i], table[i].argumentCount, 0,
-                           false, table[i].help);
+    {
+        const ScriptBinding *binding = ScriptBindingAt(host, i);
+        s7_function trampoline = i < SCRIPT_INDEX_COUNT ? trampolines[i]
+                                                        : addedTrampolines[i - SCRIPT_INDEX_COUNT];
+        s7_define_function(state.scheme, binding->name, trampoline, binding->argumentCount, 0, false,
+                           binding->help);
+    }
     s7_define_function(state.scheme, "engine-on-error", OnError, 0, 0, true,
                        "reports a script error and lets the engine carry on");
     s7_eval_c_string(state.scheme, prelude);
