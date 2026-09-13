@@ -75,7 +75,31 @@ Cells are pinned to 32 bits so the VM agrees with what `pawncc` emits, which als
 an IEEE float. The assembly core is 32-bit x86 only; every other target runs the portable C VM, and
 `PAWN_CORE=asm` on a machine it cannot serve stops the build rather than quietly ignoring the ask.
 
-## Adding a call
+## A game's own calls
+
+The engine's rows are fixed when the engine is built, but a game adds its own at runtime, and they
+are indistinguishable from the engine's afterwards: checked against their declaration, spelled for
+each language, and written into the Pawn declarations.
+
+```c
+SCRIPT_CALL(grapple, "grapple!", SCRIPT_FLOAT, "fire a grapple at a point",
+            (SCRIPT_NONE, SCRIPT_VECTOR2))
+{
+    return ScriptFloat(Grapple(host, a[0].as.vector2));
+}
+...
+ScriptAddBinding(&host, &grapple_binding);   // before opening a frontend
+```
+
+One macro writes the function and the row together, as in the engine's own table, so the two cannot
+drift. Add them before opening a frontend: Pawn resolves every native a script names as the script
+loads. A game that writes Pawn passes its host to `ScriptPawnWriteInclude`, so its own calls are
+declared alongside the engine's.
+
+Each frontend keeps a small pool of trampolines for calls that did not exist when it was compiled,
+because neither s7 nor Pawn lets a registered function carry anything of its own.
+
+## Adding a call to the engine
 
 Add the row. Both languages have it on the next build, and so will the node editor:
 

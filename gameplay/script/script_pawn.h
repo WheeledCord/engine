@@ -12,6 +12,7 @@ bool ScriptPawnOpen(ScriptHost *host, const char *compiledPath);
 void ScriptPawnClose(void);
 // How a row's name is spelled where dashes and question marks are not allowed in an identifier.
 void ScriptPawnName(const char *name, char *out, size_t capacity);
-// Writes the native declarations a Pawn script includes, from the same table.
-bool ScriptPawnWriteInclude(const char *path);
+/* Writes the native declarations a Pawn script includes, from the same table. A host may be
+   given so the calls that game added are declared too; NULL writes the engine's alone. */
+bool ScriptPawnWriteInclude(const ScriptHost *host, const char *path);
 #endif

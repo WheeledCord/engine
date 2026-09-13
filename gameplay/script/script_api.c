@@ -524,6 +524,42 @@ const ScriptBinding *ScriptBindings(int *count)
     return table;
 }
 
+bool ScriptAddBinding(ScriptHost *host, const ScriptBinding *binding)
+{
+    if (!host || !binding || !binding->name || !binding->call ||
+        host->addedCount == SCRIPT_ADDED_CAPACITY)
+        return false;
+    if (ScriptBindingNamed(binding->name))
+    {
+        TraceLog(LOG_ERROR, "Script: %s is already a call of the engine's", binding->name);
+        return false;
+    }
+    for (int i = 0; i < host->addedCount; i++)
+        if (!strcmp(host->added[i]->name, binding->name))
+            return false;
+    host->added[host->addedCount++] = binding;
+    return true;
+}
+
+int ScriptBindingCount(const ScriptHost *host)
+{
+    int count = 0;
+    ScriptBindings(&count);
+    return count + (host ? host->addedCount : 0);
+}
+
+const ScriptBinding *ScriptBindingAt(const ScriptHost *host, int index)
+{
+    int count = 0;
+    const ScriptBinding *engine = ScriptBindings(&count);
+    if (index < 0)
+        return NULL;
+    if (index < count)
+        return &engine[index];
+    index -= count;
+    return host && index < host->addedCount ? host->added[index] : NULL;
+}
+
 const ScriptBinding *ScriptBindingNamed(const char *name)
 {
     if (!name)

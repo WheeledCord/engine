@@ -82,7 +82,12 @@ static int Cells(ScriptType type)
 
 static cell Dispatch(AMX *amx, int index, const cell *params)
 {
-    const ScriptBinding *binding = &ScriptBindings(NULL)[index];
+    const ScriptBinding *binding = ScriptBindingAt(state.host, index);
+    if (!binding)
+    {
+        amx_RaiseError(amx, AMX_ERR_NATIVE);
+        return 0;
+    }
     ScriptValue values[8];
     char strings[4][256];
     int used = 0;
@@ -188,6 +193,19 @@ static cell Dispatch(AMX *amx, int index, const cell *params)
 #include "script_api.def"
 #undef SCRIPT_BINDING
 
+/* The same waiting trampolines as the Scheme side, for the calls a game adds. */
+#define PAWN_ADDED(i)                                                                              \
+    static cell AMX_NATIVE_CALL Pawn_added##i(AMX *amx, const cell *params)                        \
+    {                                                                                              \
+        return Dispatch(amx, SCRIPT_INDEX_COUNT + i, params);                                      \
+    }
+PAWN_ADDED(0) PAWN_ADDED(1) PAWN_ADDED(2) PAWN_ADDED(3) PAWN_ADDED(4) PAWN_ADDED(5) PAWN_ADDED(6) PAWN_ADDED(7)
+PAWN_ADDED(8) PAWN_ADDED(9) PAWN_ADDED(10) PAWN_ADDED(11) PAWN_ADDED(12) PAWN_ADDED(13) PAWN_ADDED(14) PAWN_ADDED(15)
+PAWN_ADDED(16) PAWN_ADDED(17) PAWN_ADDED(18) PAWN_ADDED(19) PAWN_ADDED(20) PAWN_ADDED(21) PAWN_ADDED(22) PAWN_ADDED(23)
+PAWN_ADDED(24) PAWN_ADDED(25) PAWN_ADDED(26) PAWN_ADDED(27) PAWN_ADDED(28) PAWN_ADDED(29) PAWN_ADDED(30) PAWN_ADDED(31)
+#undef PAWN_ADDED
+static const AMX_NATIVE addedTrampolines[] = {Pawn_added0, Pawn_added1, Pawn_added2, Pawn_added3, Pawn_added4, Pawn_added5, Pawn_added6, Pawn_added7, Pawn_added8, Pawn_added9, Pawn_added10, Pawn_added11, Pawn_added12, Pawn_added13, Pawn_added14, Pawn_added15, Pawn_added16, Pawn_added17, Pawn_added18, Pawn_added19, Pawn_added20, Pawn_added21, Pawn_added22, Pawn_added23, Pawn_added24, Pawn_added25, Pawn_added26, Pawn_added27, Pawn_added28, Pawn_added29, Pawn_added30, Pawn_added31};
+
 static bool CallFunction(void *user, const char *function)
 {
     ScriptPawn *pawn = user;
@@ -220,24 +238,27 @@ bool ScriptPawnOpen(ScriptHost *host, const char *path)
     }
     state.host = host;
     state.language = (ScriptLanguage){"pawn", &state, CallFunction};
-    int count = 0;
-    const ScriptBinding *table = ScriptBindings(&count);
-    if (count >= (int)(sizeof state.natives / sizeof state.natives[0]))
-        return false;
-    // The whole frontend: every row, registered the way Pawn wants it.
-    for (int i = 0; i < count; i++)
-    {
-        ScriptPawnName(table[i].name, state.names[i], sizeof state.names[i]);
-        state.natives[i].name = state.names[i];
-        state.natives[i].func = NULL;
-    }
     static const AMX_NATIVE trampolines[] = {
 #define SCRIPT_BINDING(id, name, result, help, types) Pawn_##id,
 #include "script_api.def"
 #undef SCRIPT_BINDING
     };
+    int count = ScriptBindingCount(host);
+    if (count >= (int)(sizeof state.natives / sizeof state.natives[0]) ||
+        count > SCRIPT_INDEX_COUNT + (int)(sizeof addedTrampolines / sizeof addedTrampolines[0]))
+    {
+        TraceLog(LOG_ERROR, "Script: more calls than there is room to register");
+        return false;
+    }
+    // The whole frontend: every row, the engine's and the game's, registered the way Pawn wants.
     for (int i = 0; i < count; i++)
-        state.natives[i].func = trampolines[i];
+    {
+        const ScriptBinding *binding = ScriptBindingAt(host, i);
+        ScriptPawnName(binding->name, state.names[i], sizeof state.names[i]);
+        state.natives[i].name = state.names[i];
+        state.natives[i].func = i < SCRIPT_INDEX_COUNT ? trampolines[i]
+                                                       : addedTrampolines[i - SCRIPT_INDEX_COUNT];
+    }
     state.natives[count].name = NULL;
     state.natives[count].func = NULL;
     // Pawn's arithmetic on Float: values is itself a set of natives, and comes with the VM.
@@ -270,7 +291,7 @@ void ScriptPawnClose(void)
 /* Pawn needs every native declared before a script can call one. The declarations are written from
    the same table, so they cannot fall behind it: a row added to script_api.def turns up here on the
    next build. */
-bool ScriptPawnWriteInclude(const char *path)
+bool ScriptPawnWriteInclude(const ScriptHost *host, const char *path)
 {
     FILE *file = fopen(path, "wb");
     if (!file)
@@ -279,18 +300,18 @@ bool ScriptPawnWriteInclude(const char *path)
                   "   the build, and anything changed here would be lost and out of step. */\n"
                   "#if defined _engine_included\n  #endinput\n#endif\n"
                   "#define _engine_included\n\n#include <float>\n\n");
-    int count = 0;
-    const ScriptBinding *table = ScriptBindings(&count);
+    int count = ScriptBindingCount(host);
     for (int i = 0; i < count; i++)
     {
+        const ScriptBinding *row = ScriptBindingAt(host, i);
         char name[48];
-        ScriptPawnName(table[i].name, name, sizeof name);
-        const char *tag = table[i].result == SCRIPT_FLOAT ? "Float:" : "";
-        fprintf(file, "// %s\nnative %s%s(", table[i].help, tag, name);
+        ScriptPawnName(row->name, name, sizeof name);
+        const char *tag = row->result == SCRIPT_FLOAT ? "Float:" : "";
+        fprintf(file, "// %s\nnative %s%s(", row->help, tag, name);
         const char *separator = "";
-        for (int argument = 0; argument < table[i].argumentCount; argument++)
+        for (int argument = 0; argument < row->argumentCount; argument++)
         {
-            ScriptType type = table[i].arguments[argument];
+            ScriptType type = row->arguments[argument];
             static const char *axes[] = {"x", "y", "z"};
             for (int cell = 0; cell < Cells(type); cell++)
             {
@@ -306,10 +327,10 @@ bool ScriptPawnWriteInclude(const char *path)
             }
         }
         // A vector answer comes back through references, because a native returns one cell.
-        if (table[i].result == SCRIPT_VECTOR2 || table[i].result == SCRIPT_VECTOR3)
+        if (row->result == SCRIPT_VECTOR2 || row->result == SCRIPT_VECTOR3)
         {
             static const char *axes[] = {"x", "y", "z"};
-            for (int cell = 0; cell < Cells(table[i].result); cell++)
+            for (int cell = 0; cell < Cells(row->result); cell++)
             {
                 fprintf(file, "%s&Float:out%s", separator, axes[cell]);
                 separator = ", ";

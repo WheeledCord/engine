@@ -15,5 +15,5 @@ int main(int argc, char **argv)
         fprintf(stderr, "Usage: %s <engine.inc>\n", argv[0]);
         return 1;
     }
-    return ScriptPawnWriteInclude(argv[1]) ? 0 : 1;
+    return ScriptPawnWriteInclude(NULL, argv[1]) ? 0 : 1;
 }

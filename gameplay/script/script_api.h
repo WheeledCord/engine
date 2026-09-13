@@ -51,8 +51,39 @@ typedef struct ScriptBinding
     const char *help;
 } ScriptBinding;
 
-/* The whole table. Frontends walk it at startup. */
+/* The engine's own rows. Frontends walk the whole table through ScriptBindingAt, which is these
+   followed by whatever a game added. */
 const ScriptBinding *ScriptBindings(int *count);
+
+/* A game adds calls of its own at runtime: they are checked, spelled and registered exactly like
+   the engine's, in every language and in the generated Pawn declarations. Add them before opening a
+   frontend, because Pawn resolves every native a script names when the script is loaded.
+
+   SCRIPT_CALL writes the C function and the row it is described by together, so the two cannot
+   drift, and leaves a ScriptBinding named <id>_binding to hand to ScriptAddBinding:
+
+       SCRIPT_CALL(grapple, "grapple!", SCRIPT_NONE, "fire a grapple at a point",
+                   (SCRIPT_NONE, SCRIPT_VECTOR2))
+       {
+           Grapple(host, a[0].as.vector2);
+           return ScriptNone();
+       }
+       ...
+       ScriptAddBinding(&host, &grapple_binding); */
+#define SCRIPT_UNWRAP(...) {__VA_ARGS__}
+#define SCRIPT_CALL(id, name, result, help, types)                                                 \
+    static ScriptValue Script_##id(ScriptHost *host, const ScriptValue *a);                        \
+    static const ScriptType id##_types[] = SCRIPT_UNWRAP types;                                    \
+    static const ScriptBinding id##_binding = {                                                    \
+        name, result, id##_types + 1,                                                              \
+        (int)(sizeof id##_types / sizeof(ScriptType)) - 1, Script_##id, help};                      \
+    static ScriptValue Script_##id(ScriptHost *host, const ScriptValue *a)
+
+// The row and everything it points at must outlive the host. Returns false when there is no room.
+bool ScriptAddBinding(ScriptHost *host, const ScriptBinding *binding);
+// Every call a script may make: the engine's rows, then the game's.
+int ScriptBindingCount(const ScriptHost *host);
+const ScriptBinding *ScriptBindingAt(const ScriptHost *host, int index);
 const ScriptBinding *ScriptBindingNamed(const char *name);
 const char *ScriptTypeName(ScriptType type);
 
