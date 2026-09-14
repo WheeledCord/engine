@@ -74,11 +74,11 @@ int EngineRunApplication(const EngineApplication *application)
     runningConfig = c;
     SetConfigFlags(c->windowFlags);
     InitWindow(c->width, c->height, c->title ? c->title : "Core");
-    if (!IsWindowReady()) return 1;
+    if (!IsWindowReady()) { runningConfig = NULL; return 1; }
     CoreSetDataRoot(c->engine_path ? c->engine_path : GetApplicationDirectory());
     SetExitKey(KEY_NULL);
     SetTargetFPS(c->targetFps);
-    if (!CoreCheckCapabilities(c->requirements)) { CloseWindow(); return 1; }
+    if (!CoreCheckCapabilities(c->requirements)) { CloseWindow(); runningConfig = NULL; return 1; }
     bool initialised = !p->Init || p->Init(context);
     bool ownsUi = false;
     if (initialised && application->BuildUi && !application->ui->state)

@@ -1,0 +1,41 @@
+# Feature catalogue
+
+This is the complete map of supported engine services. The linked header is the public contract; the
+linked guide explains authoring where one exists. A service listed as **project-owned** is deliberately
+not an engine feature.
+
+| Area | Service | Public header / guide |
+| --- | --- | --- |
+| Runtime | Window, fixed/variable loop, callback lifecycle, UI input routing | `core/engine.h`; [application loop](../user/application-loop.md) |
+| Runtime | GPU capability contract | `core/capabilities.h` |
+| Input | Raw input, actions, axes, vectors | `core/input.h` |
+| Files | Data-root resolution, checked reads, atomic writes | `core/file.h` |
+| Rendering | GLSL 120 shader tables and frame uniforms | `core/shader.h`, `core/frame_uniforms.h` |
+| Rendering | Colour/depth render targets | `core/render_target.h` |
+| Rendering | Model instances and shader overrides | `core/world_draw.h` |
+| Geometry | Explicit mesh construction | `core/mesh_builder.h` |
+| Animation | Skeleton poses, clips, blending, aim, GPU skinning | `core/skeleton.h`, `core/animation.h`, `core/playback.h` |
+| Sprites | Grid atlases, animation, ground anchors | `core/sprite_sheet.h` |
+| Isometric | Trimetic tile/hex conversion, ordering, neighbours | `core/iso_grid.h` |
+| Camera | FPS camera and viewmodel helpers | `core/fps_camera.h`, `core/viewmodel.h` |
+| Transforms | 2D/3D movement, conversion, bounded turns | `core/transform.h` |
+| UI | Immediate widgets, text input, clipping, menus, panels | `core/ui.h`, `core/ui_menu.h`, `core/ui_containers.h` |
+| UI authoring | Layout/document load-save-resolve and editing helpers | `core/ui_document.h`, `core/ui_editor.h`, `core/ui_layout.h` |
+| Gameplay | Generational entity world and lifecycle | `gameplay/entity.h`; [gameplay guide](../user/gameplay.md) |
+| Gameplay | Typed entity fields and scene files | `gameplay/fields.h`, `gameplay/scene.h` |
+| Gameplay | Ordered update/draw system registry | `gameplay/systems.h` |
+| Gameplay | Core application adapter | `gameplay/runtime.h` |
+| Gameplay | A* routing and movement over the isometric hex grid | `gameplay/iso_move.h` |
+| Scripting | Shared Scheme/Pawn binding table and scripted entities | `gameplay/script/script.h`; [scripting guide](../user/scripting.md) |
+
+## Project-owned facilities
+
+Physics, collision response, terrain rules, spatial indexing, map size, content formats/conversion,
+game rules, and application-specific state remain project-owned. See [compatibility and limits](compatibility.md).
+
+## Reference coverage
+
+The XML reference begins with the application and entity-world contracts, whose lifetime rules are the
+most consequential. Add XML files service by service as their public API is maintained; do not claim a
+service is fully reference-covered until all exported symbols and public types in its header are
+documented.
