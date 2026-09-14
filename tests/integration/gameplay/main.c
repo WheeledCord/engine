@@ -4,6 +4,8 @@
 
 #include "gameplay/entity.h"
 #include "core/transform.h"
+#include "core/camera2d.h"
+#include "core/collision2d.h"
 #include "gameplay/scene.h"
 #include "gameplay/systems.h"
 
@@ -251,6 +253,59 @@ static void TransformChecks(Test *test)
           "bounded movement and turning take shortest paths without overshoot");
 }
 
+static void QueryAndCameraChecks(Test *test)
+{
+    Collision2DWorld queries = {0};
+    Collision2DShape circle = {COLLISION2D_CIRCLE, {4, 0}, {0, 0}, 1};
+    Collision2DShape box = {COLLISION2D_AABB, {10, 0}, {2, 2}, 0};
+    Collision2DFilter player = {1u, 2u};
+    Collision2DFilter enemy = {2u, 1u};
+    Collision2DHit hits[4] = {0};
+    bool ready = Collision2DWorldInit(&queries, 4, 2) &&
+                 Collision2DShouldCollide(player, enemy) &&
+                 Collision2DOverlaps(circle, (Collision2DShape){COLLISION2D_AABB, {4, 0}, {1, 1}, 0});
+    Collision2DHandle first = ready ? Collision2DWorldAdd(&queries, circle, enemy, (void *)"circle") : COLLISION2D_NULL;
+    Collision2DHandle second = ready ? Collision2DWorldAdd(&queries, box, enemy, (void *)"box") : COLLISION2D_NULL;
+    Collision2DHandle corner = ready ? Collision2DWorldAdd(&queries,
+        (Collision2DShape){COLLISION2D_AABB, {10, 10}, {1, 1}, 0}, enemy, (void *)"corner") : COLLISION2D_NULL;
+    Check(test, ready && first.index != UINT32_MAX && second.index != UINT32_MAX && corner.index != UINT32_MAX,
+          "collision world accepts optional circle and AABB proxies");
+    Check(test, Collision2DQueryCircle(&queries, (Vector2){4, 0}, 1, 2u, hits, 4) == 1 &&
+                hits[0].handle.index == first.index && !Collision2DShouldCollide(player, (Collision2DFilter){2u, 0}),
+          "collision queries use exact overlap and explicit layers and masks");
+    Collision2DSweep sweep = {0};
+    Check(test, Collision2DSweepCircle(&queries, (Vector2){0, 0}, .5f, (Vector2){12, 0}, 2u, &sweep) &&
+                sweep.hit.handle.index == first.index && fabsf(sweep.fraction - .2083333f) < .001f && sweep.normal.x < -.9f,
+          "circle sweep returns the nearest standard query hit");
+    Check(test, Collision2DSweepCircle(&queries, (Vector2){6, 6}, .5f, (Vector2){6, 6}, 2u, &sweep) &&
+                sweep.hit.handle.index == corner.index && fabsf(sweep.fraction - .4410744f) < .001f,
+          "circle sweep handles rounded AABB corners without an early box hit");
+    Check(test, Collision2DWorldSetShape(&queries, first, (Collision2DShape){COLLISION2D_CIRCLE, {30, 0}, {0, 0}, 1}) &&
+                Collision2DQueryCircle(&queries, (Vector2){4, 0}, 1, 2u, hits, 4) == 0,
+          "moving a proxy updates the lazily rebuilt spatial hash");
+    Check(test, Collision2DWorldRemove(&queries, first) &&
+                Collision2DQueryAabb(&queries, Collision2DAabbMake((Vector2){4, 0}, (Vector2){2, 2}), 2u, hits, 4) == 0,
+          "collision removal rebuilds the spatial hash and invalidates handles");
+    Collision2DWorldFree(&queries);
+
+    CoreCamera2D camera = CoreCamera2DDefault();
+    camera.zoom = 2;
+    camera.bounds = (Rectangle){0, 0, 100, 100};
+    camera.clampBounds = true;
+    CoreCamera2DSetViewport(&camera, (Vector2){40, 20});
+    CoreCamera2DFollow(&camera, (Vector2){-10, 120}, 1);
+    Vector2 screen = CoreCamera2DWorldToScreen(&camera, 1, camera.position);
+    Check(test, Vector2Distance(camera.position, (Vector2){10, 95}) < 1e-5f &&
+                Vector2Distance(screen, (Vector2){20, 10}) < 1e-5f &&
+                Vector2Distance(CoreCamera2DScreenToWorld(&camera, 1, screen), camera.position) < 1e-5f,
+          "camera convention clamps bounds and round-trips world and screen space");
+    camera.followRate = 3;
+    CoreCamera2DFollow(&camera, (Vector2){50, 50}, 1.0f / 3.0f);
+    Check(test, camera.position.x > camera.previous.x && camera.position.x < 50 &&
+                CoreCamera2DInterpolated(&camera, .5f).x > camera.previous.x,
+          "camera follow smoothing keeps interpolation opt-in and deterministic");
+}
+
 int main(void)
 {
     Test test = {0};
@@ -294,6 +349,7 @@ int main(void)
     GameplayWorldFree(&world);
     AuthoringChecks(&test);
     TransformChecks(&test);
+    QueryAndCameraChecks(&test);
     printf("GAMEPLAY TEST failures=%d\n", test.failures);
     return test.failures ? 1 : 0;
 }

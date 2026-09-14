@@ -30,6 +30,38 @@
         "GameplayWorldStepInput",
         "GameplayWorldDrawInterpolated"
       ]
+    },
+    {
+      "name": "CoreCamera2D",
+      "source": "core/camera2d.h",
+      "output": "docs/api/core/CoreCamera2D.xml",
+      "symbols": [
+        "CoreCamera2DDefault",
+        "CoreCamera2DSetViewport",
+        "CoreCamera2DFollow",
+        "CoreCamera2DInterpolated",
+        "CoreCamera2DWorldToScreen",
+        "CoreCamera2DScreenToWorld"
+      ]
+    },
+    {
+      "name": "Collision2DWorld",
+      "source": "core/collision2d.h",
+      "output": "docs/api/core/Collision2DWorld.xml",
+      "symbols": [
+        "Collision2DAabbMake",
+        "Collision2DAabbOverlaps",
+        "Collision2DOverlaps",
+        "Collision2DShouldCollide",
+        "Collision2DWorldInit",
+        "Collision2DWorldFree",
+        "Collision2DWorldAdd",
+        "Collision2DWorldRemove",
+        "Collision2DWorldSetShape",
+        "Collision2DQueryAabb",
+        "Collision2DQueryCircle",
+        "Collision2DSweepCircle"
+      ]
     }
   ]
 }

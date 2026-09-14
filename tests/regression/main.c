@@ -1081,6 +1081,22 @@ static void SpriteSheetChecks(void)
     bad.anchorY = bad.cellHeight + 1;
     Check(!SpriteSheetWriteMeta(path, &bad), "an anchor outside its own cell is refused");
 }
+static void SpritePresentationChecks(void)
+{
+    SpritePresentation present = SpritePresentationDefault();
+    Check(present.scale == 1 && present.tint.r == 255 && !present.flipX && !present.flipY,
+          "a sprite presentation defaults to an unflipped white unit-scale sprite");
+    SpriteDrawItem items[] = {
+        {.presentation = {.layer = 1, .order = 5}, .sequence = 4},
+        {.presentation = {.layer = 0, .order = 99}, .sequence = 8},
+        {.presentation = {.layer = 1, .order = 5}, .sequence = 2},
+        {.presentation = {.layer = 1, .order = 2}, .sequence = 9},
+    };
+    qsort(items, sizeof items / sizeof *items, sizeof *items, SpriteDrawItemCompare);
+    Check(items[0].presentation.layer == 0 && items[1].presentation.order == 2 &&
+              items[2].sequence == 2 && items[3].sequence == 4,
+          "sprite draw order is layer, then order, then explicit stable sequence");
+}
 /* A row must not be named for a language's syntax. Scheme will let a row shadow one of its
    procedures -- `log` does, and works -- but not one of its special forms: `(set! "f" 1)` is read as
    assignment however the row is registered, so the engine's function is simply never called and the
@@ -1217,6 +1233,7 @@ int main(int argc, char **argv)
     GameCallChecks();
     PlaybackChecks();
     SpriteSheetChecks();
+    SpritePresentationChecks();
     RowNameChecks();
     SheetCacheChecks();
     IsoGridChecks();

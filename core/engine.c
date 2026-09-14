@@ -5,6 +5,7 @@
 #include "engine.h"
 #include "file.h"
 #include "ui.h"
+#include "diagnostics_internal.h"
 #include <math.h>
 #include <string.h>
 static EngineInput PollInput(void)
@@ -88,11 +89,16 @@ int EngineRunApplication(const EngineApplication *application)
     }
     int result = initialised ? 0 : 1;
     double last = GetTime(), accumulator = 0;
+    CoreDiagnostics diagnostics = {0};
+    CoreDiagnosticsSetCurrent(&diagnostics);
     EngineInput pending = {0};
     bool running = initialised;
     while (running && !WindowShouldClose())
     {
         double now = GetTime(), dt = now - last;
+        diagnostics.frameDt = dt;
+        diagnostics.updates = 0;
+        diagnostics.frames++;
         last = now;
         if (c->max_frame_dt > 0 && dt > c->max_frame_dt)
         {
@@ -124,6 +130,7 @@ int EngineRunApplication(const EngineApplication *application)
             while (accumulator >= c->fixed_dt && running)
             {
                 running = !p->Update || p->Update(context, c->fixed_dt, &pending);
+                diagnostics.updates++;
                 EngineInputDrain(&pending);
                 accumulator -= c->fixed_dt;
             }
@@ -134,6 +141,7 @@ int EngineRunApplication(const EngineApplication *application)
             running = !p->Update || p->Update(context, dt, &pending);
             EngineInputDrain(&pending);
         }
+        diagnostics.fixedBacklog = accumulator;
         if (running)
         {
             BeginDrawing();
@@ -147,5 +155,6 @@ int EngineRunApplication(const EngineApplication *application)
     if (ownsUi) UiFree(application->ui);
     CloseWindow();
     runningConfig = NULL;
+    CoreDiagnosticsSetCurrent(NULL);
     return result;
 }

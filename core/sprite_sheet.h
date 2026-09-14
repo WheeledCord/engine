@@ -7,6 +7,7 @@
 #include "playback.h"
 #include "raylib.h"
 #include <stdbool.h>
+#include <stdint.h>
 /* A grid atlas played back frame by frame: any producer (baked from 3D, hand-drawn, whatever) that
    fills a columns*rows grid of cellWidth*cellHeight cells in raster order, frame 0 at the top left. */
 typedef struct SpriteSheetMeta
@@ -54,6 +55,16 @@ int SpriteAnimFrame(const SpriteAnim *anim);
 Rectangle SpriteAnimRect(const SpriteAnim *anim);
 /* Where to draw a frame, at its own size, so the sheet's ground anchor lands on `ground`. */
 Rectangle SpriteSheetGroundRect(const SpriteSheet *sheet, Vector2 ground);
+typedef struct SpritePresentation { Vector2 ground; float scale, rotation; Color tint; bool flipX, flipY; int layer; float order; } SpritePresentation;
+typedef struct SpriteDrawItem { const SpriteSheet *sheet; const SpriteAnim *animation; SpritePresentation presentation; uint64_t sequence; } SpriteDrawItem;
+/** Returns a presentation with unit scale, white tint, and an origin-ground position. */
+SpritePresentation SpritePresentationDefault(void);
+/** Draws frame at its anchored ground position with scale, tint, rotation and optional source flips. */
+void SpriteSheetDraw(const SpriteSheet *sheet, int frame, SpritePresentation presentation);
+/** Draws the current frame of an animation using the same presentation rules as SpriteSheetDraw. */
+void SpriteAnimDraw(const SpriteAnim *anim, SpritePresentation presentation);
+/** Orders SpriteDrawItem values by layer, then order, then insertion sequence; use directly with qsort. */
+int SpriteDrawItemCompare(const void *left, const void *right);
 /* Writes the sidecar text file describing an atlas a producer has already exported. Overwrites only
    after the whole file reaches disk. */
 bool SpriteSheetWriteMeta(const char *sheetPath, const SpriteSheetMeta *meta);
