@@ -4,6 +4,7 @@
 
 #ifndef GAMEPLAY_SCRIPT_H
 #define GAMEPLAY_SCRIPT_H
+#include "core/sprite_sheet.h"
 #include "core/transform.h"
 #include "gameplay/runtime.h"
 #include "script_api.h"
@@ -16,6 +17,7 @@
 #define SCRIPT_CLASS_FIELDS 8
 #define SCRIPT_CLASS_CAPACITY 32
 #define SCRIPT_SOUND_CAPACITY 16
+#define SCRIPT_SHEET_CAPACITY 32
 #define SCRIPT_ADDED_CAPACITY 32 // calls a game may add on top of the engine's
 
 // The payload every scripted entity carries: a transform, where it was a step ago so drawing can
@@ -63,6 +65,9 @@ struct ScriptHost
     size_t classCount;
     const ScriptBinding *added[SCRIPT_ADDED_CAPACITY]; // the game's own calls, borrowed
     int addedCount;
+    char sheetNames[SCRIPT_SHEET_CAPACITY][128];
+    SpriteSheet sheets[SCRIPT_SHEET_CAPACITY];
+    size_t sheetCount;
     char soundPaths[SCRIPT_SOUND_CAPACITY][128];
     Sound sounds[SCRIPT_SOUND_CAPACITY];
     size_t soundCount;
@@ -87,5 +92,10 @@ ScriptClass *ScriptHostClass(ScriptHost *host, const char *name);
 int ScriptHostIdOf(EntityHandle entity);
 // Hands the finished class to the world. Nothing may be spawned from it before this.
 bool ScriptClassRegister(ScriptHost *host, ScriptClass *type);
+/* A sprite sheet by name, loaded once and kept: `name` is the prefix the two files share, so
+   "assets/walk_2" is "assets/walk_2.png" described by "assets/walk_2.sheet". A script names a sheet
+   the same way it names a sound, and a project sharing this cache draws from the same copy rather
+   than loading its own. NULL when it cannot be found or there is no room left. */
+const SpriteSheet *ScriptHostSheet(ScriptHost *host, const char *name);
 EntityHandle ScriptHostHandleOf(ScriptHost *host, int id);
 #endif

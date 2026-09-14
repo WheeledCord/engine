@@ -47,6 +47,13 @@ entity "mover" {
 A scripted class brings its own size and alignment when it registers, like any other class, so a
 project does not have to reserve room for classes that do not exist yet.
 
+Scripts can coordinate their own entities without a game-specific C call: `find-first` and
+`find-next` walk one named class, while `entity-position`, `set-entity-position!`,
+`entity-get`, `entity-set-number!`, `entity-get-vector`, and `entity-set-vector!` access a live
+scripted entity named by its handle. A stale handle, an unknown field, or a handle for a C-only
+entity is safe: reads return zero values and writes do nothing. The API deliberately does not expose
+C payloads to scripts.
+
 ## Scheme
 
 `projects/script_demo` is the authoring demo's Mover, moved into `mover.scm` with no C left that

@@ -39,6 +39,14 @@ SCRIPT_BINDING(alive, "alive?", SCRIPT_BOOL, "is this handle still an entity",
                (SCRIPT_NONE, SCRIPT_ENTITY))
 SCRIPT_BINDING(classname, "classname", SCRIPT_STRING, "the class an entity was spawned from",
                (SCRIPT_NONE, SCRIPT_ENTITY))
+SCRIPT_BINDING(find_first, "find-first", SCRIPT_ENTITY, "the first living entity of a class",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(find_next, "find-next", SCRIPT_ENTITY,
+               "the next living entity of a class after an entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING))
+SCRIPT_BINDING(entity_position, "entity-position", SCRIPT_VECTOR2,
+               "the position of a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY))
+SCRIPT_BINDING(set_entity_position, "set-entity-position!", SCRIPT_NONE,
+               "put a scripted entity at a position", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_VECTOR2))
 SCRIPT_BINDING(think_next, "think-next", SCRIPT_NONE, "run think again on the next step",
                (SCRIPT_NONE))
 SCRIPT_BINDING(think_after, "think-after", SCRIPT_NONE, "run think again after so many seconds",
@@ -47,12 +55,20 @@ SCRIPT_BINDING(think_after, "think-after", SCRIPT_NONE, "run think again after s
 // ---- an entity's own fields
 SCRIPT_BINDING(get_number, "get", SCRIPT_FLOAT, "read a number field of this entity",
                (SCRIPT_NONE, SCRIPT_STRING))
-SCRIPT_BINDING(set_number, "set!", SCRIPT_NONE, "write a number field of this entity",
+SCRIPT_BINDING(set_number, "set-number!", SCRIPT_NONE, "write a number field of this entity",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_FLOAT))
 SCRIPT_BINDING(get_vector, "get-vector", SCRIPT_VECTOR2, "read a vector field of this entity",
                (SCRIPT_NONE, SCRIPT_STRING))
 SCRIPT_BINDING(set_vector, "set-vector!", SCRIPT_NONE, "write a vector field of this entity",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2))
+SCRIPT_BINDING(entity_get_number, "entity-get", SCRIPT_FLOAT,
+               "read a number field from a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING))
+SCRIPT_BINDING(entity_set_number, "entity-set-number!", SCRIPT_NONE,
+               "write a number field on a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING, SCRIPT_FLOAT))
+SCRIPT_BINDING(entity_get_vector, "entity-get-vector", SCRIPT_VECTOR2,
+               "read a vector field from a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING))
+SCRIPT_BINDING(entity_set_vector, "entity-set-vector!", SCRIPT_NONE,
+               "write a vector field on a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING, SCRIPT_VECTOR2))
 
 // ---- the transform every scripted entity carries
 SCRIPT_BINDING(position, "position", SCRIPT_VECTOR2, "where this entity is", (SCRIPT_NONE))
@@ -95,6 +111,25 @@ SCRIPT_BINDING(draw_rect, "draw-rect", SCRIPT_NONE, "a rectangle from centre, si
 SCRIPT_BINDING(draw_rect_rotated, "draw-rect-rotated", SCRIPT_NONE,
                "a rectangle from centre, size, radians and colour",
                (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT))
+/* The isometric grid in core/iso_grid.h. A script placing anything on one of these maps needs the
+   same answers the C beside it gets, and these are the grid's own -- no map size, no camera and
+   nothing about what a project considers passable, which stay with the project. */
+SCRIPT_BINDING(hex_world, "hex-world", SCRIPT_VECTOR2, "where a hex sits, in world coordinates",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(hex_at, "hex-at", SCRIPT_VECTOR2, "the hex a world point falls in",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(hex_distance, "hex-distance", SCRIPT_INT, "steps across the grid between two hexes",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
+SCRIPT_BINDING(hex_neighbour, "hex-neighbour", SCRIPT_VECTOR2, "the hex one step in a direction",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_INT))
+SCRIPT_BINDING(hex_facing, "hex-facing", SCRIPT_INT, "which of the six views faces one hex to another",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
+/* A sheet named the way a sound is: loaded once, kept, and drawn standing on the point given, by
+   the ground anchor the sheet itself records. The time is playback time, so a script animates by
+   handing over how long it has been going rather than by counting frames. */
+SCRIPT_BINDING(draw_sprite, "draw-sprite", SCRIPT_BOOL,
+               "a named sprite sheet, standing on a point, at a time in its playback",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2, SCRIPT_FLOAT))
 SCRIPT_BINDING(draw_circle, "draw-circle", SCRIPT_NONE, "a circle from centre, radius and colour",
                (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT))
 SCRIPT_BINDING(draw_line, "draw-line", SCRIPT_NONE, "a line from one point to another, in a colour",

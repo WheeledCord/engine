@@ -75,6 +75,46 @@ def find_sdk(project_dir, named):
     fail('no SDK found. Pass --sdk, set ENGINE_SDK, vendor one at ./sdk, or install one')
 
 
+def warn_if_stale(sdk, revision):
+    """An SDK built from an older checkout than the engine sitting beside it.
+
+    A stale SDK does not announce itself: the headers are simply older, so the failure arrives as a
+    compile error in the project's own source, naming the project's line and suggesting some other
+    function. Saying so here costs one git call and turns that into one sentence."""
+    if revision in (None, 'unknown'):
+        return
+    def is_engine(directory):
+        return (directory / 'Makefile.core').is_file() and (directory / '.git').exists()
+
+    engine = None
+    starts = [pathlib.Path(sdk)] if sdk else []
+    starts.append(pathlib.Path.cwd())
+    for start in starts:
+        for directory in (start, *start.parents):
+            # The checkout is an ancestor when building inside it, and a sibling from a workspace
+            # laid out as engine/ beside Games/ and Tools/, which is how projects here sit.
+            for candidate in (directory, directory / 'engine'):
+                if is_engine(candidate):
+                    engine = candidate
+                    break
+            if engine:
+                break
+        if engine:
+            break
+    if not engine:
+        return  # nothing to compare against; an installed SDK on its own is not evidence of staleness
+    head = subprocess.run(['git', '-C', str(engine), 'rev-parse', '--short', 'HEAD'],
+                          capture_output=True, text=True)
+    if head.returncode != 0:
+        return
+    current = head.stdout.strip()
+    if current and not revision.startswith(current):
+        print(f'engine-build: warning: this SDK was built from {revision}, but the engine at '
+              f'{engine} is now {current}. Rebuild and reinstall it '
+              f'(make -f Makefile.core install PREFIX=...) if the build fails oddly.',
+              file=sys.stderr)
+
+
 def check_engine(project, version, revision):
     """A project may say which engine it is meant for, and is not built against another one by
     accident: an exact version or revision, or a floor with >=."""
@@ -205,7 +245,9 @@ def main():
 
     write_stamp(out / 'engine-build.stamp', project, version, revision, sdk, args.cc, cflags, libs,
                 [str(s.relative_to(project_dir)) for s in sources if project_dir in s.parents])
-    print(f'engine-build: {binary} (engine {version})')
+    warn_if_stale(sdk, revision)
+    where = sdk if sdk else 'installed, via pkg-config'
+    print(f'engine-build: {binary} (engine {version}, sdk: {where})')
     if args.run:
         sys.exit(subprocess.run([str(binary)], cwd=out).returncode)
 

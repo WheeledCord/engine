@@ -96,18 +96,73 @@ typedef struct GameplayWorldConfig
     double tickInterval;
 } GameplayWorldConfig;
 
+/**
+ * @brief Initializes an empty entity world.
+ *
+ * The function zeroes world before validating config, so GameplayWorldFree is safe after failure.
+ * @param world Storage to initialize; must not already own a live world.
+ * @param config Slot capacity and positive fixed tick interval.
+ * @return True when world is ready for class registration; false for invalid configuration or allocation failure.
+ */
 bool GameplayWorldInit(GameplayWorld *world, GameplayWorldConfig config);
+/**
+ * @brief Releases a world and destroys its remaining entities.
+ *
+ * It is safe to call with NULL or a zeroed/failed-initialization world.
+ * @param world World to clear and release.
+ * @return No value; world is reset to zero when non-NULL.
+ */
 void GameplayWorldFree(GameplayWorld *world);
 void GameplayWorldClear(GameplayWorld *world);
+/**
+ * @brief Registers one entity class before the first spawn.
+ *
+ * The world copies the class record but borrows defaults and field metadata for its lifetime.
+ * @param world Initialized world whose class registry is not sealed.
+ * @param type Class declaration with a valid payload description.
+ * @return True when the class is registered; false for invalid, duplicate, late, or unallocatable classes.
+ */
 bool EntityRegister(GameplayWorld *world, EntityClass type);
 bool EntityRegisterAll(GameplayWorld *world, const EntityClass *types, size_t count);
 const EntityClass *EntityClassFind(const GameplayWorld *world, const char *classname);
 
 EntityHandle EntitySpawn(GameplayWorld *world, const char *classname);
+/**
+ * @brief Spawns a configured entity from a registered class.
+ *
+ * Defaults and properties are applied before Spawn. Property data is borrowed only for this call.
+ * @param world Initialized world containing classname.
+ * @param classname Registered class name.
+ * @param properties Borrowed key/value properties, or NULL when count is zero.
+ * @param count Number of properties.
+ * @return A live handle, or ENTITY_NULL for invalid input, capacity failure, or failed Spawn.
+ */
 EntityHandle EntitySpawnWith(GameplayWorld *world, const char *classname,
                              const EntityProperty *properties, size_t count);
+/**
+ * @brief Destroys one live entity exactly once.
+ *
+ * Destruction invalidates the handle generation and releases the entity payload slot.
+ * @param world World containing entity.
+ * @param entity Handle to destroy.
+ * @return True when a live entity was destroyed; false for a stale or invalid handle.
+ */
 bool EntityDestroy(GameplayWorld *world, EntityHandle entity);
+/**
+ * @brief Reports whether an entity handle is currently live.
+ * @param world World to query.
+ * @param entity Handle to test.
+ * @return True only when entity's index and generation name a live entity.
+ */
 bool EntityAlive(const GameplayWorld *world, EntityHandle entity);
+/**
+ * @brief Returns an entity's mutable payload.
+ *
+ * Do not retain the returned pointer across destruction, world clear, or callbacks that can invalidate entity.
+ * @param world World containing entity.
+ * @param entity Live handle to query.
+ * @return Borrowed payload pointer, or NULL for a stale or invalid handle.
+ */
 void *EntityData(GameplayWorld *world, EntityHandle entity);
 const void *EntityDataConst(const GameplayWorld *world, EntityHandle entity);
 const char *EntityClassname(const GameplayWorld *world, EntityHandle entity);
@@ -115,13 +170,56 @@ bool EntityKeyValue(GameplayWorld *world, EntityHandle entity, const char *key, 
 size_t EntityKeyValueCount(const GameplayWorld *world, EntityHandle entity);
 const EntitySceneKeyValue *EntityKeyValueAt(const GameplayWorld *world, EntityHandle entity, size_t index);
 
+/* Walking the world. Spawning and destroying are not enough on their own: choosing a target,
+   sweeping an area, counting what is left, saving -- all of them start by asking what is actually
+   in the world, and until now nothing could.
+
+   Handles rather than pointers, so a walk that destroys as it goes cannot walk into freed memory: a
+   handle to something already gone simply stops the walk. A NULL classname walks everything; naming
+   one walks only that class. Entities spawned during a walk may or may not be reached by it, which
+   is why a walk that spawns should collect first and spawn afterwards. */
+/**
+ * @brief Starts a walk of live entities.
+ * @param world World to walk.
+ * @param classname Class name to filter by, or NULL for every class.
+ * @return The first matching live handle, or ENTITY_NULL when none exists.
+ */
+EntityHandle EntityFirst(const GameplayWorld *world, const char *classname);
+/**
+ * @brief Advances a walk started by EntityFirst.
+ *
+ * Destroying an entity during a walk is supported; entities spawned during it may or may not be reached.
+ * @param world World being walked.
+ * @param after Previous handle returned by the walk.
+ * @param classname The same class filter supplied to EntityFirst, or NULL.
+ * @return The next matching live handle, or ENTITY_NULL at the end.
+ */
+EntityHandle EntityNext(const GameplayWorld *world, EntityHandle after, const char *classname);
+
 void EntityScheduleThink(GameplayWorld *world, EntityHandle entity, double when);
 void EntityThinkNext(EntityContext *entity);
 void EntityThinkAfter(EntityContext *entity, double delay);
 double EntityScheduledThinkTime(const GameplayWorld *world, EntityHandle entity);
 double GameplayTime(const GameplayWorld *world);
 void GameplayWorldStep(GameplayWorld *world);
+/**
+ * @brief Advances scheduled entity Think callbacks by one fixed tick.
+ *
+ * The supplied input is borrowed only while callbacks are dispatched.
+ * @param world World to step.
+ * @param input Current simulation input, or NULL for an empty input snapshot.
+ * @return No value; reentrant, clearing, and exhausted worlds are left unchanged.
+ */
 void GameplayWorldStepInput(GameplayWorld *world, const EngineInput *input);
 void GameplayWorldDraw(GameplayWorld *world, void *drawContext);
+/**
+ * @brief Dispatches entity Draw callbacks with an interpolation fraction.
+ *
+ * This function does not advance simulation time. drawContext is passed through without ownership transfer.
+ * @param world World to draw.
+ * @param alpha Interpolation fraction supplied to each draw callback.
+ * @param drawContext Borrowed caller-defined drawing context.
+ * @return No value; a clearing or NULL world draws nothing.
+ */
 void GameplayWorldDrawInterpolated(GameplayWorld *world, float alpha, void *drawContext);
 #endif
