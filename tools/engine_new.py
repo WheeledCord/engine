@@ -133,7 +133,13 @@ def main():
     for content in ('assets', 'scenes', 'shaders'):
         (directory / content).mkdir(exist_ok=True)
 
-    manifest = [f'name {name}', '', 'module entry']
+    manifest = [f'name {name}',
+                '',
+                '# Pin the engine this is meant for, so another one cannot be used by accident:',
+                '#   engine >= 0.1.0        a floor',
+                '#   engine 0.1.0-ad0546a   exactly that build',
+                '',
+                'module entry']
     if args.language == 'scheme':
         manifest += ['module gameplay', 'module script-s7']
         (directory / 'src' / 'main.c').write_text(SCHEME_MAIN % {'name': name})
@@ -147,7 +153,7 @@ def main():
     (directory / 'engine.project').write_text('\n'.join(manifest))
     (directory / 'README.md').write_text(
         f'# {name}\n\n```sh\nengine-build .        # add --sdk <dir> when the SDK is not installed\n'
-        './build/{name}\n```\n')
+        f'./build/{name}\n```\n\n`build/engine-build.stamp` says which engine built it.\n')
     print(f'engine-new: {directory}. Build it with engine-build {directory}')
 
 

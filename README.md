@@ -8,11 +8,11 @@ project of its own:
     trenchengine/
       engine/        this repository
       references/    other engines, kept to read
-      Games/         dodge, collector, scripted-mover, authoring-demo
-      Tools/         ui-editor
+      Games/         dodge, collector, scripted-mover, authoring-demo, isometric
+      Tools/         ui-editor, sprite-baker
 
 `core/` is the engine: window and main loop, input, shaders, render targets, mesh building,
-skeletons and animation, an FPS camera, and an immediate-mode UI. A project declares the GPU
+skeletons and animation, sprite sheets, isometric grids, an FPS camera, and an immediate-mode UI. A project declares the GPU
 capabilities it needs and core checks those and nothing else. `gameplay/` is an optional entity
 and scene layer above core. `projects/` holds the programs built on it, including the UI layout
 editor.
@@ -82,6 +82,18 @@ and no path into the engine:
 installed and found through pkg-config), links one static binary, puts the project's content and the
 engine's runtime data beside it so it runs from anywhere, and checks that nothing has reached past
 the SDK into the engine's own files.
+
+An SDK says which engine it is: `engine.pc` carries the revision it was built from, and `-dirty`
+when that tree had uncommitted changes. A project can insist on one, and is not built against
+another by accident:
+
+    engine >= 0.1.0          a floor
+    engine 0.1.0-ad0546a     exactly that build
+    engine ad0546a           that revision, however it was versioned
+
+Every build writes `build/engine-build.stamp` beside the binary: the engine and revision, the SDK it
+came from, the compiler and its flags, and what went in. Installing the SDK puts `engine-build` and
+`engine-new` on your PATH, so a game is built without reaching into the engine's directory at all.
 
     engine-new ~/games/mine --language scheme
     engine-build ~/games/mine        # add --sdk <dir> when nothing is installed

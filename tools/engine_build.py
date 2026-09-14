@@ -8,7 +8,7 @@ The project says what it is in engine.project and nothing about how to build it:
 compiler flags, no paths into the engine. Everything else comes from the SDK, which is found
 through pkg-config or named outright, and never lives inside the project."""
 import argparse
-import glob
+import datetime
 import os
 import pathlib
 import shutil
@@ -17,7 +17,7 @@ import sys
 
 MANIFEST = 'engine.project'
 # What a manifest may say. Anything else is a mistake worth stopping for.
-KEYS = {'name', 'module', 'source', 'script', 'assets', 'scenes', 'shaders'}
+KEYS = {'name', 'engine', 'module', 'source', 'script', 'assets', 'scenes', 'shaders'}
 MODULES = {'core', 'gameplay', 'script-s7', 'script-pawn', 'entry'}
 
 
@@ -29,7 +29,7 @@ def read_manifest(path):
     """One key and its value per line, # starts a comment, order does not matter."""
     if not path.is_file():
         fail(f'no {MANIFEST} in {path.parent}')
-    project = {'name': None, 'module': [], 'source': [], 'script': [],
+    project = {'name': None, 'engine': None, 'module': [], 'source': [], 'script': [],
                'assets': [], 'scenes': [], 'shaders': []}
     for number, line in enumerate(path.read_text().splitlines(), 1):
         line = line.split('#', 1)[0].strip()
@@ -39,8 +39,8 @@ def read_manifest(path):
         value = value.strip()
         if key not in KEYS or not value:
             fail(f'{path}:{number}: expected one of {" ".join(sorted(KEYS))} and a value')
-        if key == 'name':
-            project['name'] = value
+        if key in ('name', 'engine'):
+            project[key] = value
         else:
             project[key].append(value)
     if not project['name']:
@@ -73,6 +73,39 @@ def find_sdk(project_dir, named):
     if shutil.which('pkg-config') and subprocess.run(['pkg-config', '--exists', 'engine']).returncode == 0:
         return None  # installed: pkg-config knows where everything is
     fail('no SDK found. Pass --sdk, set ENGINE_SDK, vendor one at ./sdk, or install one')
+
+
+def check_engine(project, version, revision):
+    """A project may say which engine it is meant for, and is not built against another one by
+    accident: an exact version or revision, or a floor with >=."""
+    wanted = project['engine']
+    if not wanted:
+        return
+    if wanted.startswith('>='):
+        floor = wanted[2:].strip()
+        if sorted([floor, version.split('-')[0]], key=lambda v: [int(p) for p in v.split('.')])[0] != floor:
+            fail(f'this project asks for engine >= {floor}, the SDK is {version}')
+        return
+    if wanted not in (version, revision):
+        fail(f'this project asks for engine {wanted}, the SDK is {version} ({revision})')
+
+
+def write_stamp(path, project, version, revision, sdk, compiler, cflags, libs, sources):
+    """What built this, beside what was built: an engine anyone can check out, and the flags and
+    files that went in. A binary with no account of where it came from is the thing that makes a
+    build hard to repeat."""
+    described = subprocess.run([compiler, '--version'], capture_output=True, text=True)
+    lines = [f'project {project["name"]}',
+             f'engine {version}',
+             f'revision {revision}',
+             f'sdk {sdk if sdk else "installed, found through pkg-config"}',
+             f'compiler {compiler} ({described.stdout.splitlines()[0] if described.stdout else "?"})',
+             f'cflags {" ".join(cflags)}',
+             f'libs {" ".join(libs)}',
+             f'built {datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}']
+    lines += [f'source {s}' for s in sources]
+    lines += [f'script {s}' for s in project['script']]
+    path.write_text('\n'.join(lines) + '\n')
 
 
 def sources_of(project, project_dir):
@@ -122,6 +155,9 @@ def main():
     cflags = pkg_config(sdk, '--cflags') + ['-I' + str(project_dir)]
     libs = pkg_config(sdk, '--libs', '--static')
     datadir = pkg_config(sdk, '--variable=datadir')[0]
+    version = pkg_config(sdk, '--modversion')[0]
+    revision = (pkg_config(sdk, '--variable=revision') or ['unknown'])[0]
+    check_engine(project, version, revision)
     sdk_includes = [pathlib.Path(flag[2:]).resolve() for flag in cflags if flag.startswith('-I')]
 
     sources = sources_of(project, project_dir)
@@ -167,7 +203,9 @@ def main():
         shutil.copytree(pathlib.Path(datadir) / directory, out / 'core' / directory,
                         dirs_exist_ok=True)
 
-    print(f'engine-build: {binary}')
+    write_stamp(out / 'engine-build.stamp', project, version, revision, sdk, args.cc, cflags, libs,
+                [str(s.relative_to(project_dir)) for s in sources if project_dir in s.parents])
+    print(f'engine-build: {binary} (engine {version})')
     if args.run:
         sys.exit(subprocess.run([str(binary)], cwd=out).returncode)
 

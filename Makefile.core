@@ -18,6 +18,9 @@ CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
 RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
 RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
+# What the SDK says it is: the revision it was built from, and whether that tree had uncommitted
+# changes, so a build can always be traced back to an engine someone can check out.
+ENGINE_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
 .PHONY: sdk install sdk-example run-authoring all run smoke gameplay-smoke clean boundary FORCE
 all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/regression_test projects/regression_test/tester.amx
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
@@ -132,13 +135,13 @@ sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(B
 	cp tools/engine_build.py $(SDK)/bin/engine-build
 	cp tools/engine_new.py $(SDK)/bin/engine-new
 	chmod +x $(SDK)/bin/engine-build $(SDK)/bin/engine-new
-	python3 tools/write_engine_pc.py --prefix "$(abspath $(SDK))" --out $(SDK)/lib/pkgconfig/engine.pc
-	@echo "SDK in $(SDK); build a project with $(SDK)/bin/engine-build <project dir>"
+	python3 tools/write_engine_pc.py --prefix "$(abspath $(SDK))" --revision "$(ENGINE_REV)" --out $(SDK)/lib/pkgconfig/engine.pc
+	@echo "SDK $(ENGINE_REV) in $(SDK); build a project with $(SDK)/bin/engine-build <project dir>"
 # Installing is the same tree somewhere lasting, with the paths inside engine.pc pointing there.
 install: sdk
 	mkdir -p $(PREFIX)
 	cp -r $(SDK)/include $(SDK)/lib $(SDK)/bin $(SDK)/share $(PREFIX)/
-	python3 tools/write_engine_pc.py --prefix "$(abspath $(PREFIX))" --out $(PREFIX)/lib/pkgconfig/engine.pc
+	python3 tools/write_engine_pc.py --prefix "$(abspath $(PREFIX))" --revision "$(ENGINE_REV)" --out $(PREFIX)/lib/pkgconfig/engine.pc
 	@echo "Installed to $(PREFIX). PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig"
 # A project outside this repository, built the way any of them is. The games and the editor live
 # in the workspace beside the engine, so this is where they are unless told otherwise.
