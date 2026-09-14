@@ -65,7 +65,7 @@ can use this directly. `GameplayApplication` additionally handles the world, cla
 loading, systems and cleanup. Entity callbacks receive their payload, input, timing and project context;
 field declarations provide keyvalue parsing before Spawn.
 
-See [the complete authoring example](projects/authoring_demo/README.md),
+See the complete authoring example in the sibling workspace at `../Games/authoring-demo`,
 [core application/input APIs](core/README.md#application-authoring), and
 [gameplay authoring and migration](gameplay/README.md).
 
@@ -127,7 +127,7 @@ draws it through the same call the editor uses. Elements carry anchors, minimum 
 and containers divide space among their contents, so a layout resolves to any window size without
 scaling: the 16px text and the controls keep their size and the space between them changes instead.
 
-`projects/ui_tool/README.md` covers the editor, `core/README.md` the engine modules.
+The UI editor lives in the sibling workspace at `../Tools/ui-editor`; `core/README.md` covers the engine modules.
 
 ## License
 

@@ -173,6 +173,26 @@ Rectangle SpriteSheetGroundRect(const SpriteSheet *sheet, Vector2 ground)
     return (Rectangle){ground.x - (float)sheet->meta.anchorX, ground.y - (float)sheet->meta.anchorY,
                        (float)sheet->meta.cellWidth, (float)sheet->meta.cellHeight};
 }
+SpritePresentation SpritePresentationDefault(void) { return (SpritePresentation){.scale = 1, .tint = WHITE}; }
+void SpriteSheetDraw(const SpriteSheet *sheet, int frame, SpritePresentation p)
+{
+    if (!sheet || !sheet->atlas.id || p.scale < 0) return;
+    Rectangle source = SpriteSheetFrameRect(sheet, frame);
+    float width = source.width * p.scale, height = source.height * p.scale;
+    float anchorX = p.flipX ? source.width - sheet->meta.anchorX : sheet->meta.anchorX;
+    float anchorY = p.flipY ? source.height - sheet->meta.anchorY : sheet->meta.anchorY;
+    if (p.flipX) { source.x += source.width; source.width = -source.width; }
+    if (p.flipY) { source.y += source.height; source.height = -source.height; }
+    DrawTexturePro(sheet->atlas, source, (Rectangle){p.ground.x-anchorX*p.scale,p.ground.y-anchorY*p.scale,width,height}, (Vector2){0}, p.rotation, p.tint);
+}
+void SpriteAnimDraw(const SpriteAnim *anim, SpritePresentation p) { if(anim && anim->sheet) SpriteSheetDraw(anim->sheet, SpriteAnimFrame(anim), p); }
+int SpriteDrawItemCompare(const void *left, const void *right)
+{
+    const SpriteDrawItem *a=left,*b=right;
+    if(a->presentation.layer != b->presentation.layer) return a->presentation.layer < b->presentation.layer ? -1 : 1;
+    if(a->presentation.order != b->presentation.order) return a->presentation.order < b->presentation.order ? -1 : 1;
+    return a->sequence == b->sequence ? 0 : (a->sequence < b->sequence ? -1 : 1);
+}
 bool SpriteSheetWriteMeta(const char *sheetPath, const SpriteSheetMeta *meta)
 {
     if (meta->cellWidth < 1 || meta->cellHeight < 1 || meta->columns < 1 || meta->rows < 1 ||

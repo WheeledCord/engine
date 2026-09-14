@@ -56,10 +56,9 @@ C payloads to scripts.
 
 ## Scheme
 
-`projects/script_demo` is the authoring demo's Mover, moved into `mover.scm` with no C left that
-knows what a mover is. The same file also answers the REPL: while the demo runs, an expression typed
-at the terminal is evaluated against the world on screen, so `(spawn "mover" (vec 200 200))` puts
-another one in front of you.
+An application can register a scripted Mover (or any other class) with no game-specific C code that
+knows its behaviour. A running application may also evaluate expressions against its own world, so
+`(spawn "mover" (vec 200 200))` can create another actor when that is part of the project's tooling.
 
 `define-entity`, `vec` and the other conveniences are Scheme written in the prelude, on top of the
 `class-*` rows. The shape of a declaration is a language's business; the engine's side of it is
@@ -67,16 +66,14 @@ still only the table.
 
 ## Pawn
 
-`mover.pwn` is the same entity again, and `script_demo --pawn` runs it. The frontend is the same
-loop over the same table; what it adds is only what Pawn needs to be told:
+Pawn uses the same binding table; what its frontend adds is only what Pawn needs to be told:
 
 - Names are spelled the way a Pawn identifier can be: `move-world!` is `move_world`, `alive?` is
   `alive`. One rule, applied to every row.
 - Pawn has no compound values, so a vector argument arrives as its components side by side, and a
   vector answer comes back through reference parameters, since a native returns one cell.
-- `engine.inc`, the declarations a Pawn script includes, is written from the table during the build
-  by `script_demo --write-pawn-include`. It is generated rather than kept by hand for the same
-  reason the table exists at all.
+- `engine.inc`, the declarations a Pawn script includes, is written from the table during an SDK or
+  Pawn build. It is generated rather than kept by hand for the same reason the table exists at all.
 
 Cells are pinned to 32 bits so the VM agrees with what `pawncc` emits, which also makes a cell hold
 an IEEE float. The assembly core is 32-bit x86 only; every other target runs the portable C VM, and

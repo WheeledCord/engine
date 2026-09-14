@@ -12,7 +12,8 @@ payload while a callback is holding a pointer to it.
 
 ## Authoring
 
-See `projects/authoring_demo/main.c` for a complete moving entity and application.
+See [the project game-state guide](../docs/user/project-game-state.md) for a complete small-game pattern,
+or the sibling workspace's `../Games/authoring-demo` for a standalone application.
 
 An EntityClass declares classname, payload size and alignment, optional copied defaults, optional
 fields, and only the callbacks it implements. Alignment comes from `ENTITY_ALIGNMENT_OF(Type)`;
@@ -108,9 +109,9 @@ Handles rather than pointers, so a walk that destroys as it goes cannot walk int
 the walk carries on from where it was rather than from a handle that has just died. Entities spawned
 during a walk may or may not be reached by it: collect first and spawn afterwards.
 
-There is no spatial index here, deliberately. Entities have no mandatory transform, so the world does
-not know where anything is; a project that wants "everything on this hex" keeps that index itself,
-built from this walk, the way it already knows what its own positions mean.
+`GameplayWorld` has no built-in spatial index, deliberately: entities have no mandatory transform.
+Projects that use circles/AABBs can opt into `core/collision2d.h` and keep its proxies synchronized
+with their own positions; grids, terrain policy, and collision response remain project policy.
 
 ## Routing and walking a hex grid
 

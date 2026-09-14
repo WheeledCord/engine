@@ -47,7 +47,7 @@ Transform2DMoveLocal(&ship, (Vector2){speed * dt, 0});
 2D follows raylib screen coordinates: +X right, +Y down, positive rotation clockwise. The 2D LookAt
 helper points local +X at the target. Initialize with `Transform2DIdentity()`. Angles are **radians**,
 matching raymath. Raylib's drawing calls and Camera2D use degrees; convert with RAD2DEG at that boundary.
-The authoring_demo shows world movement, local movement and rotation with interpolated rendering.
+The sibling workspace's `../Games/authoring-demo` shows world movement, local movement and rotation with interpolated rendering.
 
 ## What each call is for
 

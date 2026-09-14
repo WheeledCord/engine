@@ -8,6 +8,7 @@
 #include "raylib.h"
 #include <stdbool.h>
 #include "input.h"
+#include "diagnostics.h"
 typedef struct EngineConfig
 {
     const char *title;
