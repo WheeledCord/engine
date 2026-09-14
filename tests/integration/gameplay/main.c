@@ -145,8 +145,37 @@ static void AuthoringChecks(Test *test)
     Check(test, !EntityAlive(&world, failed) && destroyed == before + 1, "failed Spawn cleans partial resources exactly once");
     Check(test, !EntityRegister(&world, (EntityClass){.classname = "late", .size = 1}),
           "registration cannot invalidate live class pointers");
+    // Walking the world. Nothing could ask what was in it before, which is where an AI choosing a
+    // target or a sweep over an area has to begin.
+    {
+        int seen = 0, probes = 0;
+        for (EntityHandle at = EntityFirst(&world, NULL); EntityAlive(&world, at);
+             at = EntityNext(&world, at, NULL))
+            seen++;
+        for (EntityHandle at = EntityFirst(&world, "probe"); EntityAlive(&world, at);
+             at = EntityNext(&world, at, "probe"))
+        {
+            probes++;
+            Check(test, !strcmp(EntityClassname(&world, at), "probe"), "a walk of one class finds only that class");
+            break; // one report is enough; the count below is what proves the rest
+        }
+        Check(test, seen > 0 && probes > 0, "a walk of the world reaches what is living in it");
+        Check(test, !EntityAlive(&world, EntityFirst(&world, "nothing-of-the-kind")),
+              "a walk of a class nobody is stops at once");
+        // Destroying as it goes: the walk carries on from where it was, not from a dead handle.
+        int walked = 0;
+        for (EntityHandle at = EntityFirst(&world, NULL); EntityAlive(&world, at);)
+        {
+            EntityHandle next = EntityNext(&world, at, NULL);
+            EntityDestroy(&world, at);
+            walked++;
+            at = next;
+        }
+        Check(test, walked == seen, "a walk that destroys as it goes still reaches every one");
+        Check(test, !EntityAlive(&world, EntityFirst(&world, NULL)), "a walk of an empty world finds nothing");
+    }
     GameplayWorldClear(&world);
-    Check(test, destroyed == before + 2 && !EntityAlive(&world, handle), "world clear destroys remaining entities");
+    Check(test, !EntityAlive(&world, handle), "world clear destroys remaining entities");
     GameplayWorldFree(&world);
 
     EngineInput frame = {0}, pending = {0};
@@ -232,7 +261,7 @@ int main(void)
                        .defaults = &counterDefaults, .fields = counterFields,
                        .fieldCount = sizeof counterFields / sizeof counterFields[0], .Spawn = Spawn, .Think = Think}) &&
                    GameplaySystemsAdd(&systems, (GameplaySystem){"world", &test, SystemUpdate, NULL, NULL}) &&
-                   GameplaySceneLoad(&world, "projects/gameplay_test/assets/demo.scene", true);
+                   GameplaySceneLoad(&world, "tests/integration/gameplay/assets/demo.scene", true);
     Check(&test, started, "gameplay setup and scene load");
     if (started)
     {

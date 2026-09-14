@@ -1,9 +1,9 @@
 # Core test project
 
-Run from the repository root:
+This is an optional graphical integration test, not a game project. Run it from the repository root:
 
 ```sh
-make -f Makefile.core run
+make integration
 ```
 
 Press Tab to release or capture the pointer. With the pointer released, right-click anywhere for the
@@ -15,7 +15,7 @@ The UI text uses the external 8x16 GNU Unifont BDF at native size with point fil
 Or launch the built executable directly:
 
 ```sh
-./build/core/core_test
+./build/core/core_integration
 ```
 
 The scene contains a textured, animated CC0 character, a ground plane built with MB, and a sampled-depth inset. Rendering goes through an RGBA8 colour target with a depth **texture**. The shaders use GLSL 120; the textured shader is unlit so the sample's painted texture is directly visible.
@@ -33,9 +33,9 @@ Controls:
 The default loop uses fixed updates at 60 Hz. `--variable` selects `fixed_dt=0`; `--slow-fixed` uses 20 Hz to make render interpolation visible.
 
 ```sh
-make -f Makefile.core smoke
-./build/core/core_test --smoke --variable
-./build/core/core_test --smoke --slow-fixed
+make integration
+./build/core/core_integration --smoke --variable
+./build/core/core_integration --smoke --slow-fixed
 ```
 
 Smoke mode runs the same project for 100 rendered frames, reports checks and returns nonzero on failure. It checks input consumption, animation matrices against raylib, explicit blend destinations, one-shot completion, bone pivots/collapse, changing GPU-rendered poses, unchanged CPU animated vertices, and depth sampling. Scene, depth, UI and nested-menu captures plus build products go in `build/core/`. There is no separate test suite.

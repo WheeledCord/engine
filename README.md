@@ -14,8 +14,8 @@ project of its own:
 `core/` is the engine: window and main loop, input, shaders, render targets, mesh building,
 skeletons and animation, sprite sheets, isometric grids, an FPS camera, and an immediate-mode UI. A project declares the GPU
 capabilities it needs and core checks those and nothing else. `gameplay/` is an optional entity
-and scene layer above core. `projects/` holds the programs built on it, including the UI layout
-editor.
+and scene layer above core. `tests/` holds engine-owned verification fixtures; game projects and
+authoring tools live beside the repository in the workspace.
 
 ## Building
 
@@ -23,29 +23,39 @@ Linux, with a C compiler, make, git, python3 and the X11/GL development packages
 
     git clone --recurse-submodules https://github.com/WheeledCord/engine.git
     cd engine
-    make -f Makefile.core all
+    make all
 
 raylib is a submodule, compiled from source into `build/` on the first build (about 30 seconds)
 and cached after that. If you cloned without `--recurse-submodules`, run
 `git submodule update --init` first.
 
-    make -f Makefile.core run           # core_test: skinned character, sampled depth
-    make -f Makefile.core smoke         # build everything and run the checks
-    make -f Makefile.core sdk           # the SDK games are built against
-    make -f Makefile.core run-authoring # build and run a game from the workspace, through the SDK
+    make run           # optional graphical integration test
+    make smoke         # quick gameplay, regression, and documentation checks
+    make integration   # graphical rendering and runner integration checks
+    make full-check    # smoke plus all integration checks
+    make sdk           # the SDK games are built against
+    make run-authoring # build and run a game from the workspace, through the SDK
 
 Binaries locate the engine's own files relative to themselves, so they can be run from any working
 directory.
 
 ## Checks
 
-`make -f Makefile.core smoke` runs three suites and exits non-zero on failure. One of them,
+`make smoke` runs the fast gameplay and regression suites plus documentation checks; `make integration`
+runs the graphical/runner integration checks, and `make full-check` runs both. One of the suites,
 `regression_test`, holds a check for every bug that has been found and fixed here, so they stay
 fixed. The UI editor carries its own suite, run from the editor: `ui-editor --smoke`. They check
 behaviour rather than pixels. The UI tool's suite drives itself with scripted mouse, keyboard and
 clipboard input, and exports screenshots to `build/core/`.
 
 There is no test framework and no CI.
+
+## Documentation
+
+The in-repository [documentation hub](docs/index.md) separates task-focused game-author guides,
+Godot-style XML API references, and engine-developer standards. Run `make docs-check`
+to validate the checked-in API references. [CONTRIBUTING.md](CONTRIBUTING.md) requires documentation
+to change with public behaviour and public APIs.
 
 ## Writing a project
 
@@ -64,8 +74,8 @@ See [the complete authoring example](projects/authoring_demo/README.md),
 The engine builds an SDK: headers, static libraries, its runtime data, the Pawn toolchain, and a
 pkg-config file describing them.
 
-    make -f Makefile.core sdk                  # build/core/sdk
-    make -f Makefile.core install PREFIX=~/.local
+    make sdk                  # build/core/sdk
+    make install PREFIX=~/.local
 
 A project lives anywhere and says only what it is, in an `engine.project` manifest — no build rules
 and no path into the engine:
@@ -127,5 +137,5 @@ terms, but changes to these files stay under the MPL.
 ## Third-party
 
 raylib is under zlib/libpng (`raylib/LICENSE`). The UI font is GNU Unifont under the SIL Open Font
-License (`core/fonts/`). The test character in `projects/core_test` is CC0. raylib's source is
+License (`core/fonts/`). The test character in `tests/integration/core` is CC0. raylib's source is
 unmodified; the build only passes it different flags.
