@@ -3,7 +3,8 @@
 `check_core_dependencies.py` keeps core's includes inside core, raylib and the system. The build runs
 it before compiling anything.
 
-`write_engine_pc.py` writes the `engine.pc` for an SDK tree, with the paths that tree was put at.
+`write_engine_pc.py` writes the `engine.pc` for an SDK tree, with the paths that tree was put at and
+the engine revision it was built from, so anything built against it can name the engine it used.
 `make sdk` and `make install` both call it, which is why an SDK works from wherever it is.
 
 `engine_build.py` and `engine_new.py` are installed into an SDK as `engine-build` and `engine-new`.
