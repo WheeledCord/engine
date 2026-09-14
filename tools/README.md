@@ -11,3 +11,8 @@ the engine revision it was built from, so anything built against it can name the
 They are the whole of a project's build: `engine-new` starts one, `engine-build` reads its manifest,
 finds the SDK, and produces a static binary with the project's content and the engine's runtime data
 beside it.
+
+`write_script_api.py` writes Markdown and JSON from the script binding table. Run
+`make script-api` to create both in `build/core/`; `make sdk` packages them under
+`share/engine/docs/`. This keeps the runtime bindings, both script frontends, and their reference
+on one contract.

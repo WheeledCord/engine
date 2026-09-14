@@ -21,8 +21,9 @@ RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
 # What the SDK says it is: the revision it was built from, and whether that tree had uncommitted
 # changes, so a build can always be traced back to an engine someone can check out.
 ENGINE_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
-.PHONY: sdk install sdk-example run-authoring all run smoke gameplay-smoke clean boundary FORCE
-all: $(BUILD)/core_test $(BUILD)/gameplay_test $(BUILD)/regression_test projects/regression_test/tester.amx
+.PHONY: sdk install sdk-example run-authoring all run test-gameplay test-regression integration smoke full-check api-docs-update docs-check script-api clean boundary FORCE
+# A normal build produces the engine and its authoring tools. Tests are opt-in commands below.
+all: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(BUILD)/pawncc
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
 # the export is of that revision, so a submodule update cannot leave stale sources behind.
 FORCE:
@@ -84,6 +85,11 @@ $(BUILD)/pawncc: $(PAWNCC_SRC)
 $(BUILD)/engine.inc: $(BUILD)/pawn_include
 	@mkdir -p $(@D)
 	./$(BUILD)/pawn_include $@
+$(BUILD)/script-api.md: gameplay/script/script_api.def tools/write_script_api.py
+	python3 tools/write_script_api.py --input $< --format markdown --out $@
+$(BUILD)/script-api.json: gameplay/script/script_api.def tools/write_script_api.py
+	python3 tools/write_script_api.py --input $< --format json --out $@
+script-api: $(BUILD)/script-api.md $(BUILD)/script-api.json
 %.amx: %.pwn $(BUILD)/pawncc $(BUILD)/engine.inc
 	./$(BUILD)/pawncc -i$(BUILD) -ivendor/pawn/include -o$@ $<
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
@@ -92,20 +98,20 @@ $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 $(BUILD)/libscript.a: $(SCRIPT_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(SCRIPT_OBJ)
-# One declaration per project: name, core|gameplay, optional entry.
-# Every projects/<name>/*.c is built; projects can keep a custom main by omitting entry.
+# One declaration per executable test or build helper: target name, core|gameplay, optional entry,
+# source root. Test sources deliberately live outside the engine's project-facing API.
 define core_project
-$(BUILD)/projects/$(1)/%.o: projects/$(1)/%.c $(RLSRC)/.exported | boundary
+$(BUILD)/$(4)/%.o: $(4)/%.c $(RLSRC)/.exported | boundary
 	mkdir -p $$(@D)
 	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $$< -o $$@
-$(BUILD)/$(1): $(patsubst projects/$(1)/%.c,$(BUILD)/projects/$(1)/%.o,$(wildcard projects/$(1)/*.c)) $(if $(filter entry,$(3)),$(BUILD)/entry.o) $(if $(filter gameplay,$(2)),$(BUILD)/libscript.a $(BUILD)/libgameplay.a) $(BUILD)/libcore.a $(RLLIB) | boundary
+$(BUILD)/$(1): $(patsubst $(4)/%.c,$(BUILD)/$(4)/%.o,$(wildcard $(4)/*.c)) $(if $(filter entry,$(3)),$(BUILD)/entry.o) $(if $(filter gameplay,$(2)),$(BUILD)/libscript.a $(BUILD)/libgameplay.a) $(BUILD)/libcore.a $(RLLIB) | boundary
 	$(CC) $$^ $(LDLIBS) -o $$@
 endef
 
-$(eval $(call core_project,core_test,core))
-$(eval $(call core_project,gameplay_test,gameplay))
-$(eval $(call core_project,regression_test,gameplay))
-$(eval $(call core_project,pawn_include,gameplay))
+$(eval $(call core_project,core_integration,core,,tests/integration/core))
+$(eval $(call core_project,gameplay_integration,gameplay,,tests/integration/gameplay))
+$(eval $(call core_project,regression_test,gameplay,,tests/regression))
+$(eval $(call core_project,pawn_include,gameplay,,tools/pawn_include))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
@@ -115,10 +121,10 @@ SDK ?= $(BUILD)/sdk
 PREFIX ?= $(HOME)/.local
 SDK_HEADERS := $(filter-out core/ui_internal.h,$(wildcard core/*.h)) $(wildcard gameplay/*.h) \
 	$(wildcard gameplay/script/*.h)
-sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/pawncc $(BUILD)/engine.inc
+sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/pawncc $(BUILD)/engine.inc script-api
 	rm -rf $(SDK)
 	mkdir -p $(SDK)/include/core $(SDK)/include/gameplay/script $(SDK)/lib/pkgconfig $(SDK)/bin \
-		$(SDK)/share/engine/src $(SDK)/share/engine/pawn
+		$(SDK)/share/engine/src $(SDK)/share/engine/pawn $(SDK)/share/engine/docs
 	cp $(filter core/%,$(SDK_HEADERS)) $(SDK)/include/core/
 	cp $(filter gameplay/%.h,$(SDK_HEADERS)) $(SDK)/include/gameplay/ 2>/dev/null || true
 	cp gameplay/script/*.h gameplay/script/script_api.def $(SDK)/include/gameplay/script/
@@ -128,6 +134,7 @@ sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(B
 	sed 's|#include "engine.h"|#include "core/engine.h"|' core/entry.c > $(SDK)/share/engine/src/entry.c
 	cp -r core/fonts core/shaders $(SDK)/share/engine/
 	cp $(BUILD)/engine.inc vendor/pawn/include/*.inc vendor/pawn/include/*.INC $(SDK)/share/engine/pawn/
+	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(SDK)/share/engine/docs/
 	# pawncc lives beside its own includes, not in bin/: it works out where its standard includes
 	# are from its own location, and from bin/ that search reaches include/core, a directory it
 	# would open as though it were the core.inc it is looking for, and then read forever.
@@ -151,15 +158,23 @@ sdk-example: sdk
 
 run-authoring: sdk
 	$(SDK)/bin/engine-build $(WORKSPACE)/Games/authoring-demo --sdk $(SDK) --run
-run: $(BUILD)/core_test
-	./$(BUILD)/core_test
-smoke: all
-	./$(BUILD)/core_test --smoke
-	./$(BUILD)/gameplay_test
+run: $(BUILD)/core_integration
+	./$(BUILD)/core_integration
+test-gameplay: $(BUILD)/gameplay_integration
+	./$(BUILD)/gameplay_integration
+test-regression: $(BUILD)/regression_test tests/regression/tester.amx
 	./$(BUILD)/regression_test
+integration: $(BUILD)/core_integration $(BUILD)/regression_test tests/regression/tester.amx
+	./$(BUILD)/core_integration --smoke
 	./$(BUILD)/regression_test --runner
-gameplay-smoke: $(BUILD)/gameplay_test
-	./$(BUILD)/gameplay_test
+smoke: test-gameplay test-regression
+	$(MAKE) -f Makefile.core docs-check
+full-check: smoke integration
+api-docs-update:
+	python3 tools/generate_api_docs.py --write
+docs-check:
+	python3 tools/generate_api_docs.py --check
+	python3 tools/check_api_docs.py
 clean:
 	python3 -c 'import shutil; shutil.rmtree("$(BUILD)", ignore_errors=True)'
--include $(wildcard $(BUILD)/*.d $(BUILD)/projects/*/*.d)
+-include $(wildcard $(BUILD)/*.d $(BUILD)/*/*.d $(BUILD)/tests/*/*.d $(BUILD)/tests/*/*/*.d $(BUILD)/tools/*/*.d)

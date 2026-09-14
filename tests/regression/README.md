@@ -5,11 +5,11 @@ Every check asserts on a value the program reads back: a pixel out of the frameb
 rectangle, a return code.
 
 ```sh
-./build/core/regression_test           # everything that shares one window
+./build/core/regression_test           # headless behavioral regressions
 ./build/core/regression_test --runner  # what needs the engine's own loop and window
 ```
 
-Both run as part of `make -f Makefile.core smoke`.
+The headless checks run as part of `make smoke`; the runner check runs under `make integration`.
 
 What is covered: frame textures surviving a model draw, input not reaching clipped or disabled
 widgets, the keyboard being released when a field stops being drawn, presses surviving a relabel,

@@ -9,6 +9,11 @@
 #include "core/engine.h"
 #include "core/fps_camera.h"
 #include "core/frame_uniforms.h"
+#include "core/iso_grid.h"
+#include "core/sprite_sheet.h"
+#include "core/playback.h"
+#include "core/file.h"
+#include "gameplay/iso_move.h"
 #include "core/transform.h"
 #include "core/ui.h"
 #include "core/ui_document.h"
@@ -540,7 +545,7 @@ static void ScriptChecks(void)
         "(begin"
         " (define (t-spawn) (think-next))"
         " (define (t-think) (move-world! (vec (* (get \"speed\") (dt)) 0)) (think-next))"
-        " (define-entity \"tester\" '((\"speed\" \"float\"))"
+        " (define-entity \"tester\" '((\"speed\" \"float\") (\"target\" \"vector2\"))"
         "   '((\"spawn\" \"t-spawn\") (\"think\" \"t-think\"))))",
         NULL);
     EntityProperty properties[] = {{"position", "10 20"}, {"speed", "100"}};
@@ -558,6 +563,38 @@ static void ScriptChecks(void)
     bool arity = !ScriptS7Eval("(move-world!)", &answer);
     free(answer);
     Check(refused && arity, "the table checks a script's arguments instead of trusting them");
+
+    EntityHandle second = EntitySpawnWith(&world, "tester", properties, 2);
+    ScriptValue classArgument[] = {ScriptString("tester")};
+    ScriptValue first = ScriptNone(), next = ScriptNone();
+    const char *message = NULL;
+    bool found = ScriptInvoke(&host, ScriptBindingNamed("find-first"), classArgument, 1, &first,
+                              &message) &&
+                 ScriptInvoke(&host, ScriptBindingNamed("find-next"),
+                              (ScriptValue[]){first, ScriptString("tester")}, 2, &next, &message);
+    ScriptValue setSpeed[] = {first, ScriptString("speed"), ScriptFloat(55)};
+    ScriptValue setTarget[] = {next, ScriptString("target"), ScriptVector2((Vector2){7, 8})};
+    ScriptValue speed = ScriptNone(), target = ScriptNone();
+    bool coordinated = found && first.as.entity && next.as.entity && first.as.entity != next.as.entity &&
+                       ScriptInvoke(&host, ScriptBindingNamed("entity-set-number!"), setSpeed, 3,
+                                    NULL, &message) &&
+                       ScriptInvoke(&host, ScriptBindingNamed("entity-set-vector!"), setTarget, 3,
+                                    NULL, &message) &&
+                       ScriptInvoke(&host, ScriptBindingNamed("entity-get"),
+                                    (ScriptValue[]){first, ScriptString("speed")}, 2, &speed,
+                                    &message) &&
+                       ScriptInvoke(&host, ScriptBindingNamed("entity-get-vector"),
+                                    (ScriptValue[]){next, ScriptString("target")}, 2, &target,
+                                    &message) &&
+                       speed.as.number == 55 && target.as.vector2.x == 7 && target.as.vector2.y == 8;
+    Check(coordinated, "scripts can find scripted entities and read or write their declared fields");
+
+    EntityDestroy(&world, second);
+    ScriptValue stale = ScriptNone();
+    bool safe = ScriptInvoke(&host, ScriptBindingNamed("entity-get"),
+                             (ScriptValue[]){next, ScriptString("speed")}, 2, &stale, &message) &&
+                stale.as.number == 0;
+    Check(safe, "cross-entity script access rejects stale handles without reaching replacement data");
 
     int count = 0;
     const ScriptBinding *table = ScriptBindings(&count);
@@ -578,7 +615,7 @@ static void ScriptChecks(void)
     GameplayWorldInit(&pawnWorld, (GameplayWorldConfig){16, 0.1});
     ScriptHost pawnHost;
     ScriptHostInit(&pawnHost, &pawnWorld);
-    bool opened = ScriptPawnOpen(&pawnHost, "projects/regression_test/tester.amx");
+    bool opened = ScriptPawnOpen(&pawnHost, "tests/regression/tester.amx");
     EntityProperty pawnProperties[] = {{"position", "10 20"}, {"speed", "100"}};
     EntityHandle pawnEntity = EntitySpawnWith(&pawnWorld, "tester-pawn", pawnProperties, 2);
     ScriptEntity *pawnBody = EntityData(&pawnWorld, pawnEntity);
@@ -589,6 +626,54 @@ static void ScriptChecks(void)
     ScriptPawnClose();
     ScriptHostFree(&pawnHost);
     GameplayWorldFree(&pawnWorld);
+}
+
+// ---- a game's own calls, on the same table --------------------------------------------------
+static float grappled;
+SCRIPT_CALL(grapple, "grapple!", SCRIPT_FLOAT, "a call the engine knows nothing about",
+            (SCRIPT_NONE, SCRIPT_VECTOR2))
+{
+    (void)host;
+    grappled = a[0].as.vector2.x + a[0].as.vector2.y;
+    return ScriptFloat(grappled);
+}
+
+static void GameCallChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){8, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    int engineRows = 0;
+    ScriptBindings(&engineRows);
+    bool added = ScriptAddBinding(&host, &grapple_binding);
+    // A name the engine already uses cannot be taken, and neither can the same one twice.
+    bool guarded = !ScriptAddBinding(&host, &grapple_binding) &&
+                   ScriptBindingCount(&host) == engineRows + 1;
+
+    ScriptS7Open(&host);
+    char *answer = NULL;
+    bool called = ScriptS7Eval("(grapple! (vec 2 3))", &answer);
+    bool ran = called && grappled == 5;
+    free(answer);
+    answer = NULL;
+    // And it is checked like any other row, from its declaration alone.
+    bool checked = !ScriptS7Eval("(grapple! \"over there\")", &answer);
+    free(answer);
+    Check(added && guarded && ran && checked,
+          "a game adds a call of its own, and Scheme gets it with the same checking");
+    ScriptS7Close();
+
+    // Pawn spells it its own way and declares it alongside the engine's, so a script can call it.
+    char declarations[512];
+    snprintf(declarations, sizeof declarations, "%s", Scratch("regression_engine.inc"));
+    bool written = ScriptPawnWriteInclude(&host, declarations);
+    char *text = LoadFileText(declarations);
+    bool declared = text && strstr(text, "native Float:grapple(Float:a0x, Float:a0y);") != NULL;
+    UnloadFileText(text);
+    Check(written && declared, "the Pawn declarations the build writes include the game's calls");
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
 }
 
 // ---- per-class storage: no shared block to run over ---------------------------------------------
@@ -691,6 +776,424 @@ static int RunnerChecks(void)
     return failures ? 1 : 0;
 }
 
+// Fallout's own published conversions, kept here verbatim as the reference the grid is checked
+// against: if core/iso_grid.c ever stops agreeing with these, it has stopped being that grid.
+static void FalloutHexToScreen(int x, int y, int *sx, int *sy)
+{
+    *sx = 4816 - ((((x + 1) >> 1) << 5) + ((x >> 1) << 4) - (y << 4));
+    *sy = ((12 * (x >> 1)) + (y * 12)) + 11;
+}
+static void FalloutTileToScreen(int x, int y, int *sx, int *sy)
+{
+    x = 99 - x;
+    *sx = 4752 + (32 * y) - (48 * x);
+    *sy = (24 * y) + (12 * x);
+}
+static bool GapInWall(void *user, IsoHex hex)
+{
+    (void)user;
+    return hex.x == 5 && hex.y != 9; // a wall down one column with a single way through
+}
+static void IsoGridChecks(void)
+{
+    bool hexMatches = true, tileMatches = true, pairsUp = true, hexRoundTrips = true,
+         tileRoundTrips = true;
+    for (int x = 0; x < 40 && hexMatches; x++)
+        for (int y = 0; y < 40; y++)
+        {
+            int sx, sy;
+            FalloutHexToScreen(x, y, &sx, &sy);
+            Vector2 ours = IsoHexToScreen((IsoHex){x, y});
+            if ((int)ours.x + 4816 != sx || (int)ours.y + 11 != sy)
+            {
+                hexMatches = false;
+                break;
+            }
+        }
+    for (int x = 0; x < 40 && tileMatches; x++)
+        for (int y = 0; y < 40; y++)
+        {
+            int sx, sy;
+            FalloutTileToScreen(99 - x, y, &sx, &sy);
+            Vector2 ours = IsoTileToScreen((IsoTile){x, y});
+            if ((int)ours.x + 4752 != sx || (int)ours.y != sy)
+            {
+                tileMatches = false;
+                break;
+            }
+        }
+    Check(hexMatches, "hex projection agrees with Fallout's own hex conversion");
+    Check(tileMatches, "tile projection agrees with Fallout's own tile conversion");
+    // One tile is a 2x2 block of hexes, which is the whole reason the two grids can share ground.
+    for (int x = 0; x < 40 && pairsUp; x++)
+        for (int y = 0; y < 40; y++)
+        {
+            Vector2 tile = IsoTileToScreen((IsoTile){x, y});
+            Vector2 hex = IsoHexToScreen(IsoTileHex((IsoTile){x, y}));
+            IsoTile back = IsoHexTile(IsoTileHex((IsoTile){x, y}));
+            if (tile.x != hex.x || tile.y != hex.y || back.x != x || back.y != y)
+            {
+                pairsUp = false;
+                break;
+            }
+        }
+    Check(pairsUp, "each tile is the 2x2 hex block at the same place on screen");
+    for (int x = 0; x < 40 && hexRoundTrips; x++)
+        for (int y = 0; y < 40; y++)
+        {
+            IsoHex hex = {x, y};
+            IsoHex back = IsoScreenToHex(IsoHexToScreen(hex));
+            if (back.x != x || back.y != y)
+            {
+                hexRoundTrips = false;
+                break;
+            }
+        }
+    for (int x = 0; x < 40 && tileRoundTrips; x++)
+        for (int y = 0; y < 40; y++)
+        {
+            // A hair inside the cell: its own corner belongs to a neighbour just as legitimately.
+            Vector2 screen = IsoTileToScreen((IsoTile){x, y});
+            screen.x += 1;
+            screen.y += 1;
+            IsoTile back = IsoScreenToTile(screen);
+            if (back.x != x || back.y != y)
+            {
+                tileRoundTrips = false;
+                break;
+            }
+        }
+    Check(hexRoundTrips, "a hex centre picks its own hex back out of the screen");
+    Check(tileRoundTrips, "a point inside a tile picks its own tile back out of the screen");
+    // Neighbours must be mutual, distinct, and one step away in both directions.
+    bool reciprocal = true, distinct = true, adjacent = true;
+    for (int x = 0; x < 20; x++)
+        for (int y = 0; y < 20; y++)
+        {
+            IsoHex hex = {x, y};
+            for (int dir = 0; dir < ISO_DIR_COUNT; dir++)
+            {
+                IsoHex step = IsoHexNeighbour(hex, (IsoDir)dir);
+                IsoHex home = IsoHexNeighbour(step, (IsoDir)((dir + 3) % ISO_DIR_COUNT));
+                reciprocal &= home.x == hex.x && home.y == hex.y;
+                adjacent &= IsoHexDistance(hex, step) == 1;
+                for (int other = 0; other < dir; other++)
+                {
+                    IsoHex was = IsoHexNeighbour(hex, (IsoDir)other);
+                    distinct &= was.x != step.x || was.y != step.y;
+                }
+            }
+        }
+    Check(reciprocal, "stepping to a neighbour and back again returns to the same hex");
+    Check(distinct, "the six neighbours of a hex are six different hexes");
+    Check(adjacent, "every neighbour is exactly one step away");
+    // The real proof that the distance is a hex distance: a breadth-first search agrees with it.
+    enum
+    {
+        SPAN = 20
+    };
+    int bfs[SPAN][SPAN];
+    for (int x = 0; x < SPAN; x++)
+        for (int y = 0; y < SPAN; y++)
+            bfs[x][y] = -1;
+    IsoHex queue[SPAN * SPAN];
+    int head = 0, tail = 0;
+    IsoHex origin = {10, 10};
+    bfs[origin.x][origin.y] = 0;
+    queue[tail++] = origin;
+    while (head < tail)
+    {
+        IsoHex hex = queue[head++];
+        for (int dir = 0; dir < ISO_DIR_COUNT; dir++)
+        {
+            IsoHex step = IsoHexNeighbour(hex, (IsoDir)dir);
+            if (step.x < 0 || step.y < 0 || step.x >= SPAN || step.y >= SPAN)
+                continue;
+            if (bfs[step.x][step.y] >= 0)
+                continue;
+            bfs[step.x][step.y] = bfs[hex.x][hex.y] + 1;
+            queue[tail++] = step;
+        }
+    }
+    bool distanceAgrees = true;
+    for (int x = 0; x < SPAN; x++)
+        for (int y = 0; y < SPAN; y++)
+        {
+            int measured = IsoHexDistance(origin, (IsoHex){x, y});
+            if (measured <= 5 && bfs[x][y] != measured)
+                distanceAgrees = false;
+        }
+    Check(distanceAgrees, "hex distance agrees with a breadth-first walk of the same grid");
+    // Facing: stepping in a direction should read back as that direction.
+    bool facingReads = true;
+    for (int x = 0; x < 20; x++)
+        for (int y = 0; y < 20; y++)
+            for (int dir = 0; dir < ISO_DIR_COUNT; dir++)
+            {
+                IsoHex hex = {x, y};
+                IsoHex step = IsoHexNeighbour(hex, (IsoDir)dir);
+                facingReads &= IsoHexDirection(hex, step) == (IsoDir)dir;
+            }
+    Check(facingReads, "a step in one of the six directions reads back as that direction");
+    // Cell outlines. A cell that tiles the plane has exactly the area of the lattice it belongs to,
+    // so an outline that overlaps its neighbours or leaves a gap between them fails this.
+    Vector2 tileCell[4];
+    IsoTileCorners((IsoTile){3, 5}, tileCell);
+    float tileArea = 0;
+    for (int i = 0; i < 4; i++)
+    {
+        Vector2 a = tileCell[i], b = tileCell[(i + 1) % 4];
+        tileArea += a.x * b.y - b.x * a.y;
+    }
+    tileArea = fabsf(tileArea) / 2;
+    Check(tileArea == 1536.0f, "a tile's outline covers exactly one tile of ground");
+    Vector2 hexCell[6];
+    IsoHexCellCorners((IsoHex){7, 9}, hexCell);
+    float hexArea = 0;
+    for (int i = 0; i < 6; i++)
+    {
+        Vector2 a = hexCell[i], b = hexCell[(i + 1) % 6];
+        hexArea += a.x * b.y - b.x * a.y;
+    }
+    hexArea = fabsf(hexArea) / 2;
+    Check(hexArea == 384.0f, "a hex's outline covers exactly one hex of ground");
+    // And the outline agrees with which hex a point actually belongs to: just inside every corner
+    // is still this hex's ground.
+    IsoHex owner = {7, 9};
+    Vector2 centre = IsoHexToScreen(owner);
+    bool cornersBelong = true;
+    for (int i = 0; i < 6; i++)
+    {
+        Vector2 inside = {centre.x + (hexCell[i].x - centre.x) * 0.9f,
+                          centre.y + (hexCell[i].y - centre.y) * 0.9f};
+        IsoHex at = IsoScreenToHex(inside);
+        cornersBelong &= at.x == owner.x && at.y == owner.y;
+    }
+    Check(cornersBelong, "ground just inside a hex's outline belongs to that hex");
+    // Painting order. Storage order is not draw order, and getting it wrong is a character standing
+    // in front of the wall that should hide it.
+    IsoDrawItem items[64];
+    int count = 0;
+    for (int x = 0; x < 8; x++)
+        for (int y = 0; y < 8; y++)
+            items[count++] = (IsoDrawItem){{x, y}, NULL};
+    // Shuffle deterministically, so the sort is doing the work and not the order they went in.
+    for (int i = count - 1; i > 0; i--)
+    {
+        int j = (i * 7919 + 13) % (i + 1);
+        IsoDrawItem swap = items[i];
+        items[i] = items[j];
+        items[j] = swap;
+    }
+    IsoDepthSort(items, count);
+    bool farToNear = true;
+    for (int i = 1; i < count; i++)
+        farToNear &= IsoHexToScreen(items[i - 1].hex).y <= IsoHexToScreen(items[i].hex).y;
+    Check(farToNear, "painting order runs from furthest to nearest");
+    // A hex one step toward the viewer must be painted after the one it stands in front of, in
+    // whichever order the two were handed over.
+    bool coversBoth = true;
+    for (int dir = 0; dir < ISO_DIR_COUNT; dir++)
+    {
+        IsoHex behind = {4, 4}, front = IsoHexNeighbour(behind, (IsoDir)dir);
+        if (IsoHexToScreen(front).y <= IsoHexToScreen(behind).y)
+            continue; // a level step: neither is in front, nothing to prove
+        IsoDrawItem pair[2] = {{front, NULL}, {behind, NULL}};
+        IsoDepthSort(pair, 2);
+        coversBoth &= pair[0].hex.x == behind.x && pair[0].hex.y == behind.y;
+        IsoDrawItem swapped[2] = {{behind, NULL}, {front, NULL}};
+        IsoDepthSort(swapped, 2);
+        coversBoth &= swapped[0].hex.x == behind.x && swapped[0].hex.y == behind.y;
+    }
+    Check(coversBoth, "a nearer hex is painted over the hex it stands in front of, given either way round");
+    // Two hexes at the same depth are ordered the same way every time they are sorted.
+    IsoHex level = IsoHexNeighbour((IsoHex){4, 4}, ISO_E);
+    Check(IsoHexToScreen(level).y == IsoHexToScreen((IsoHex){4, 4}).y,
+          "a level step really is level, so the tie is a real tie");
+    IsoDrawItem tie[2] = {{level, NULL}, {{4, 4}, NULL}}, retie[2] = {{{4, 4}, NULL}, {level, NULL}};
+    IsoDepthSort(tie, 2);
+    IsoDepthSort(retie, 2);
+    Check(tie[0].hex.x == retie[0].hex.x && tie[0].hex.y == retie[0].hex.y,
+          "items at the same depth are ordered the same way whichever order they arrive in");
+}
+static void PlaybackChecks(void)
+{
+    // One rule for where a clip has got to, so skeletal animation and sprite sheets cannot drift
+    // apart on it. Four frames at four a second: a second is exactly one time round.
+    CoreClip looping = {4, 4.0f, true}, once = {4, 4.0f, false};
+    Check(CoreClipFrame(looping, 0.0) == 0 && CoreClipFrame(looping, 0.30) == 1 &&
+              CoreClipFrame(looping, 0.80) == 3,
+          "a clip runs through its frames at the rate it declares");
+    Check(CoreClipFrame(looping, 1.0) == 0 && CoreClipFrame(looping, 1.30) == 1,
+          "a looping clip starts over rather than running off the end");
+    Check(CoreClipFrame(once, 1.0) == 3 && CoreClipFrame(once, 50.0) == 3,
+          "a clip that does not loop holds its last frame");
+    Check(CoreClipFrame(looping, -5.0) == 0, "time before the start reads as the first frame");
+    int from = -1, to = -1;
+    float between = -1;
+    CoreClipBlend(looping, 0.625, &from, &to, &between);
+    Check(from == 2 && to == 3 && between > 0.49f && between < 0.51f,
+          "blending reports the frames either side and how far between them");
+    CoreClipBlend(looping, 0.875, &from, &to, &between);
+    Check(from == 3 && to == 0, "a looping clip blends its last frame back into its first");
+    CoreClipBlend(once, 0.875, &from, &to, &between);
+    Check(from == 3 && to == 3, "a clip that does not loop has nothing ahead to blend into");
+}
+static void SpriteSheetChecks(void)
+{
+    // A cell is taller than what it holds, so drawing it by its bottom edge leaves the subject
+    // floating above whatever it is standing on. The anchor is what stops that being guesswork.
+    SpriteSheet sheet = {0};
+    sheet.meta = (SpriteSheetMeta){96, 112, 4, 3, 10, 10.0f, true, 48, 65};
+    Rectangle at = SpriteSheetGroundRect(&sheet, (Vector2){500, 300});
+    Check(at.x == 500 - 48 && at.y == 300 - 65,
+          "a frame is placed so its ground anchor lands on the point it stands on");
+    Check(at.width == 96 && at.height == 112, "a placed frame keeps its own size");
+    Check(at.y + sheet.meta.anchorY == 300, "the anchor, not the cell edge, meets the ground");
+    // The format carries the anchor through a write and a read.
+    const char *path = Scratch("regression_sheet.txt");
+    Check(SpriteSheetWriteMeta(path, &sheet.meta), "a sheet writes its metadata");
+    char *text = CoreReadFile(path);
+    Check(text && strstr(text, "anchorx 48") && strstr(text, "anchory 65"),
+          "a written sheet records where its subject meets the ground");
+    if (text)
+        CoreFreeFile(text);
+    // The sheet must answer with the shared rule, not one of its own.
+    bool agrees = true;
+    for (int i = 0; i < 40; i++)
+    {
+        double at = i * 0.037;
+        agrees &= SpriteSheetFrameAt(&sheet, at) == CoreClipFrame(SpriteSheetClip(&sheet), at);
+    }
+    Check(agrees, "a sheet reports the same frame the shared clip rule does");
+    // A sheet carries its own clock, the way Actor does, so a caller never holds one itself.
+    SpriteAnim anim = {0};
+    SpriteAnimPlay(&anim, &sheet);
+    SpriteAnimUpdate(&anim, 0.25);
+    int mid = SpriteAnimFrame(&anim);
+    SpriteSheet other = sheet;
+    SpriteAnimView(&anim, &other);
+    Check(SpriteAnimFrame(&anim) == mid && anim.sheet == &other,
+          "changing which view is showing does not restart the motion");
+    SpriteAnimPlay(&anim, &sheet);
+    Check(SpriteAnimFrame(&anim) == 0, "playing a sheet starts it at its first frame");
+    SpriteSheetMeta bad = sheet.meta;
+    bad.anchorY = bad.cellHeight + 1;
+    Check(!SpriteSheetWriteMeta(path, &bad), "an anchor outside its own cell is refused");
+}
+/* A row must not be named for a language's syntax. Scheme will let a row shadow one of its
+   procedures -- `log` does, and works -- but not one of its special forms: `(set! "f" 1)` is read as
+   assignment however the row is registered, so the engine's function is simply never called and the
+   rest of the script's expression goes with it. That cost a scripted entity its rescheduling.
+
+   Asking s7 at runtime does not catch it: the name resolves to our value, so `(procedure? set!)`
+   answers #t while `(set! ...)` in operator position is still syntax. The rule has to be stated. */
+static void RowNameChecks(void)
+{
+    static const char *syntax[] = {"set!",   "if",     "define", "lambda", "let",  "let*",
+                                   "letrec", "begin",  "quote",  "do",     "cond", "case",
+                                   "and",    "or",     "when",   "unless", "else", "define-macro"};
+    int count = 0;
+    const ScriptBinding *table = ScriptBindings(&count);
+    const char *clash = NULL;
+    for (int i = 0; i < count; i++)
+        for (size_t k = 0; k < sizeof syntax / sizeof *syntax; k++)
+            if (!strcmp(table[i].name, syntax[k]))
+                clash = table[i].name;
+    if (clash)
+        printf("  row named for Scheme syntax: %s\n", clash);
+    Check(count > 0 && !clash, "no row is named for a language's own syntax");
+}
+static void SheetCacheChecks(void)
+{
+    // A script names a sheet the way it names a sound. The point of the cache is that naming the
+    // same one twice costs one load and hands back the same copy, not two textures of the same art.
+    const char *name = Scratch("regression_cached");
+    char atlas[300];
+    snprintf(atlas, sizeof atlas, "%s.png", name);
+    char meta[300];
+    snprintf(meta, sizeof meta, "%s.sheet", name);
+    Image art = GenImageColor(64, 32, BLUE);
+    bool wrote = ExportImage(art, atlas);
+    UnloadImage(art);
+    SpriteSheetMeta described = {32, 32, 2, 1, 2, 8.0f, true, 16, 30};
+    wrote = wrote && SpriteSheetWriteMeta(meta, &described);
+    Check(wrote, "a sheet can be written for the cache to find");
+
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){8, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    const SpriteSheet *once = ScriptHostSheet(&host, name);
+    const SpriteSheet *twice = ScriptHostSheet(&host, name);
+    Check(once && once == twice, "naming the same sheet twice loads it once and hands back that one");
+    Check(once && once->atlas.id && once->meta.anchorY == 30,
+          "a cached sheet arrives loaded, anchor and all");
+    Check(!ScriptHostSheet(&host, Scratch("no-such-sheet")), "a sheet that is not there is refused");
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
+}
+static void IsoMoveChecks(void)
+{
+    IsoPathfinder finder;
+    Check(IsoPathfinderInit(&finder, 20, 20), "pathfinder sizes itself to the grid");
+    IsoPath path;
+    Check(IsoPathInit(&path, 512), "path allocates");
+    // Open ground: the route is as long as the distance, and every step is a real neighbour.
+    IsoHex from = {2, 2}, to = {14, 11};
+    Check(IsoPathfinderSolve(&finder, &path, from, to, NULL, NULL), "a route across open ground exists");
+    Check(path.count == IsoHexDistance(from, to) + 1,
+          "an open-ground route is exactly as long as the hex distance");
+    bool contiguous = path.count > 1;
+    for (int i = 1; i < path.count; i++)
+        contiguous &= IsoHexDistance(path.hexes[i - 1], path.hexes[i]) == 1;
+    Check(contiguous, "every step of a route enters an adjacent hex");
+    Check(path.hexes[0].x == from.x && path.hexes[0].y == from.y &&
+              path.hexes[path.count - 1].x == to.x && path.hexes[path.count - 1].y == to.y,
+          "a route starts where asked and ends where asked");
+    // A wall with one gap: the route must exist, and must be longer than the open-ground one.
+    IsoHex left = {2, 2}, right = {9, 2};
+    int direct = IsoHexDistance(left, right);
+    Check(IsoPathfinderSolve(&finder, &path, left, right, GapInWall, NULL), "a route finds the gap in a wall");
+    Check(path.count - 1 > direct, "going round a wall costs more than going straight");
+    bool avoidsWall = true;
+    for (int i = 0; i < path.count; i++)
+        avoidsWall &= !GapInWall(NULL, path.hexes[i]);
+    Check(avoidsWall, "a route never enters a blocked hex");
+    Check(!IsoPathfinderSolve(&finder, &path, left, (IsoHex){5, 3}, GapInWall, NULL),
+          "there is no route onto a blocked hex");
+    Check(!IsoPathfinderSolve(&finder, &path, left, (IsoHex){99, 99}, NULL, NULL),
+          "there is no route off the edge of the grid");
+    IsoPathFree(&path);
+    // A walk runs its whole route unless the caller cuts it; what rations movement is the game's.
+    IsoMover mover;
+    Check(IsoMoverInit(&mover, (IsoHex){2, 2}, 512), "a mover starts on its hex");
+    IsoHex goal = {14, 11};
+    Check(IsoMoverGoTo(&mover, &finder, goal, NULL, NULL), "a walk sets off");
+    Check(IsoMoverRemainingSteps(&mover) == IsoHexDistance((IsoHex){2, 2}, goal),
+          "a fresh walk has one step per hex of the route");
+    mover.hexesPerSecond = 1000;
+    IsoMoverUpdate(&mover, 1.0f);
+    Check(mover.hex.x == goal.x && mover.hex.y == goal.y, "an uncut walk arrives");
+    Check(!IsoMoverMoving(&mover), "a walk that arrives has stopped");
+    // Cut short: the walk stops exactly where the caller allowed, and no further.
+    mover.hex = (IsoHex){2, 2};
+    Check(IsoMoverGoTo(&mover, &finder, goal, NULL, NULL), "a walk to be cut sets off");
+    IsoMoverTruncate(&mover, 3);
+    Check(IsoMoverRemainingSteps(&mover) == 3, "a cut walk keeps only the steps it was allowed");
+    IsoMoverUpdate(&mover, 1.0f);
+    Check(IsoHexDistance((IsoHex){2, 2}, mover.hex) == 3, "a cut walk stops where it was cut");
+    Check(!IsoMoverMoving(&mover), "a cut walk ends rather than carrying on");
+    // Cutting to more than the route has leaves the route alone.
+    mover.hex = (IsoHex){2, 2};
+    IsoMoverGoTo(&mover, &finder, goal, NULL, NULL);
+    int full = IsoMoverRemainingSteps(&mover);
+    IsoMoverTruncate(&mover, full + 50);
+    Check(IsoMoverRemainingSteps(&mover) == full, "cutting past the end of a route changes nothing");
+    IsoMoverFree(&mover);
+    IsoPathfinderFree(&finder);
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -711,6 +1214,13 @@ int main(int argc, char **argv)
     DeferredChecks();
     ScriptChecks();
     StorageChecks();
+    GameCallChecks();
+    PlaybackChecks();
+    SpriteSheetChecks();
+    RowNameChecks();
+    SheetCacheChecks();
+    IsoGridChecks();
+    IsoMoveChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

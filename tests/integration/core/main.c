@@ -25,6 +25,9 @@ enum
     SKIN,
     TEXTURED,
     DEPTH,
+    TOONLIT,
+    NORMALENC,
+    LITPROP,
     SHADER_COUNT
 };
 typedef struct Project
@@ -39,7 +42,7 @@ typedef struct Project
     ActorAimJoint aimJoint;
     FpsCamera camera;
     FpsCameraConfig cameraConfig;
-    RenderTexture scene, depthView;
+    RenderTexture scene, depthView, bakeColor, bakeNormal;
     float nearPlane, farPlane;
     int width, height, draws, updates, failures, activeClip;
     bool smoke, showDepth, capture, showViewmodel, look, hide, fix, noclip;
@@ -291,7 +294,10 @@ static bool Init(void *context)
     Project *p = context;
     const ShaderFile shaders[] = {{"core/shaders/skinning.vs", "core/shaders/textured.fs"},
                                   {NULL, "core/shaders/textured.fs"},
-                                  {NULL, "projects/core_test/shaders/depth_preview.fs"}};
+                                  {NULL, "tests/integration/core/shaders/depth_preview.fs"},
+                                  {"core/shaders/skinning.vs", "core/shaders/toonlit.fs"},
+                                  {"core/shaders/skinning.vs", "core/shaders/normal_encode.fs"},
+                                  {"core/shaders/lit.vs", "core/shaders/toonlit.fs"}};
     if (!CoreLoadShaders(shaders, SHADER_COUNT, p->shaders))
         return false;
     if (p->shaders[SKIN].locs[SHADER_LOC_BONE_MATRICES] < 0 ||
@@ -301,17 +307,38 @@ static bool Init(void *context)
         TraceLog(LOG_ERROR, "Required GPU skinning interface absent");
         return false;
     }
+    Check(p,
+          p->shaders[TOONLIT].locs[SHADER_LOC_VERTEX_NORMAL] >= 0 &&
+              p->shaders[TOONLIT].locs[SHADER_LOC_MATRIX_NORMAL] >= 0 &&
+              p->shaders[TOONLIT].locs[SHADER_LOC_BONE_MATRICES] >= 0,
+          "toon-lit shader carries skinned world-space normals");
+    Check(p,
+          p->shaders[NORMALENC].locs[SHADER_LOC_VERTEX_NORMAL] >= 0 &&
+              p->shaders[NORMALENC].locs[SHADER_LOC_MATRIX_NORMAL] >= 0,
+          "normal-encode shader carries skinned world-space normals");
+    /* The same surface without skinning, for props. A static mesh has no bone weights, so skinning
+       one would gather every vertex onto the origin; this path must ask for none. */
+    Check(p,
+          p->shaders[LITPROP].locs[SHADER_LOC_VERTEX_NORMAL] >= 0 &&
+              p->shaders[LITPROP].locs[SHADER_LOC_MATRIX_NORMAL] >= 0,
+          "unskinned lit shader carries world-space normals");
+    Check(p, p->shaders[LITPROP].locs[SHADER_LOC_BONE_MATRICES] < 0,
+          "unskinned lit shader asks for no bone matrices");
     FrameUniformDecl uniforms[] = {{"nearPlane", FRAME_FLOAT, 1},
                                    {"farPlane", FRAME_FLOAT, 1},
-                                   {"unusedDeclaredUniform", FRAME_VEC3, 1}};
-    if (!FrameUniformsInit(&p->uniforms, uniforms, 3))
+                                   {"unusedDeclaredUniform", FRAME_VEC3, 1},
+                                   {"lightDir", FRAME_VEC3, 1},
+                                   {"lightColor", FRAME_VEC3, 1},
+                                   {"ambientColor", FRAME_VEC3, 1},
+                                   {"toonCutoff", FRAME_FLOAT, 1}};
+    if (!FrameUniformsInit(&p->uniforms, uniforms, 7))
         return false;
     for (int i = 0; i < SHADER_COUNT; i++)
         if (!FrameUniformsAdd(&p->uniforms, p->shaders[i]))
             return false;
     CoreDepthRange(&p->nearPlane, &p->farPlane);
     char asset[1024];
-    const char *model = CoreResolvePath("projects/core_test/assets/greenman.glb", asset, sizeof asset);
+    const char *model = CoreResolvePath("tests/integration/core/assets/greenman.glb", asset, sizeof asset);
     p->character = model ? LoadModel(model) : (Model){0};
     p->animations = model ? LoadModelAnimations(model, &p->animationCount) : NULL;
     if (p->character.meshCount < 1 || p->animationCount < 4)
@@ -362,6 +389,9 @@ static bool Init(void *context)
     RenderTexture onlyDepth = {0};
     Check(p, MakeRT(&onlyDepth, 32, 32, 0, true), "depth-only target completeness");
     CoreUnloadRT(&onlyDepth);
+    if (!MakeRT(&p->bakeColor, 128, 128, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, true) ||
+        !MakeRT(&p->bakeNormal, 128, 128, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, true))
+        return false;
     p->activeClip = 2;
     ActorPlay(&p->actor, 2, true);
     p->uiSlider = 0.65f;
@@ -501,6 +531,54 @@ static void Readback(Project *p)
     UnloadImageColors(pixels);
     UnloadImage(color);
 }
+static void BakeCheck(Project *p)
+{
+    WorldSurf held[] = {{&p->character, MatrixIdentity(), WHITE}};
+    Camera camera = FpsCameraInterpolated(&p->camera, 0);
+    BeginTextureMode(p->bakeColor);
+    ClearBackground(BLANK);
+    BeginMode3D(camera);
+    DrawWorldSurfaces(held, 1, &p->shaders[TOONLIT]);
+    EndMode3D();
+    EndTextureMode();
+    BeginTextureMode(p->bakeNormal);
+    ClearBackground(BLANK);
+    BeginMode3D(camera);
+    DrawWorldSurfaces(held, 1, &p->shaders[NORMALENC]);
+    EndMode3D();
+    EndTextureMode();
+    Image color = LoadImageFromTexture(p->bakeColor.texture);
+    ImageFlipVertical(&color);
+    ExportImage(color, "build/core/toonlit.png");
+    Image normal = LoadImageFromTexture(p->bakeNormal.texture);
+    ImageFlipVertical(&normal);
+    ExportImage(normal, "build/core/normals.png");
+    Color *colorPixels = LoadImageColors(color);
+    Color *normalPixels = LoadImageColors(normal);
+    int opaque = 0, normalVariety = 0;
+    Color firstNormal = {0};
+    bool haveFirst = false;
+    for (int i = 0; i < color.width * color.height; i++)
+    {
+        if (colorPixels[i].a <= 10)
+            continue;
+        opaque++;
+        if (!haveFirst)
+        {
+            firstNormal = normalPixels[i];
+            haveFirst = true;
+        }
+        else if (abs(normalPixels[i].r - firstNormal.r) > 8 || abs(normalPixels[i].g - firstNormal.g) > 8 ||
+                 abs(normalPixels[i].b - firstNormal.b) > 8)
+            normalVariety++;
+    }
+    Check(p, opaque > 200, "toon-lit bake pass covers the character silhouette");
+    Check(p, normalVariety > 50, "normal-encode bake pass varies across the silhouette");
+    UnloadImageColors(colorPixels);
+    UnloadImageColors(normalPixels);
+    UnloadImage(color);
+    UnloadImage(normal);
+}
 static void Draw(void *context, float alpha)
 {
     Project *p = context;
@@ -510,7 +588,12 @@ static void Draw(void *context, float alpha)
         return;
     }
     Vector3 unused = {1, 2, 3};
-    const void *values[] = {&p->nearPlane, &p->farPlane, &unused};
+    Vector3 lightDir = Vector3Normalize((Vector3){-0.4f, 0.9f, -0.3f});
+    Vector3 lightColor = {1.0f, 0.97f, 0.9f};
+    Vector3 ambientColor = {0.35f, 0.38f, 0.45f};
+    float toonCutoff = 0.3f;
+    const void *values[] = {&p->nearPlane,   &p->farPlane, &unused,       &lightDir,
+                            &lightColor, &ambientColor, &toonCutoff};
     FrameUniformsBind(&p->uniforms, values);
     Camera camera = FpsCameraInterpolated(&p->camera, alpha);
     ActorUploadPose(&p->actor, alpha);
@@ -594,6 +677,8 @@ static void Draw(void *context, float alpha)
     }
     if (p->smoke && (!p->firstImage || p->draws == 90))
         Readback(p);
+    if (p->smoke && p->draws == 50)
+        BakeCheck(p);
     if (!CoreCheckGraphicsErrors("frame"))
         p->failures++;
     p->draws++;
@@ -613,6 +698,8 @@ static void Shutdown(void *context)
     FrameUniformsFree(&p->uniforms);
     CoreUnloadRT(&p->scene);
     CoreUnloadRT(&p->depthView);
+    CoreUnloadRT(&p->bakeColor);
+    CoreUnloadRT(&p->bakeNormal);
     /* raylib Model unload doesn't own textures. Release unique asset textures separately. */
     for (int i = 0; i < p->character.materialCount; i++)
     {
