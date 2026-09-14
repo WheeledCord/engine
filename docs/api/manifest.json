@@ -1,0 +1,35 @@
+{
+  "references": [
+    {
+      "name": "EngineApplication",
+      "source": "core/engine.h",
+      "output": "docs/api/core/EngineApplication.xml",
+      "symbols": [
+        "EngineConfigDefault",
+        "EngineApplicationDefault",
+        "EngineRunApplication",
+        "EngineRunningConfig",
+        "EngineApplicationMain",
+        "EngineRun"
+      ]
+    },
+    {
+      "name": "GameplayWorld",
+      "source": "gameplay/entity.h",
+      "output": "docs/api/gameplay/GameplayWorld.xml",
+      "symbols": [
+        "GameplayWorldInit",
+        "GameplayWorldFree",
+        "EntityRegister",
+        "EntitySpawnWith",
+        "EntityDestroy",
+        "EntityAlive",
+        "EntityData",
+        "EntityFirst",
+        "EntityNext",
+        "GameplayWorldStepInput",
+        "GameplayWorldDrawInterpolated"
+      ]
+    }
+  ]
+}
