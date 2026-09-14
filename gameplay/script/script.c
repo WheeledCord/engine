@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "core/file.h"
 #include "script.h"
 
 #include <stdio.h>
@@ -25,6 +26,8 @@ void ScriptHostFree(ScriptHost *host)
 {
     if (!host)
         return;
+    for (size_t i = 0; i < host->sheetCount; i++)
+        SpriteSheetUnload(&host->sheets[i]);
     for (size_t i = 0; i < host->soundCount; i++)
         UnloadSound(host->sounds[i]);
     if (host->audioReady)
@@ -138,6 +141,31 @@ static void ScriptDestroy(EntityContext *entity)
 
 // Registering happens once the script has finished declaring the class, because the world seals its
 // registry at the first spawn and the field table has to be complete by then.
+const SpriteSheet *ScriptHostSheet(ScriptHost *host, const char *name)
+{
+    if (!host || !name || !*name)
+        return NULL;
+    for (size_t i = 0; i < host->sheetCount; i++)
+        if (!strcmp(host->sheetNames[i], name))
+            return &host->sheets[i];
+    if (host->sheetCount == SCRIPT_SHEET_CAPACITY || strlen(name) >= sizeof host->sheetNames[0])
+        return NULL;
+    char atlasName[192], sheetName[192], atlas[512], meta[512];
+    snprintf(atlasName, sizeof atlasName, "%s.png", name);
+    snprintf(sheetName, sizeof sheetName, "%s.sheet", name);
+    const char *atlasPath = CoreResolvePath(atlasName, atlas, sizeof atlas);
+    const char *metaPath = CoreResolvePath(sheetName, meta, sizeof meta);
+    SpriteSheet loaded;
+    if (!atlasPath || !metaPath || !SpriteSheetLoad(&loaded, atlasPath, metaPath))
+    {
+        TraceLog(LOG_ERROR, "Script: no sprite sheet named %s", name);
+        return NULL;
+    }
+    strcpy(host->sheetNames[host->sheetCount], name);
+    host->sheets[host->sheetCount] = loaded;
+    return &host->sheets[host->sheetCount++];
+}
+
 bool ScriptClassRegister(ScriptHost *host, ScriptClass *type)
 {
     if (!host || !type || type->registered)

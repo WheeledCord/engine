@@ -411,6 +411,35 @@ const EntitySceneKeyValue *EntityKeyValueAt(const GameplayWorld *world, EntityHa
     return slot && index < slot->keyValueCount ? &slot->keyValues[index] : NULL;
 }
 
+/* The next live slot at or after `index`, of this class when one is named. */
+static EntityHandle WalkFrom(const GameplayWorld *world, size_t index, const char *classname)
+{
+    if (!world)
+        return ENTITY_NULL;
+    for (; index < world->maxEntities; index++)
+    {
+        const GameplayEntity *slot = &world->entities[index];
+        if (!slot->alive)
+            continue;
+        if (classname && (!slot->type || strcmp(slot->type->classname, classname)))
+            continue;
+        return (EntityHandle){(uint32_t)index, slot->generation};
+    }
+    return ENTITY_NULL;
+}
+EntityHandle EntityFirst(const GameplayWorld *world, const char *classname)
+{
+    return WalkFrom(world, 0, classname);
+}
+EntityHandle EntityNext(const GameplayWorld *world, EntityHandle after, const char *classname)
+{
+    /* Where it left off, not where the handle still points: the one it names may have been
+       destroyed mid-walk, and the walk carries on regardless. */
+    if (!world || after.index == UINT32_MAX || after.index >= world->maxEntities)
+        return ENTITY_NULL;
+    return WalkFrom(world, (size_t)after.index + 1, classname);
+}
+
 void EntityScheduleThink(GameplayWorld *world, EntityHandle entity, double when)
 {
     GameplayEntity *slot = Lookup(world, entity);

@@ -22,6 +22,18 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
 - `mesh_builder`: explicit position/normal/UV emission, quad helpers and directional mapping math.
 - `skeleton`: hierarchy, local/global pose conversion, posed-pivot rotations, chain collapse and raymath skin matrices.
 - `animation`: per-instance playback, explicit FPS, frame sampling, quaternion pose blending, aim and GPU pose upload.
+- `playback`: where a clip has got to after a given time -- frame, and the pair either side of it
+  for blending. Skeletal animation and sprite sheets both ask it, so neither of them owns the rule
+  and the two cannot answer differently.
+- `sprite_sheet`: a grid atlas played frame by frame, its plain-text sidecar, and the ground anchor
+  saying where in a cell its subject's feet are, so a drawer never has to guess at the offset. Any
+  producer will do: baked out of 3D, hand-drawn, whatever fills the grid. `SpriteAnim` keeps the
+  clock, as Actor does for skeletons.
+- `iso_grid`: the two grids Fallout 1/2 lay over the same ground -- a square tile grid for the floor
+  and a hex grid twice as fine for everything that moves -- in their own trimetric projection, which
+  leans rather than mirroring. Screen conversion both ways, hex neighbours, distance and facing,
+  the cell outlines that tile exactly, and the far-to-near order an isometric scene must be painted
+  in. No camera and no map size: those belong to a project.
 - `fps_camera`: movement smoothing, accepted-distance gait, footfall events, breath/bob and viewmodel sway. Input mappings and collision/terrain policy belong to callers.
 - `viewmodel`: one scoped projection/depth function and camera-space transform helper.
 - `transform`: local/world movement, rotation, conversion and bounded turning. Forward is +Z, up
@@ -84,9 +96,9 @@ never redirect, since the caller is naming where the file should go.
 
 Ownership: shader tables own loaded shaders; the uniform registry copies names but borrows shaders. MB transfers buffers to raylib when uploaded. Actor borrows its model, clips and aim-joint list, and owns its pose state. Call `ActorUploadPose` immediately before drawing each instance when models are shared. Model loading remains raylib's responsibility; no custom formats or asset conversion are introduced.
 
-`make -f Makefile.core` always runs `tools/check_core_dependencies.py` on compiler-produced dependency lists for core sources and headers before compilation/linking. Relative, absolute and transitive includes escaping the allowed roots fail the build. The executable project includes only core headers and system C headers. This is build enforcement, not a sandbox against deliberately disabling the build rules.
+`make` always runs `tools/check_core_dependencies.py` on compiler-produced dependency lists for core sources and headers before compilation/linking. Relative, absolute and transitive includes escaping the allowed roots fail the build. The executable project includes only core headers and system C headers. This is build enforcement, not a sandbox against deliberately disabling the build rules.
 
-Run instructions and verification live in `projects/core_test/README.md`.
+Run instructions and verification live in `tests/integration/core/README.md`.
 
 ## Application authoring
 

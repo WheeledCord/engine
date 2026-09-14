@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #include "animation.h"
+#include "playback.h"
 #include "raymath.h"
 #include <math.h>
 #include <string.h>
@@ -18,19 +19,15 @@ static bool FrameLocal(Actor *a, int clip, int frame, Transform *out)
 static void Sample(Actor *a, Transform *out)
 {
     const ModelAnimation *anim = a->clips[a->clip].animation;
-    double f = a->time * a->clips[a->clip].fps;
-    if (a->loop)
-        f = fmod(f, anim->frameCount);
-    else if (f > anim->frameCount - 1)
-        f = anim->frameCount - 1;
-    int first = (int)f, second = first + 1;
-    if (second >= anim->frameCount)
-        second = a->loop ? 0 : first;
+    int first, second;
+    float between;
+    CoreClipBlend((CoreClip){anim->frameCount, a->clips[a->clip].fps, a->loop}, a->time, &first,
+                  &second, &between);
     Transform x[CORE_BONE_CAPACITY], y[CORE_BONE_CAPACITY];
     FrameLocal(a, a->clip, first, x);
     FrameLocal(a, a->clip, second, y);
     for (int b = 0; b < a->skeleton.count; b++)
-        out[b] = RigTransformBlend(x[b], y[b], (float)(f - first));
+        out[b] = RigTransformBlend(x[b], y[b], between);
 }
 bool ActorInit(Actor *a, Model *model, const ActorClip *clips, int count)
 {

@@ -94,9 +94,39 @@ it is also called when project Init or scene loading fails. Adapter-managed syst
 the world themselves. Lower-level GameplayWorld and GameplaySystems APIs remain available when a
 project needs to control sequencing directly.
 
+## Walking the world
+
+`EntityFirst`/`EntityNext` walk the living entities, all of them or one class:
+
+```c
+for (EntityHandle at = EntityFirst(world, "critter"); EntityAlive(world, at);
+     at = EntityNext(world, at, "critter"))
+    ...
+```
+
+Handles rather than pointers, so a walk that destroys as it goes cannot walk into freed memory, and
+the walk carries on from where it was rather than from a handle that has just died. Entities spawned
+during a walk may or may not be reached by it: collect first and spawn afterwards.
+
+There is no spatial index here, deliberately. Entities have no mandatory transform, so the world does
+not know where anything is; a project that wants "everything on this hex" keeps that index itself,
+built from this walk, the way it already knows what its own positions mean.
+
+## Routing and walking a hex grid
+
+`iso_move` plans and walks routes over the hex grid in `core/iso_grid.h`. `IsoPathfinder` is an A*
+workspace sized once and reused, because a search that allocates is one a turn cannot afford often;
+`IsoPathfinderSolve` fills an `IsoPath`, and `IsoMover` walks it, turning to face each step.
+
+Nothing here knows what blocks a hex, what a move costs, or whether there are turns at all. The
+caller answers what is blocked through `IsoBlockedFn`, so walls, scenery, other characters and shut
+doors are all the same question asked of the project. A game that rations movement plans a walk and
+then cuts it with `IsoMoverTruncate`; what the allowance is, and what it is called, stays with the
+game.
+
 ## Migration from the earlier callbacks
 
 Change callbacks to accept EntityContext; replace EntityData lookups with `e->data` and project globals
 with `e->app`. Move default-value assignments out of Spawn into the class defaults value. Spawn now
 returns true on success. Field declarations replace ordinary KeyValue parsing. Existing scene grammar,
-handles and scheduling semantics remain the same. The updated gameplay_test exercises the migration.
+handles and scheduling semantics remain the same. The gameplay integration test exercises the migration.

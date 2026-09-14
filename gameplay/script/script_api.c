@@ -2,6 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+#include "core/iso_grid.h"
 #include "script.h"
 
 #include "core/file.h"
@@ -44,6 +45,34 @@ static ScriptValue *Slot(ScriptHost *host, const char *field)
     for (size_t i = 0; i < type->slotCount; i++)
         if (!strcmp(type->fieldNames[i], field))
             return &self->slots[i];
+    return NULL;
+}
+
+/* A handle may name a C entity too. Cross-entity script access is deliberately limited to a
+   scripted class, whose field storage and transform are the public script contract. */
+static ScriptEntity *EntityScript(ScriptHost *host, EntityHandle entity, ScriptClass **type)
+{
+    if (type)
+        *type = NULL;
+    if (!host || !EntityAlive(host->world, entity))
+        return NULL;
+    ScriptClass *found = ScriptHostClass(host, EntityClassname(host->world, entity));
+    if (!found)
+        return NULL;
+    if (type)
+        *type = found;
+    return EntityData(host->world, entity);
+}
+
+static ScriptValue *EntitySlot(ScriptHost *host, EntityHandle entity, const char *field)
+{
+    ScriptClass *type = NULL;
+    ScriptEntity *data = EntityScript(host, entity, &type);
+    if (!data || !field)
+        return NULL;
+    for (size_t i = 0; i < type->slotCount; i++)
+        if (!strcmp(type->fieldNames[i], field))
+            return &data->slots[i];
     return NULL;
 }
 
@@ -200,6 +229,33 @@ SCRIPT_BODY(classname)
     return ScriptString(name ? name : "");
 }
 
+SCRIPT_BODY(find_first)
+{
+    return ScriptHandle(host ? ScriptHostIdOf(EntityFirst(host->world, a[0].as.string)) : 0);
+}
+
+SCRIPT_BODY(find_next)
+{
+    if (!host)
+        return ScriptHandle(0);
+    EntityHandle after = ScriptHostHandleOf(host, a[0].as.entity);
+    return ScriptHandle(ScriptHostIdOf(EntityNext(host->world, after, a[1].as.string)));
+}
+
+SCRIPT_BODY(entity_position)
+{
+    ScriptEntity *target = EntityScript(host, ScriptHostHandleOf(host, a[0].as.entity), NULL);
+    return ScriptVector2(target ? target->transform.translation : (Vector2){0, 0});
+}
+
+SCRIPT_BODY(set_entity_position)
+{
+    ScriptEntity *target = EntityScript(host, ScriptHostHandleOf(host, a[0].as.entity), NULL);
+    if (target)
+        target->transform.translation = a[1].as.vector2;
+    return ScriptNone();
+}
+
 SCRIPT_BODY(think_next)
 {
     UNUSED_ARGUMENTS;
@@ -253,6 +309,44 @@ SCRIPT_BODY(set_vector)
     ScriptValue *slot = Slot(host, a[0].as.string);
     if (slot && slot->type == SCRIPT_VECTOR2)
         slot->as.vector2 = a[1].as.vector2;
+    return ScriptNone();
+}
+
+SCRIPT_BODY(entity_get_number)
+{
+    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
+    if (!slot)
+        return ScriptFloat(0);
+    if (slot->type == SCRIPT_INT)
+        return ScriptFloat((float)slot->as.integer);
+    if (slot->type == SCRIPT_BOOL)
+        return ScriptFloat(slot->as.boolean ? 1.0f : 0.0f);
+    return ScriptFloat(slot->type == SCRIPT_FLOAT ? slot->as.number : 0);
+}
+
+SCRIPT_BODY(entity_set_number)
+{
+    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
+    if (slot && slot->type == SCRIPT_INT)
+        slot->as.integer = (int)a[2].as.number;
+    else if (slot && slot->type == SCRIPT_BOOL)
+        slot->as.boolean = a[2].as.number != 0;
+    else if (slot && slot->type == SCRIPT_FLOAT)
+        slot->as.number = a[2].as.number;
+    return ScriptNone();
+}
+
+SCRIPT_BODY(entity_get_vector)
+{
+    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
+    return ScriptVector2(slot && slot->type == SCRIPT_VECTOR2 ? slot->as.vector2 : (Vector2){0, 0});
+}
+
+SCRIPT_BODY(entity_set_vector)
+{
+    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
+    if (slot && slot->type == SCRIPT_VECTOR2)
+        slot->as.vector2 = a[2].as.vector2;
     return ScriptNone();
 }
 
@@ -431,6 +525,50 @@ SCRIPT_BODY(draw_rect_rotated)
                      (Vector2){size.x / 2, size.y / 2}, a[2].as.number * RAD2DEG,
                      Unpack(a[3].as.integer));
     return ScriptNone();
+}
+
+static IsoHex AsHex(Vector2 v)
+{
+    return (IsoHex){(int)v.x, (int)v.y};
+}
+static Vector2 FromHex(IsoHex hex)
+{
+    return (Vector2){(float)hex.x, (float)hex.y};
+}
+SCRIPT_BODY(hex_world)
+{
+    (void)host;
+    return ScriptVector2(IsoHexToScreen(AsHex(a[0].as.vector2)));
+}
+SCRIPT_BODY(hex_at)
+{
+    (void)host;
+    return ScriptVector2(FromHex(IsoScreenToHex(a[0].as.vector2)));
+}
+SCRIPT_BODY(hex_distance)
+{
+    (void)host;
+    return ScriptInt(IsoHexDistance(AsHex(a[0].as.vector2), AsHex(a[1].as.vector2)));
+}
+SCRIPT_BODY(hex_neighbour)
+{
+    (void)host;
+    return ScriptVector2(FromHex(IsoHexNeighbour(AsHex(a[0].as.vector2), (IsoDir)a[1].as.integer)));
+}
+SCRIPT_BODY(hex_facing)
+{
+    (void)host;
+    return ScriptInt((int)IsoHexDirection(AsHex(a[0].as.vector2), AsHex(a[1].as.vector2)));
+}
+
+SCRIPT_BODY(draw_sprite)
+{
+    const SpriteSheet *sheet = ScriptHostSheet(host, a[0].as.string);
+    if (!sheet)
+        return ScriptBool(false);
+    DrawTexturePro(sheet->atlas, SpriteSheetFrameRect(sheet, SpriteSheetFrameAt(sheet, a[2].as.number)),
+                   SpriteSheetGroundRect(sheet, a[1].as.vector2), (Vector2){0, 0}, 0, WHITE);
+    return ScriptBool(true);
 }
 
 SCRIPT_BODY(draw_circle)
