@@ -12,10 +12,12 @@ not an engine feature.
 | Runtime | GPU capability contract | `core/capabilities.h` |
 | Input | Raw input, actions, axes, vectors | `core/input.h` |
 | Files | Data-root resolution, checked reads, atomic writes | `core/file.h` |
-| Rendering | GLSL 120 shader tables and frame uniforms | `core/shader.h`, `core/frame_uniforms.h` |
+| Rendering | GLSL 120 shader tables, `#include` expansion, and frame uniforms | `core/shader.h`, `core/frame_uniforms.h` |
 | Rendering | Colour/depth render targets | `core/render_target.h` |
 | Rendering | Model instances and shader overrides | `core/world_draw.h` |
 | Geometry | Explicit mesh construction | `core/mesh_builder.h` |
+| Textures | Bake a material shader into a mesh's UV layout, with seam dilation | `core/uv_bake.h`; [texture baking](../user/texture-baking.md) |
+| Textures | Surface maps: colour plus height in one texture, normal derived from it | `core/shaders/surface_map.glsl`; [texture baking](../user/texture-baking.md) |
 | Animation | Skeleton poses, clips, blending, aim, GPU skinning | `core/skeleton.h`, `core/animation.h`, `core/playback.h` |
 | Sprites | Grid atlases, animation, ground anchors | `core/sprite_sheet.h` |
 | Sprites | Anchored scale/tint/flip/rotation presentation and deterministic draw ordering | `core/sprite_sheet.h` |
