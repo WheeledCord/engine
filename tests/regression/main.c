@@ -418,8 +418,22 @@ static bool KeyValue(EntityContext *e, const char *k, const char *v)
 static void FileChecks(void)
 {
     char path[512];
+    snprintf(path, sizeof path, "%s", Scratch("regression_binary.dat"));
+    FILE *f = fopen(path, "wb");
+    const unsigned char expected[] = {0x00, 0x7f, 0xff, 0x31};
+    fwrite(expected, 1, sizeof expected, f);
+    fclose(f);
+    size_t binarySize = 99;
+    unsigned char *binary = CoreReadData(path, &binarySize);
+    Check(binary && binarySize == sizeof expected && !memcmp(binary, expected, sizeof expected),
+          "a binary file keeps embedded zeroes and reports its exact size");
+    CoreFreeData(binary);
+    binarySize = 99;
+    binary = CoreReadData(Scratch("missing_binary.dat"), &binarySize);
+    Check(!binary && binarySize == 0, "a missing binary file fails with an empty result");
+
     snprintf(path, sizeof path, "%s", Scratch("regression_malformed.ui"));
-    FILE *f = fopen(path, "w");
+    f = fopen(path, "w");
     fprintf(f, "core_ui_document 6\nsurface 200 100 0\t\n"
                "0 10 10 80 24 0 0 7 0 0 0 0 0 1 1 -1 -\tGood\n"
                "this line is not an element at all\n");

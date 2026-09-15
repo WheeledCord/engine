@@ -88,8 +88,10 @@ const char *CoreResolvePath(const char *path, char *buf, size_t buflen)
     return buf;
 }
 
-char *CoreReadFile(const char *path)
+unsigned char *CoreReadData(const char *path, size_t *outSize)
 {
+    if (outSize)
+        *outSize = 0;
     char resolved[1024];
     const char *actual = CoreResolvePath(path, resolved, sizeof resolved);
     FILE *f = actual ? fopen(actual, "rb") : NULL;
@@ -106,22 +108,45 @@ char *CoreReadFile(const char *path)
         fclose(f);
         return NULL;
     }
-    char *s = malloc((size_t)size + 1);
-    if (!s)
+    size_t bytes = (size_t)size;
+    unsigned char *data = malloc(bytes ? bytes : 1);
+    if (!data)
     {
         fclose(f);
         return NULL;
     }
-    size_t n = fread(s, 1, (size_t)size, f);
+    size_t n = fread(data, 1, bytes, f);
     int failed = ferror(f);
     fclose(f);
-    if (failed || n != (size_t)size)
+    if (failed || n != bytes)
     {
-        free(s);
+        free(data);
         return NULL;
     }
-    s[n] = 0;
-    return s;
+    if (outSize)
+        *outSize = n;
+    return data;
+}
+
+void CoreFreeData(void *data)
+{
+    free(data);
+}
+
+char *CoreReadFile(const char *path)
+{
+    size_t size = 0;
+    unsigned char *data = CoreReadData(path, &size);
+    if (!data)
+        return NULL;
+    char *text = realloc(data, size + 1);
+    if (!text)
+    {
+        free(data);
+        return NULL;
+    }
+    text[size] = 0;
+    return text;
 }
 
 void CoreFreeFile(char *text)

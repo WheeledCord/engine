@@ -20,6 +20,19 @@
    something else; buf must outlive the returned pointer. */
 void CoreSetDataRoot(const char *path);
 const char *CoreResolvePath(const char *path, char *buf, size_t buflen);
+
+/** @brief Read an entire binary file through the configured data root.
+ * @param path Absolute, working-directory-relative, or data-root-relative path.
+ * @param size Receives the byte count on success; may be NULL.
+ * @return Heap storage owned by the caller, or NULL when the file cannot be read.
+ * Release it with CoreFreeData. An empty file still returns a releasable pointer. */
+unsigned char *CoreReadData(const char *path, size_t *size);
+
+/** @brief Release bytes returned by CoreReadData.
+ * @param data Bytes to release; NULL is allowed.
+ * @return Nothing; the pointer is invalid once this returns. */
+void CoreFreeData(void *data);
+
 char *CoreReadFile(const char *path);
 void CoreFreeFile(char *text);
 
