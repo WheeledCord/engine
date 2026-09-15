@@ -71,6 +71,15 @@
         "CoreBakeMeshUV",
         "CoreDilateUVSeams"
       ]
+    },
+    {
+      "name": "CoreFile",
+      "source": "core/file.h",
+      "output": "docs/api/core/CoreFile.xml",
+      "symbols": [
+        "CoreReadData",
+        "CoreFreeData"
+      ]
     }
   ]
 }
