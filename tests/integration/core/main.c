@@ -12,6 +12,7 @@
 #include "core/render_target.h"
 #include "core/shader.h"
 #include "core/ui.h"
+#include "core/uv_bake.h"
 #include "core/ui_containers.h"
 #include "core/ui_menu.h"
 #include "core/viewmodel.h"
@@ -289,6 +290,104 @@ static void PoseCheck(Project *p)
                          Vector3LengthSqr(globals[b].scale) == 0;
     Check(p, collapsed, "hide collapses selected bone chain");
 }
+// A quad whose UVs cover the whole 0..1 layout must fill the whole target, and the texel a given UV
+// lands on must be the surface point that owns it -- that is the whole contract. The material here
+// writes object position through as colour, so the result can be checked against the geometry
+// rather than against another rendering of it.
+static void UvBakeCheck(Project *p)
+{
+    RenderTexture target = {0};
+    if (!MakeRT(&target, 16, 16, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, false))
+    {
+        Check(p, false, "uv bake target");
+        return;
+    }
+    BeginTextureMode(target);
+    ClearBackground(BLANK);
+    EndTextureMode();
+    MB builder = {0};
+    Check(p, MBInit(&builder, 6), "uv bake builder");
+    // Object x runs 0..1 across the quad and u matches it, so a baked red channel must equal u.
+    // EmitQuadV winds {0,1,2, 2,1,3}, so the corners go in Z order, not around the edge.
+    Vector3 corners[4] = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {1, 1, 0}};
+    Vector2 uvs[4] = {{0, 0}, {1, 0}, {0, 1}, {1, 1}};
+    EmitQuadN(&builder, corners, (Vector3){0, 0, 1}, uvs);
+    Mesh mesh = {0};
+    Check(p, MBMesh(&builder, &mesh), "uv bake mesh uploads");
+
+    Shader bake = {0};
+    ShaderFile files[] = {
+        {"core/shaders/uv_unwrap.vs", "tests/integration/core/shaders/bake_position.fs"}};
+    Check(p, CoreLoadShaders(files, 1, &bake), "uv bake shader pair loads");
+    Material material = LoadMaterialDefault();
+    material.shader = bake;
+    Check(p, CoreBakeMeshUV(mesh, material, target, MatrixIdentity()), "uv bake draws the mesh");
+    Mesh bare = mesh;
+    bare.texcoords = NULL;
+    Check(p, !CoreBakeMeshUV(bare, material, target, MatrixIdentity()),
+          "uv bake rejects a mesh with no texture coordinates");
+    Material noShader = material;
+    noShader.shader = (Shader){0};
+    Check(p, !CoreBakeMeshUV(mesh, noShader, target, MatrixIdentity()),
+          "uv bake rejects a material with no shader");
+    Check(p, !CoreDilateUVSeams(NULL, 2), "seam dilation rejects a NULL image");
+    Color seamPixels[3] = {BLANK, {10, 20, 30, 64}, BLANK};
+    Image seamImage = {seamPixels, 3, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    Check(p, CoreDilateUVSeams(&seamImage, 1), "seam dilation accepts RGBA8");
+    Check(p, seamPixels[0].r == 10 && seamPixels[0].g == 20 && seamPixels[0].b == 30 &&
+                 seamPixels[0].a == 64 && seamPixels[2].a == 64,
+          "seam dilation preserves an alpha payload");
+
+    Image baked = LoadImageFromTexture(target.texture);
+    ImageFormat(&baked, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    Color *texels = (Color *)baked.data;
+    bool covered = true, positioned = true;
+    for (int y = 0; y < baked.height; y++)
+        for (int x = 0; x < baked.width; x++)
+        {
+            Color c = texels[y * baked.width + x];
+            if (!c.a)
+                covered = false;
+            int want = (int)((x + 0.5f) / (float)baked.width * 255.0f);
+            if (c.r < want - 24 || c.r > want + 24)
+                positioned = false;
+        }
+    // A surface map carries height in alpha, so a bake must not blend: the default blend would
+    // scale the colour by that alpha and every baked material would come back darkened by its own
+    // relief. Writing white behind a half alpha catches it -- blended, the white arrives grey.
+    BeginTextureMode(target);
+    ClearBackground(BLANK);
+    EndTextureMode();
+    Shader alphaBake = {0};
+    ShaderFile alphaFiles[] = {
+        {"core/shaders/uv_unwrap.vs", "tests/integration/core/shaders/bake_alpha.fs"}};
+    Check(p, CoreLoadShaders(alphaFiles, 1, &alphaBake), "uv bake alpha shader loads");
+    Material alphaMaterial = LoadMaterialDefault();
+    alphaMaterial.shader = alphaBake;
+    CoreBakeMeshUV(mesh, alphaMaterial, target, MatrixIdentity());
+    Image alphaBaked = LoadImageFromTexture(target.texture);
+    ImageFormat(&alphaBaked, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
+    Color centre = ((Color *)alphaBaked.data)[(alphaBaked.height / 2) * alphaBaked.width +
+                                              alphaBaked.width / 2];
+    Check(p, centre.r > 250 && centre.g > 250 && centre.b > 250,
+          "uv bake stores colour unblended when alpha is not one");
+    Check(p, centre.a > 120 && centre.a < 136, "uv bake stores alpha as written");
+    UnloadImage(alphaBaked);
+    alphaMaterial.shader = (Shader){0};
+    UnloadMaterial(alphaMaterial);
+    CoreUnloadShaders(&alphaBake, 1);
+
+    Check(p, covered, "uv bake fills every texel the layout covers");
+    Check(p, positioned, "uv bake texel carries the surface point that owns it");
+    UnloadImage(baked);
+    UnloadMesh(mesh);
+    MBFree(&builder);
+    material.shader = (Shader){0}; // the shader is unloaded below, not with the material
+    UnloadMaterial(material);
+    CoreUnloadShaders(&bake, 1);
+    CoreUnloadRT(&target);
+}
+
 static bool Init(void *context)
 {
     Project *p = context;
@@ -389,6 +488,17 @@ static bool Init(void *context)
     RenderTexture onlyDepth = {0};
     Check(p, MakeRT(&onlyDepth, 32, 32, 0, true), "depth-only target completeness");
     CoreUnloadRT(&onlyDepth);
+    UvBakeCheck(p);
+    {   // GLSL has no #include; CoreLoadShaders expands one. The probe calls a function defined
+        // only in the included file, so it links only if the paste happened.
+        Shader included = {0};
+        ShaderFile probe[] = {{NULL, "tests/integration/core/shaders/include_probe.fs"}};
+        Check(p, CoreLoadShaders(probe, 1, &included), "shader include is expanded before compiling");
+        CoreUnloadShaders(&included, 1);
+        Shader missing = {0};
+        ShaderFile absent[] = {{NULL, "tests/integration/core/shaders/include_missing.fs"}};
+        Check(p, !CoreLoadShaders(absent, 1, &missing), "shader include of a missing file fails");
+    }
     if (!MakeRT(&p->bakeColor, 128, 128, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, true) ||
         !MakeRT(&p->bakeNormal, 128, 128, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8, true))
         return false;

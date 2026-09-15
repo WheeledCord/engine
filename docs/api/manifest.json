@@ -62,6 +62,15 @@
         "Collision2DQueryCircle",
         "Collision2DSweepCircle"
       ]
+    },
+    {
+      "name": "CoreUvBake",
+      "source": "core/uv_bake.h",
+      "output": "docs/api/core/CoreUvBake.xml",
+      "symbols": [
+        "CoreBakeMeshUV",
+        "CoreDilateUVSeams"
+      ]
     }
   ]
 }
