@@ -32,6 +32,32 @@ typedef struct EngineInputCapture
 /* Filters both newly polled and pending input; captured presses cannot fire later. */
 void EngineInputRoute(EngineInput *pending, const EngineInput *frame, EngineInputCapture capture);
 
+/* Owns raylib's relative-pointer mode for one gameplay view. Zero-initialize before first use. */
+typedef struct CoreMouseCapture
+{
+    bool active, wasFocused, wasFullscreen;
+    int width, height;
+    unsigned int discardFrames;
+} CoreMouseCapture;
+
+/** @brief Apply pointer capture for this frame and return a transition-safe relative mouse delta.
+ *
+ * Losing focus releases the operating-system pointer lock. Regaining focus, changing fullscreen
+ * state, resizing the window, or finding that the cursor was externally released reapplies the
+ * lock and discards the cursor-rebase frames instead of exposing them as camera motion.
+ *
+ * @param capture Caller-owned state, initially zeroed. Only one owner may manage the window cursor.
+ * @param requested True while gameplay wants relative mouse input; false releases the cursor.
+ * @return Relative mouse motion for this frame, or zero while unfocused, released, or settling.
+ */
+Vector2 CoreMouseCaptureUpdate(CoreMouseCapture *capture, bool requested);
+
+/** @brief Release a pointer lock owned by CoreMouseCaptureUpdate and clear its state.
+ * @param capture Caller-owned capture state; NULL is allowed.
+ * @return Nothing.
+ */
+void CoreMouseCaptureRelease(CoreMouseCapture *capture);
+
 typedef enum InputBindingType
 {
     INPUT_KEY,

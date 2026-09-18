@@ -11,6 +11,7 @@ These guides explain how to use Trench Engine in a game. Start with a task-focus
 ## Guides
 
 - [Application loop](application-loop.md) — callbacks, fixed updates, drawing, and input routing.
+- [Relative mouse capture](mouse-capture.md) — focus-safe pointer locking for first-person views.
 - [Gameplay, entities, and scenes](gameplay.md) — registered classes, fields, callbacks, and scene files.
 - [2D space, camera, and queries](2d-space.md) — optional camera conventions and collision queries without physics.
 - [Project game state](project-game-state.md) — spawning, score, reset, UI capture, and persistence boundaries.

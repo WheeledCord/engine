@@ -256,6 +256,18 @@ static void InputChecks(void)
     EngineInputRoute(&pending, &release, (EngineInputCapture){0});
     Check(blocked && pending.down[KEY_W] && !pending.pressed[KEY_W],
           "captured keys never reach the game, and do not fire once capture ends");
+
+    CoreMouseCapture mouseCapture = {0};
+    Vector2 firstLook = CoreMouseCaptureUpdate(&mouseCapture, true);
+    Check(firstLook.x == 0 && firstLook.y == 0,
+          "entering relative pointer mode discards its cursor rebase");
+    CoreMouseCaptureRelease(&mouseCapture);
+    Check(!mouseCapture.active && mouseCapture.width == 0 && mouseCapture.height == 0 &&
+              !IsCursorHidden(),
+          "releasing relative pointer mode restores the cursor and clears transition state");
+    Vector2 absentLook = CoreMouseCaptureUpdate(NULL, true);
+    Check(absentLook.x == 0 && absentLook.y == 0,
+          "a missing relative pointer owner fails without camera motion");
 }
 
 // ---- documents ------------------------------------------------------------------------------------

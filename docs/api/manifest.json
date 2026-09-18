@@ -74,6 +74,15 @@
       ]
     },
     {
+      "name": "CoreInput",
+      "source": "core/input.h",
+      "output": "docs/api/core/CoreInput.xml",
+      "symbols": [
+        "CoreMouseCaptureUpdate",
+        "CoreMouseCaptureRelease"
+      ]
+    },
+    {
       "name": "CoreFile",
       "source": "core/file.h",
       "output": "docs/api/core/CoreFile.xml",

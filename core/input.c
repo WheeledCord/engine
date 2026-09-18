@@ -65,6 +65,62 @@ void EngineInputRoute(EngineInput *pending, const EngineInput *frame, EngineInpu
     EngineInputAccumulate(pending, &filtered);
 }
 
+Vector2 CoreMouseCaptureUpdate(CoreMouseCapture *capture, bool requested)
+{
+    Vector2 zero = {0};
+    if (!capture)
+        return zero;
+
+    bool focused = IsWindowFocused();
+    bool fullscreen = IsWindowFullscreen();
+    int width = GetScreenWidth(), height = GetScreenHeight();
+    bool displayChanged = capture->width > 0 &&
+                          (capture->width != width || capture->height != height ||
+                           capture->wasFullscreen != fullscreen);
+    bool focusGained = focused && !capture->wasFocused;
+
+    if (!requested || !focused)
+    {
+        if (capture->active)
+            EnableCursor();
+        capture->active = false;
+        capture->discardFrames = 2;
+    }
+    else if (!capture->active || focusGained || displayChanged || !IsCursorHidden())
+    {
+        /* DisableCursor selects GLFW_CURSOR_DISABLED (real relative-pointer capture), not merely
+           a hidden cursor. Calling it again also rebases raylib's virtual cursor after a mode or
+           focus transition. The resulting synthetic movement is discarded below. */
+        DisableCursor();
+        capture->active = true;
+        capture->discardFrames = 2;
+    }
+
+    capture->wasFocused = focused;
+    capture->wasFullscreen = fullscreen;
+    capture->width = width;
+    capture->height = height;
+
+    if (!capture->active)
+        return zero;
+    Vector2 delta = GetMouseDelta();
+    if (capture->discardFrames > 0)
+    {
+        capture->discardFrames--;
+        return zero;
+    }
+    return delta;
+}
+
+void CoreMouseCaptureRelease(CoreMouseCapture *capture)
+{
+    if (!capture)
+        return;
+    if (capture->active)
+        EnableCursor();
+    *capture = (CoreMouseCapture){0};
+}
+
 InputActionState InputActionRead(const EngineInput *input, InputAction action)
 {
     InputActionState result = {0};
