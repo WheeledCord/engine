@@ -66,6 +66,56 @@ still only the table.
 
 ## Pawn
 
+## Small queries
+
+Beside the entity calls, the table carries the generic queries a callback keeps reaching for:
+`random-int`, the vector questions (`vec-length`, `vec-distance`, `vec-normalize`) that raymath
+answers everywhere else in the engine, `text-width` so drawn text can be centred, and `sprite-size`,
+which names a sheet the way `draw-sprite` does and reports one frame's size in pixels — a zero
+vector for a sheet nobody has loaded. All of these are ordinary rows: one declaration, every
+language, the same type checking as anything else.
+
+## Resource handles
+
+Caller-owned engine services — cameras, audio, collision worlds, pathfinders — are exposed through
+a generational handle system. A script receives an opaque integer from `camera-create` or
+`collision-create`, passes it to the operations on that kind, and releases it with
+`camera-destroy`. A stale handle (from a previous destroy) or a handle of the wrong kind is
+rejected: operations return zero values and writes do nothing, just as stale entity handles do.
+No raw pointer or platform handle ever reaches a script.
+
+The pools live in `ScriptHost` and are freed by `ScriptHostFree`. Call `ScriptHostUpdate(host, dt)`
+once per rendered frame from the project's Draw callback: it pumps music streams and ages and
+draws the debug queue, which must draw inside BeginDrawing/EndDrawing.
+
+| Kind | Create | Operations | Destroy |
+| --- | --- | --- | --- |
+| Camera2D | `camera-create` | position, zoom, follow, world-to-screen, screen-to-world, interpolated, viewport | `camera-destroy` |
+| Audio | `audio-create` | add-bus, bus-volume!, bus-muted!, play-sound, play-music, stop-music | `audio-destroy` |
+| Collision | `collision-create` | add-circle, add-aabb, remove, move-circle, move-aabb, query-circle, query-aabb, sweep-circle | `collision-destroy` |
+| Pathfinder | `pathfinder-create` | block!, unblock!, blocked?, solve, path-length, path-get | `pathfinder-destroy` |
+| Mover | `mover-create` | go-to, truncate!, remaining, stop!, moving?, update!, screen, hex | `mover-destroy` |
+
+A pathfinder's blocked hexes are the answer `pathfinder-block!` gives `IsoBlockedFn`, so `solve`
+and `mover-go-to` route around exactly what a script marked; the solved route stays with the
+pathfinder for `pathfinder-path-length` and `pathfinder-path-get` to read. A mover holds its own
+route and clock, and a script advances it with `mover-update!` from its think callback.
+
+## Saving, and what a script sees while it runs
+
+`save-set-number!`/`save-set-string!` remember values under keys, `save-get-number`/`save-get-string`
+read them back, and `save-write`/`save-read` round-trip them through a file with the engine's own
+atomic save: a failed or interrupted write leaves the old file intact. `debug-line`,
+`debug-circle`, `debug-rect` and `debug-text` queue primitives that stay on screen for as many
+seconds as asked; they appear and expire through `ScriptHostUpdate`. Mouse state joins the
+keyboard through `mouse-position`, `mouse-delta`, `mouse-wheel`, `mouse-down?` and `mouse-pressed?`.
+
+`InputMap` is deliberately not bound: its public API takes an up-front definition table and its
+rebind dialog needs a `UiContext`, so a script would be driving C UI through a pointer. The raw
+key, mouse and action bindings cover what a script asks input for; rebinding stays with the
+project's own code, where the UI already lives.
+
+## Scheme
 Pawn uses the same binding table; what its frontend adds is only what Pawn needs to be told:
 
 - Names are spelled the way a Pawn identifier can be: `move-world!` is `move_world`, `alive?` is

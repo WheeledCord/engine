@@ -89,7 +89,8 @@ and no path into the engine:
     scenes scenes
 
 `engine-build` reads it, finds the SDK (named with `--sdk`, in `ENGINE_SDK`, vendored at `./sdk`, or
-installed and found through pkg-config), links one static binary, puts the project's content and the
+installed and found through pkg-config), links one static binary, synchronizes the project's declared
+content trees (including removing stale packaged files), and puts the
 engine's runtime data beside it so it runs from anywhere, and checks that nothing has reached past
 the SDK into the engine's own files.
 

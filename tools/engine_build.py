@@ -158,6 +158,19 @@ def sources_of(project, project_dir):
     return files
 
 
+def sync_tree(source, destination, output_root):
+    """Replace one declared output tree, so removed source assets cannot survive another build."""
+    output_root = pathlib.Path(output_root).absolute()
+    destination = pathlib.Path(destination).absolute()
+    if destination == output_root or output_root not in destination.parents:
+        fail(f'refusing to synchronize content outside the build directory: {destination}')
+    if destination.is_symlink() or destination.is_file():
+        destination.unlink()
+    elif destination.exists():
+        shutil.rmtree(destination)
+    shutil.copytree(source, destination)
+
+
 def check_includes(compiler, cflags, sources, project_dir, sdk_includes):
     """The project may reach its own files, the SDK's headers and the system's. Nothing else: a
     project that quietly includes engine internals would be back to depending on this layout."""
@@ -226,7 +239,7 @@ def main():
             source_dir = project_dir / directory
             if not source_dir.is_dir():
                 fail(f'{kind} directory {directory} is not there')
-            shutil.copytree(source_dir, out / directory, dirs_exist_ok=True)
+            sync_tree(source_dir, out / directory, out)
     for script in project['script']:
         source = project_dir / script
         if not source.is_file():

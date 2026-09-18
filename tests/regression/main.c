@@ -10,7 +10,10 @@
 #include "core/fps_camera.h"
 #include "core/frame_uniforms.h"
 #include "core/iso_grid.h"
+#include "core/network.h"
+#include "core/net_sync.h"
 #include "core/sprite_sheet.h"
+#include "core/texture.h"
 #include "core/playback.h"
 #include "core/file.h"
 #include "gameplay/iso_move.h"
@@ -477,6 +480,28 @@ static void FileChecks(void)
     UiDocumentFree(&d);
 }
 
+static void TextureChecks(void)
+{
+    const char *path = Scratch("regression_texture.png");
+    Image image = GenImageColor(4, 2, WHITE);
+    Check(ExportImage(image, path), "texture fixture exports");
+    UnloadImage(image);
+    CoreTextureOptions options = CoreTextureOptionsDefault();
+    options.mipmaps = true;
+    options.filter = TEXTURE_FILTER_TRILINEAR;
+    options.wrap = TEXTURE_WRAP_CLAMP;
+    Texture2D texture = {0};
+    Check(CoreLoadTexture(&texture, path, options) && texture.width == 4 && texture.height == 2 &&
+              texture.mipmaps > 1,
+          "texture loads with requested mipmaps through the data path");
+    CoreUnloadTexture(&texture);
+    Check(!texture.id, "texture unload clears its owning handle");
+    Check(!CoreLoadTexture(&texture, Scratch("missing_texture.png"), options) && !texture.id,
+          "missing texture is rejected and leaves an empty handle");
+    Check(!CoreLoadTexture(NULL, path, options), "texture load rejects a NULL destination");
+    remove(path);
+}
+
 static void ConventionChecks(void)
 {
     FpsCamera camera;
@@ -609,6 +634,283 @@ static void ScriptChecks(void)
                              (ScriptValue[]){next, ScriptString("speed")}, 2, &stale, &message) &&
                 stale.as.number == 0;
     Check(safe, "cross-entity script access rejects stale handles without reaching replacement data");
+
+    Check(safe, "cross-entity script access rejects stale handles without reaching replacement data");
+
+    // The small math and query rows: answers checked against raymath, and types still checked.
+    ScriptValue length = ScriptNone(), distance = ScriptNone(), normalized = ScriptNone();
+    bool math = ScriptInvoke(&host, ScriptBindingNamed("vec-length"),
+                             (ScriptValue[]){ScriptVector2((Vector2){3, 4})}, 1, &length, &message) &&
+                ScriptInvoke(&host, ScriptBindingNamed("vec-distance"),
+                             (ScriptValue[]){ScriptVector2((Vector2){0, 0}),
+                                             ScriptVector2((Vector2){3, 4})},
+                             2, &distance, &message) &&
+                ScriptInvoke(&host, ScriptBindingNamed("vec-normalize"),
+                             (ScriptValue[]){ScriptVector2((Vector2){0, 2})}, 1, &normalized,
+                             &message) &&
+                fabsf(length.as.number - 5) < 0.001f && fabsf(distance.as.number - 5) < 0.001f &&
+                fabsf(normalized.as.vector2.y - 1) < 0.001f;
+    Check(math, "vector queries come from raymath through the one table");
+
+    bool ranged = true;
+    for (int i = 0; i < 32 && ranged; i++)
+    {
+        ScriptValue roll = ScriptNone();
+        ranged = ScriptInvoke(&host, ScriptBindingNamed("random-int"),
+                              (ScriptValue[]){ScriptInt(2), ScriptInt(5)}, 2, &roll, &message) &&
+                 roll.as.integer >= 2 && roll.as.integer <= 5;
+    }
+    bool rolled = ranged && !ScriptInvoke(&host, ScriptBindingNamed("random-int"),
+                                          (ScriptValue[]){ScriptFloat(2), ScriptInt(5)}, 2, NULL,
+                                          &message);
+    Check(rolled, "random-int stays inside its range and refuses a float for an int");
+
+    ScriptValue wide = ScriptNone(), narrow = ScriptNone();
+    bool measured = ScriptInvoke(&host, ScriptBindingNamed("text-width"),
+                                 (ScriptValue[]){ScriptString("ww"), ScriptInt(10)}, 2, &wide,
+                                 &message) &&
+                    ScriptInvoke(&host, ScriptBindingNamed("text-width"),
+                                 (ScriptValue[]){ScriptString("w"), ScriptInt(10)}, 2, &narrow,
+                                 &message) &&
+                    wide.as.integer > narrow.as.integer && narrow.as.integer > 0;
+    Check(measured, "text-width measures what draw-text would draw");
+
+    ScriptValue size = ScriptNone();
+    bool unknown = ScriptInvoke(&host, ScriptBindingNamed("sprite-size"),
+                                (ScriptValue[]){ScriptString("no-such-sheet")}, 1, &size, &message) &&
+                   size.as.vector2.x == 0 && size.as.vector2.y == 0;
+    Check(unknown, "sprite-size answers a zero size for a sheet nobody loaded");
+
+    // Resource handle system: create, use, destroy, stale rejection, kind mismatch.
+    ScriptValue camHandle = ScriptNone();
+    bool camMade = ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
+                                (ScriptValue[]){ScriptNone()}, 0, &camHandle, &message) &&
+                   camHandle.type == SCRIPT_RESOURCE && camHandle.as.integer != 0;
+    Check(camMade, "camera-create returns a live resource handle");
+
+    ScriptValue camPos = ScriptNone();
+    bool camRead = ScriptInvoke(&host, ScriptBindingNamed("camera-position"),
+                                (ScriptValue[]){camHandle}, 1, &camPos, &message) &&
+                   camPos.type == SCRIPT_VECTOR2;
+    Check(camRead, "camera-position reads from a valid handle");
+
+    ScriptValue camGone = ScriptBool(true);
+    bool camFreed = ScriptInvoke(&host, ScriptBindingNamed("camera-destroy"),
+                                 (ScriptValue[]){camHandle}, 1, &camGone, &message) &&
+                    camGone.as.boolean;
+    Check(camFreed, "camera-destroy releases a live handle");
+
+    ScriptValue stalePos = ScriptNone();
+    bool staleRefused = ScriptInvoke(&host, ScriptBindingNamed("camera-position"),
+                                     (ScriptValue[]){camHandle}, 1, &stalePos, &message) &&
+                        stalePos.type == SCRIPT_VECTOR2 && stalePos.as.vector2.x == 0 &&
+                        stalePos.as.vector2.y == 0;
+    Check(staleRefused, "a destroyed camera handle gives a zero position");
+
+    // Generational reuse: the next camera reuses the slot but gets a new generation.
+    ScriptValue cam2Handle = ScriptNone();
+    bool cam2Made = ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
+                                 (ScriptValue[]){ScriptNone()}, 0, &cam2Handle, &message) &&
+                    cam2Handle.type == SCRIPT_RESOURCE && cam2Handle.as.integer != 0 &&
+                    cam2Handle.as.integer != camHandle.as.integer;
+    Check(cam2Made, "a recreated camera has a different handle than the destroyed one");
+
+    // Camera follow and coordinate round-trip.
+    ScriptValue cam3Handle = ScriptNone();
+    ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
+                 (ScriptValue[]){ScriptNone()}, 0, &cam3Handle, &message);
+    ScriptInvoke(&host, ScriptBindingNamed("camera-set-viewport!"),
+                 (ScriptValue[]){cam3Handle, ScriptVector2((Vector2){960, 540})}, 2, NULL, &message);
+    ScriptInvoke(&host, ScriptBindingNamed("camera-set-position!"),
+                 (ScriptValue[]){cam3Handle, ScriptVector2((Vector2){100, 200})}, 2, NULL, &message);
+    ScriptValue w2s = ScriptNone();
+    bool roundTrip = ScriptInvoke(&host, ScriptBindingNamed("camera-world-to-screen"),
+                                  (ScriptValue[]){cam3Handle, ScriptVector2((Vector2){100, 200})}, 2, &w2s, &message) &&
+                     w2s.type == SCRIPT_VECTOR2;
+    Check(roundTrip, "camera-world-to-screen converts a world point at the camera centre");
+    ScriptInvoke(&host, ScriptBindingNamed("camera-destroy"),
+                 (ScriptValue[]){cam3Handle}, 1, NULL, &message);
+
+    bool kindMismatch = !ScriptInvoke(&host, ScriptBindingNamed("camera-position"),
+                                      (ScriptValue[]){ScriptInt(42)}, 1, NULL, &message);
+    Check(kindMismatch, "camera-position refuses an int where a resource is expected");
+
+    // Collision world: create, add, query, destroy.
+    ScriptValue colHandle = ScriptNone();
+    bool colMade = ScriptInvoke(&host, ScriptBindingNamed("collision-create"),
+                                (ScriptValue[]){ScriptInt(32), ScriptFloat(64.0f)}, 2, &colHandle, &message) &&
+                   colHandle.type == SCRIPT_RESOURCE && colHandle.as.integer != 0;
+    Check(colMade, "collision-create makes a query world");
+
+    ScriptValue proxyId = ScriptNone();
+    bool circleAdded = ScriptInvoke(&host, ScriptBindingNamed("collision-add-circle"),
+                                    (ScriptValue[]){colHandle, ScriptVector2((Vector2){100, 100}),
+                                                    ScriptFloat(10), ScriptInt(1), ScriptInt(1)},
+                                    5, &proxyId, &message) && proxyId.as.integer != 0;
+    Check(circleAdded, "collision-add-circle registers a proxy");
+
+    ScriptValue overlap = ScriptNone();
+    bool queryOk = ScriptInvoke(&host, ScriptBindingNamed("collision-query-circle"),
+                                (ScriptValue[]){colHandle, ScriptVector2((Vector2){100, 100}),
+                                                ScriptFloat(15), ScriptInt(1)},
+                                4, &overlap, &message) && overlap.as.integer == 1;
+    Check(queryOk, "collision-query-circle finds the registered circle");
+
+    // AABB proxy: add and query
+    ScriptValue aabbProxyId = ScriptNone();
+    bool aabbAdded = ScriptInvoke(&host, ScriptBindingNamed("collision-add-aabb"),
+                                  (ScriptValue[]){colHandle, ScriptVector2((Vector2){200, 200}),
+                                                  ScriptVector2((Vector2){20, 20}), ScriptInt(2), ScriptInt(2)},
+                                  5, &aabbProxyId, &message) && aabbProxyId.as.integer != 0;
+    Check(aabbAdded, "collision-add-aabb registers an AABB proxy");
+
+    ScriptValue aabbOverlap = ScriptNone();
+    bool aabbQueryOk = ScriptInvoke(&host, ScriptBindingNamed("collision-query-aabb"),
+                                    (ScriptValue[]){colHandle, ScriptVector2((Vector2){205, 205}),
+                                                    ScriptVector2((Vector2){10, 10}), ScriptInt(2)},
+                                    4, &aabbOverlap, &message) && aabbOverlap.as.integer == 1;
+    Check(aabbQueryOk, "collision-query-aabb finds the registered box");
+
+    ScriptValue colFreed = ScriptBool(false);
+    bool colDestroyed = ScriptInvoke(&host, ScriptBindingNamed("collision-destroy"),
+                                     (ScriptValue[]){colHandle}, 1, &colFreed, &message) &&
+                        colFreed.as.boolean;
+    Check(colDestroyed, "collision-destroy releases the world");
+
+    // Pathfinder: create, block, query, destroy.
+    ScriptValue pfHandle = ScriptNone();
+    bool pfMade = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-create"),
+                               (ScriptValue[]){ScriptInt(10), ScriptInt(10)}, 2, &pfHandle, &message) &&
+                  pfHandle.type == SCRIPT_RESOURCE && pfHandle.as.integer != 0;
+    Check(pfMade, "pathfinder-create makes an A* workspace");
+
+    ScriptValue blocked = ScriptNone();
+    bool blockOk = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-block!"),
+                                (ScriptValue[]){pfHandle, ScriptVector2((Vector2){3, 3})}, 2, &blocked, &message) &&
+                   blocked.as.boolean;
+    ScriptValue isBlocked = ScriptNone();
+    bool checkBlocked = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-blocked?"),
+                                     (ScriptValue[]){pfHandle, ScriptVector2((Vector2){3, 3})}, 2, &isBlocked, &message) &&
+                        isBlocked.as.boolean;
+    Check(blockOk && checkBlocked, "pathfinder-block! marks a hex and pathfinder-blocked? sees it");
+
+    ScriptValue pfFreed = ScriptBool(false);
+    bool pfDestroyed = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-destroy"),
+                                    (ScriptValue[]){pfHandle}, 1, &pfFreed, &message) && pfFreed.as.boolean;
+    Check(pfDestroyed, "pathfinder-destroy releases the workspace");
+
+    // Pathfinder solve: a route around a wall, and the same hexes read back in order.
+    ScriptValue pf2Handle = ScriptNone();
+    ScriptInvoke(&host, ScriptBindingNamed("pathfinder-create"),
+                 (ScriptValue[]){ScriptInt(10), ScriptInt(10)}, 2, &pf2Handle, &message);
+    for (int x = 0; x < 9; x++)
+        ScriptInvoke(&host, ScriptBindingNamed("pathfinder-block!"),
+                     (ScriptValue[]){pf2Handle, ScriptVector2((Vector2){x, 5})}, 2, NULL, &message);
+    ScriptValue route = ScriptNone();
+    bool solved = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-solve"),
+                               (ScriptValue[]){pf2Handle, ScriptVector2((Vector2){4, 4}),
+                                               ScriptVector2((Vector2){4, 6})},
+                               3, &route, &message) && route.as.integer > 4;
+    Check(solved, "pathfinder-solve routes around a wall of blocked hexes");
+
+    ScriptValue routeFirst = ScriptNone(), routeLast = ScriptNone();
+    bool endsRead = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-path-get"),
+                                 (ScriptValue[]){pf2Handle, ScriptInt(0)}, 2, &routeFirst, &message) &&
+                    ScriptInvoke(&host, ScriptBindingNamed("pathfinder-path-get"),
+                                 (ScriptValue[]){pf2Handle, ScriptInt(route.as.integer - 1)}, 2,
+                                 &routeLast, &message) &&
+                    routeFirst.as.vector2.x == 4 && routeFirst.as.vector2.y == 4 &&
+                    routeLast.as.vector2.x == 4 && routeLast.as.vector2.y == 6;
+    Check(endsRead, "the solved route starts and ends where it was asked to");
+
+    ScriptValue noRoute = ScriptNone();
+    bool walled = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-solve"),
+                               (ScriptValue[]){pf2Handle, ScriptVector2((Vector2){4, 4}),
+                                               ScriptVector2((Vector2){4, 5})},
+                               3, &noRoute, &message) && noRoute.as.integer == 0;
+    Check(walled, "a route onto a blocked hex answers zero");
+
+    // Mover: plan a walk through the same pathfinder and advance it.
+    ScriptValue mvHandle = ScriptNone();
+    bool mvMade = ScriptInvoke(&host, ScriptBindingNamed("mover-create"),
+                              (ScriptValue[]){ScriptVector2((Vector2){4, 4}), ScriptInt(64)}, 2,
+                              &mvHandle, &message) &&
+                  mvHandle.type == SCRIPT_RESOURCE && mvHandle.as.integer != 0;
+    Check(mvMade, "mover-create starts a walker on a hex");
+
+    ScriptValue walking = ScriptNone();
+    bool went = ScriptInvoke(&host, ScriptBindingNamed("mover-go-to"),
+                             (ScriptValue[]){mvHandle, pf2Handle, ScriptVector2((Vector2){4, 6})}, 3,
+                             &walking, &message) && walking.as.boolean;
+    ScriptValue moving = ScriptNone();
+    bool isMoving = ScriptInvoke(&host, ScriptBindingNamed("mover-moving?"),
+                                 (ScriptValue[]){mvHandle}, 1, &moving, &message) && moving.as.boolean;
+    Check(went && isMoving, "mover-go-to plans a walk and mover-moving? sees it");
+
+    ScriptValue remain = ScriptNone();
+    bool stepsLeft = ScriptInvoke(&host, ScriptBindingNamed("mover-remaining"),
+                                  (ScriptValue[]){mvHandle}, 1, &remain, &message) &&
+                                  remain.as.integer > 0;
+    Check(stepsLeft, "mover-remaining counts the hexes still to enter");
+
+    for (int i = 0; i < 200; i++)
+        ScriptInvoke(&host, ScriptBindingNamed("mover-update!"),
+                     (ScriptValue[]){mvHandle, ScriptFloat(0.1f)}, 2, NULL, &message);
+    ScriptValue done = ScriptNone();
+    bool arrived = ScriptInvoke(&host, ScriptBindingNamed("mover-moving?"),
+                                (ScriptValue[]){mvHandle}, 1, &done, &message) && !done.as.boolean;
+    ScriptValue mvHex = ScriptNone();
+    bool atHex = ScriptInvoke(&host, ScriptBindingNamed("mover-hex"),
+                              (ScriptValue[]){mvHandle}, 1, &mvHex, &message) &&
+                 mvHex.as.vector2.x == 4 && mvHex.as.vector2.y == 6;
+    Check(arrived && atHex, "after enough updates a mover arrives at its target hex");
+
+    ScriptValue mvFreed = ScriptBool(false);
+    bool mvDestroyed = ScriptInvoke(&host, ScriptBindingNamed("mover-destroy"),
+                                    (ScriptValue[]){mvHandle}, 1, &mvFreed, &message) && mvFreed.as.boolean;
+    Check(mvDestroyed, "mover-destroy releases the walker");
+
+    // Saved key/values: set, read, and round-trip through a file.
+    bool setOk = ScriptInvoke(&host, ScriptBindingNamed("save-set-number!"),
+                              (ScriptValue[]){ScriptString("gold"), ScriptFloat(42.5f)}, 2, NULL, &message) &&
+                 ScriptInvoke(&host, ScriptBindingNamed("save-set-string!"),
+                              (ScriptValue[]){ScriptString("hero"), ScriptString("Fionn")}, 2, NULL, &message);
+    Check(setOk, "save-set-number! and save-set-string! remember values");
+
+    ScriptValue gold = ScriptNone(), hero = ScriptNone();
+    bool getOk = ScriptInvoke(&host, ScriptBindingNamed("save-get-number"),
+                              (ScriptValue[]){ScriptString("gold")}, 1, &gold, &message) &&
+                 gold.as.number == 42.5f &&
+                 ScriptInvoke(&host, ScriptBindingNamed("save-get-string"),
+                              (ScriptValue[]){ScriptString("hero")}, 1, &hero, &message) &&
+                 !strcmp(hero.as.string, "Fionn");
+    Check(getOk, "save-get-number and save-get-string read what was set");
+
+    bool missing = ScriptInvoke(&host, ScriptBindingNamed("save-get-number"),
+                                (ScriptValue[]){ScriptString("never-set")}, 1, &gold, &message) &&
+                   gold.as.number == 0.0f;
+    Check(missing, "a key nobody set reads as zero");
+
+    const char *savePath = Scratch("regression_save.txt");
+    bool wrote = ScriptInvoke(&host, ScriptBindingNamed("save-write"),
+                              (ScriptValue[]){ScriptString(savePath)}, 1, NULL, &message) &&
+                 ScriptInvoke(&host, ScriptBindingNamed("save-set-number!"),
+                              (ScriptValue[]){ScriptString("gold"), ScriptFloat(1.0f)}, 2, NULL, &message) &&
+                 ScriptInvoke(&host, ScriptBindingNamed("save-read"),
+                              (ScriptValue[]){ScriptString(savePath)}, 1, NULL, &message) &&
+                 ScriptInvoke(&host, ScriptBindingNamed("save-get-number"),
+                              (ScriptValue[]){ScriptString("gold")}, 1, &gold, &message) &&
+                 gold.as.number == 42.5f;
+    Check(wrote, "save-write and save-read round-trip a file");
+
+    // Debug queue: the first primitive makes the queue, and the binding reports it.
+    ScriptValue queued = ScriptNone();
+    bool debugOk = ScriptInvoke(&host, ScriptBindingNamed("debug-line"),
+                                (ScriptValue[]){ScriptVector2((Vector2){0, 0}),
+                                                ScriptVector2((Vector2){10, 10}),
+                                                ScriptInt(0xffffffff), ScriptFloat(1.0f)},
+                                4, &queued, &message) && queued.as.boolean;
+    Check(debugOk, "debug-line queues a primitive on the host's queue");
 
     int count = 0;
     const ScriptBinding *table = ScriptBindings(&count);
@@ -1224,6 +1526,223 @@ static void IsoMoveChecks(void)
     IsoPathfinderFree(&finder);
 }
 
+// ---- transport connects two clients and preserves message boundaries ---------------------------
+static void NetworkChecks(void)
+{
+    unsigned char encoded[9];
+    CoreNetWriter writer = CoreNetWriterBegin(encoded, sizeof encoded);
+    Check(CoreNetWriteU8(&writer, 0x7a) && CoreNetWriteU32(&writer, 0x12345678u) &&
+              CoreNetWriteF32(&writer, -3.25f) && writer.size == sizeof encoded,
+          "network writer encodes fixed-width values within capacity");
+    Check(!CoreNetWriteU8(&writer, 1) && writer.failed,
+          "network writer fails without overflowing its destination");
+    CoreNetReader reader = CoreNetReaderBegin(encoded, sizeof encoded);
+    uint8_t byte = 0;
+    uint32_t integer = 0;
+    float number = 0.0f;
+    Check(CoreNetReadU8(&reader, &byte) && CoreNetReadU32(&reader, &integer) &&
+              CoreNetReadF32(&reader, &number) && byte == 0x7a && integer == 0x12345678u &&
+              number == -3.25f,
+          "network reader reverses the fixed-width wire encoding");
+    Check(!CoreNetReadU8(&reader, &byte) && reader.failed,
+          "network reader fails safely at the end of a message");
+
+    CoreNetEndpoint server = {0}, clients[2] = {{0}};
+    Check(!CoreNetOpenServer(NULL, 0, 2, 2), "network rejects missing endpoint storage");
+    Check(!CoreNetOpenServer(&server, 0, 0, 2), "network rejects a server with no peer capacity");
+    if (!CoreNetOpenServer(&server, 0, 2, 2))
+    {
+        Check(false, "network opens a server on an available port");
+        return;
+    }
+    Check(CoreNetPort(&server) != 0, "network reports the operating system assigned port");
+    Check(!CoreNetOpenServer(&server, 0, 2, 2), "network cannot overwrite an open endpoint");
+    bool opened = CoreNetOpenClient(&clients[0], 2) && CoreNetOpenClient(&clients[1], 2);
+    Check(opened, "network opens two clients in one process");
+    if (!opened)
+    {
+        CoreNetClose(&clients[0]);
+        CoreNetClose(&clients[1]);
+        CoreNetClose(&server);
+        return;
+    }
+    CoreNetPeer clientPeers[2] = {
+        CoreNetConnect(&clients[0], "127.0.0.1", CoreNetPort(&server)),
+        CoreNetConnect(&clients[1], "127.0.0.1", CoreNetPort(&server)),
+    };
+    Check(clientPeers[0] != CORE_NET_PEER_NONE && clientPeers[1] != CORE_NET_PEER_NONE,
+          "network begins both loopback connections");
+    Check(CoreNetConnect(&clients[0], "127.0.0.1", 0) == CORE_NET_PEER_NONE,
+          "network rejects a zero destination port");
+
+    bool clientConnected[2] = {false, false};
+    int serverConnections = 0;
+    for (int attempt = 0; attempt < 1000 &&
+                          (serverConnections < 2 || !clientConnected[0] || !clientConnected[1]);
+         attempt++)
+    {
+        CoreNetEvent event;
+        if (CoreNetPoll(&server, 1, &event))
+        {
+            serverConnections += event.type == CORE_NET_EVENT_CONNECTED;
+            CoreNetEventFree(&event);
+        }
+        for (int i = 0; i < 2; i++)
+            if (CoreNetPoll(&clients[i], 0, &event))
+            {
+                clientConnected[i] |= event.type == CORE_NET_EVENT_CONNECTED;
+                CoreNetEventFree(&event);
+            }
+    }
+    Check(serverConnections == 2 && clientConnected[0] && clientConnected[1],
+          "server and both clients receive connection events");
+
+    const unsigned char identities[2] = {11, 22};
+    for (int i = 0; i < 2; i++)
+        Check(CoreNetSend(&clients[i], clientPeers[i], 0, &identities[i], 1, true),
+              "client queues a reliable identified message");
+    Check(!CoreNetSend(&clients[0], clientPeers[0], 2, identities, 1, true),
+          "network rejects a channel outside the endpoint contract");
+    CoreNetFlush(&clients[0]);
+    CoreNetFlush(&clients[1]);
+
+    bool serverSaw[2] = {false, false};
+    for (int attempt = 0; attempt < 1000 && (!serverSaw[0] || !serverSaw[1]); attempt++)
+    {
+        CoreNetEvent event;
+        if (!CoreNetPoll(&server, 1, &event))
+            continue;
+        if (event.type == CORE_NET_EVENT_RECEIVED && event.channel == 0 && event.size == 1)
+        {
+            serverSaw[0] |= event.data[0] == identities[0];
+            serverSaw[1] |= event.data[0] == identities[1];
+        }
+        CoreNetEventFree(&event);
+    }
+    Check(serverSaw[0] && serverSaw[1], "reliable messages arrive intact from both clients");
+
+    const unsigned char snapshot[] = {0x54, 0x4e, 0x01, 0x02};
+    Check(CoreNetBroadcast(&server, 1, snapshot, sizeof snapshot, false),
+          "server queues an unreliable sequenced snapshot");
+    CoreNetFlush(&server);
+    bool gotSnapshot[2] = {false, false};
+    for (int attempt = 0; attempt < 1000 && (!gotSnapshot[0] || !gotSnapshot[1]); attempt++)
+        for (int i = 0; i < 2; i++)
+        {
+            CoreNetEvent event;
+            if (!CoreNetPoll(&clients[i], i == 0 ? 1 : 0, &event))
+                continue;
+            gotSnapshot[i] |= event.type == CORE_NET_EVENT_RECEIVED && event.channel == 1 &&
+                              event.size == sizeof snapshot &&
+                              !memcmp(event.data, snapshot, sizeof snapshot);
+            CoreNetEventFree(&event);
+        }
+    Check(gotSnapshot[0] && gotSnapshot[1], "one snapshot broadcast reaches both clients");
+
+    CoreNetClose(&clients[0]);
+    CoreNetClose(&clients[1]);
+    CoreNetClose(&server);
+    CoreNetClose(&server);
+}
+
+typedef struct NetTestState
+{
+    Vector3 position;
+    float yaw;
+    int32_t health;
+    bool carrying;
+} NetTestState;
+
+static void NetSyncChecks(void)
+{
+    const CoreNetField fields[] = {
+        CORE_NET_FIELD_LERP(NetTestState, position, CORE_NET_VECTOR3),
+        CORE_NET_FIELD_LERP(NetTestState, yaw, CORE_NET_F32),
+        CORE_NET_FIELD(NetTestState, health, CORE_NET_I32),
+        CORE_NET_FIELD(NetTestState, carrying, CORE_NET_BOOL),
+    };
+    const CoreNetSchema schema = {7, "player", sizeof(NetTestState), fields,
+                                  sizeof fields / sizeof fields[0], CORE_NET_AUTHORITY_OWNER};
+    CoreNetSync server = {0}, client = {0};
+    Check(CoreNetSyncInit(&server, 4, 2) && CoreNetSyncInit(&client, 4, 2),
+          "replication allocates server and client registries");
+    Check(CoreNetSyncRegister(&server, &schema) && CoreNetSyncRegister(&client, &schema),
+          "replication registers the same object schema at both ends");
+    Check(!CoreNetSyncRegister(&server, &schema), "replication rejects duplicate schema IDs");
+
+    CoreNetObject *source = CoreNetSyncSpawn(&server, 42, schema.type, 2);
+    Check(source != NULL, "replication spawns a stable network object identity");
+    NetTestState *state = source ? source->state : NULL;
+    if (!state)
+    {
+        CoreNetSyncFree(&client);
+        CoreNetSyncFree(&server);
+        return;
+    }
+    *state = (NetTestState){{2, 4, 6}, 0.5f, 80, true};
+    Check(CoreNetObjectCanWrite(source, 2, false) && !CoreNetObjectCanWrite(source, 3, false) &&
+              CoreNetObjectCanWrite(source, 0, true),
+          "replication distinguishes owner input authority from server state authority");
+
+    unsigned char packet[512];
+    CoreNetWriter writer = CoreNetWriterBegin(packet, sizeof packet);
+    Check(CoreNetSyncWrite(&server, 11, &writer), "replication writes a complete snapshot");
+    CoreNetReader reader = CoreNetReaderBegin(packet, writer.size);
+    uint32_t tick = 0;
+    Check(CoreNetSyncRead(&client, &reader, &tick) && tick == 11,
+          "replication reads a complete snapshot and its simulation tick");
+    CoreNetObject *copy = CoreNetSyncFind(&client, 42);
+    NetTestState *received = copy ? copy->state : NULL;
+    Check(received && received->position.x == 2 && received->position.y == 4 &&
+              received->position.z == 6 && received->yaw == 0.5f && received->health == 80 &&
+              received->carrying,
+          "replication creates remote objects and applies every described field");
+
+    *received = (NetTestState){{3, 5, 7}, 0.75f, 70, false};
+    writer = CoreNetWriterBegin(packet, sizeof packet);
+    Check(CoreNetObjectWrite(copy, &writer), "an owner can encode one object update");
+    reader = CoreNetReaderBegin(packet, writer.size);
+    Check(CoreNetSyncReadObject(&server, &reader, 2, false) && state->position.x == 3 &&
+              state->health == 70 && !state->carrying,
+          "the server accepts a complete update from the object's owner");
+    NetTestState accepted = *state;
+    reader = CoreNetReaderBegin(packet, writer.size);
+    Check(!CoreNetSyncReadObject(&server, &reader, 3, false) &&
+              !memcmp(&accepted, state, sizeof accepted),
+          "the server rejects another actor's object update without changing state");
+    reader = CoreNetReaderBegin(packet, writer.size - 1);
+    Check(!CoreNetSyncReadObject(&server, &reader, 2, false) &&
+              !memcmp(&accepted, state, sizeof accepted),
+          "a truncated object update cannot partially change state");
+
+    *state = (NetTestState){{6, 8, 10}, 1.5f, 35, false};
+    writer = CoreNetWriterBegin(packet, sizeof packet);
+    CoreNetSyncWrite(&server, 12, &writer);
+    reader = CoreNetReaderBegin(packet, writer.size);
+    Check(CoreNetSyncRead(&client, &reader, &tick), "replication accepts a later snapshot");
+    copy = CoreNetSyncFind(&client, 42);
+    NetTestState sampled = {0};
+    Check(CoreNetObjectSample(copy, 0.5f, &sampled) && sampled.position.x == 4.5f &&
+              sampled.position.y == 6.5f && sampled.position.z == 8.5f && sampled.yaw == 1.125f &&
+              sampled.health == 35 && !sampled.carrying,
+          "replication interpolates marked fields and applies discrete fields immediately");
+
+    NetTestState before = *(NetTestState *)copy->state;
+    reader = CoreNetReaderBegin(packet, writer.size - 1);
+    Check(!CoreNetSyncRead(&client, &reader, &tick) &&
+              !memcmp(&before, copy->state, sizeof before),
+          "a truncated snapshot is rejected without partially changing live state");
+
+    CoreNetSyncDespawn(&server, 42);
+    writer = CoreNetWriterBegin(packet, sizeof packet);
+    CoreNetSyncWrite(&server, 13, &writer);
+    reader = CoreNetReaderBegin(packet, writer.size);
+    Check(CoreNetSyncRead(&client, &reader, &tick) && !CoreNetSyncFind(&client, 42),
+          "a complete snapshot removes objects that no longer exist");
+    CoreNetSyncFree(&client);
+    CoreNetSyncFree(&server);
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -1240,6 +1759,7 @@ int main(int argc, char **argv)
     LayoutChecks();
     ActivationChecks();
     FileChecks();
+    TextureChecks();
     ConventionChecks();
     DeferredChecks();
     ScriptChecks();
@@ -1252,6 +1772,8 @@ int main(int argc, char **argv)
     SheetCacheChecks();
     IsoGridChecks();
     IsoMoveChecks();
+    NetworkChecks();
+    NetSyncChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

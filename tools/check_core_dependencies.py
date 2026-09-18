@@ -18,7 +18,9 @@ parser.add_argument('--raylib', required=True)
 parser.add_argument('--probe', type=pathlib.Path, help='Additional translation unit for checking the guard')
 args = parser.parse_args()
 raylib = pathlib.Path(args.raylib).resolve()
-allowed = [(root / 'core').resolve(), raylib, pathlib.Path('/usr/include'), pathlib.Path('/usr/lib'), pathlib.Path('/usr/local/include'), pathlib.Path('/usr/local/lib')]
+allowed = [(root / 'core').resolve(), (root / 'vendor/enet/include').resolve(), raylib,
+           pathlib.Path('/usr/include'), pathlib.Path('/usr/lib'),
+           pathlib.Path('/usr/local/include'), pathlib.Path('/usr/local/lib')]
 files = sorted((root / 'core').glob('*.c')) + sorted((root / 'core').glob('*.h'))
 if args.probe:
     files.append(args.probe.resolve())

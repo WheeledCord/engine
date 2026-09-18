@@ -5,6 +5,7 @@
 #ifndef GAMEPLAY_SCRIPT_API_H
 #define GAMEPLAY_SCRIPT_API_H
 #include "gameplay/entity.h"
+#include <stdint.h>
 
 /* The script-facing API, described once as data. Every language frontend is a loop over this table:
    it registers each row in whatever way its language wants, converts arguments into ScriptValue and
@@ -20,8 +21,22 @@ typedef enum ScriptType
     SCRIPT_VECTOR2,
     SCRIPT_VECTOR3,
     SCRIPT_STRING,
-    SCRIPT_ENTITY // an entity handle, as the script sees it: see ScriptEntityId
+    SCRIPT_ENTITY,   // an entity handle, as the script sees it: see ScriptEntityId
+    SCRIPT_RESOURCE  // a generational resource handle: see ScriptResourceKind
 } ScriptType;
+
+/* Resource kinds for the generational handle system. Each kind owns a fixed-capacity pool in
+   ScriptHost. A handle packs kind, index and generation so a stale or mistyped handle is rejected
+   without reaching freed memory. Zero is the null handle. */
+typedef enum ScriptResourceKind
+{
+    SCRIPT_RES_CAMERA2D,
+    SCRIPT_RES_AUDIO,
+    SCRIPT_RES_COLLISION,
+    SCRIPT_RES_PATHFINDER,
+    SCRIPT_RES_MOVER,
+    SCRIPT_RES_KIND_COUNT
+} ScriptResourceKind;
 
 typedef struct ScriptValue
 {
@@ -70,6 +85,14 @@ const ScriptBinding *ScriptBindings(int *count);
        }
        ...
        ScriptAddBinding(&host, &grapple_binding); */
+/* A row that takes no arguments never reads `a`, and a row that ignores the host never reads that.
+   Marking both here means no one writing a row has to know, and a project built the way the engine
+   builds itself -- warnings as errors -- is not punished for declaring a call with no arguments. */
+#if defined(__GNUC__) || defined(__clang__)
+#define SCRIPT_MAYBE_UNUSED __attribute__((unused))
+#else
+#define SCRIPT_MAYBE_UNUSED
+#endif
 #define SCRIPT_UNWRAP(...) {__VA_ARGS__}
 #define SCRIPT_CALL(id, name, result, help, types)                                                 \
     static ScriptValue Script_##id(ScriptHost *host, const ScriptValue *a);                        \
@@ -77,7 +100,8 @@ const ScriptBinding *ScriptBindings(int *count);
     static const ScriptBinding id##_binding = {                                                    \
         name, result, id##_types + 1,                                                              \
         (int)(sizeof id##_types / sizeof(ScriptType)) - 1, Script_##id, help};                      \
-    static ScriptValue Script_##id(ScriptHost *host, const ScriptValue *a)
+    static ScriptValue Script_##id(ScriptHost *host SCRIPT_MAYBE_UNUSED,                           \
+                                   const ScriptValue *a SCRIPT_MAYBE_UNUSED)
 
 // The row and everything it points at must outlive the host. Returns false when there is no room.
 bool ScriptAddBinding(ScriptHost *host, const ScriptBinding *binding);
@@ -134,5 +158,29 @@ static inline ScriptValue ScriptHandle(int v)
     ScriptValue value = {SCRIPT_ENTITY, {0}};
     value.as.entity = v;
     return value;
+}
+static inline ScriptValue ScriptResource(int v)
+{
+    ScriptValue value = {SCRIPT_RESOURCE, {0}};
+    value.as.integer = v;
+    return value;
+}
+
+/* Pack a resource handle: kind(8) | (index+1)(16) | generation(8). Zero is null. */
+static inline int ScriptResPack(ScriptResourceKind kind, int index, uint8_t generation)
+{
+    return (int)(((unsigned)kind << 24) | (((unsigned)(index + 1)) << 8) | (unsigned)(generation & 0xff));
+}
+static inline ScriptResourceKind ScriptResKind(int handle)
+{
+    return (ScriptResourceKind)(((unsigned)handle >> 24) & 0xff);
+}
+static inline int ScriptResIndex(int handle)
+{
+    return (int)(((unsigned)handle >> 8) & 0xffff) - 1;
+}
+static inline uint8_t ScriptResGeneration(int handle)
+{
+    return (uint8_t)((unsigned)handle & 0xff);
 }
 #endif

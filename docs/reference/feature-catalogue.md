@@ -12,11 +12,14 @@ not an engine feature.
 | Runtime | GPU capability contract | `core/capabilities.h` |
 | Input | Raw input, actions, axes, vectors | `core/input.h` |
 | Files | Data-root resolution, checked reads, atomic writes | `core/file.h` |
+| Networking | ENet-backed client/server endpoints, peer events, reliable messages and replaceable snapshots | `core/network.h`; [networking](../user/networking.md) |
+| Networking | Declarative replicated-object schemas, stable identities, ownership checks, full snapshots, and field interpolation | `core/net_sync.h`; [networking](../user/networking.md) |
 | Rendering | GLSL 120 shader tables, `#include` expansion, and frame uniforms | `core/shader.h`, `core/frame_uniforms.h` |
 | Rendering | Colour/depth render targets | `core/render_target.h` |
 | Rendering | Model instances and shader overrides | `core/world_draw.h` |
 | Geometry | Explicit mesh construction | `core/mesh_builder.h` |
-| Textures | Bake a material shader into a mesh's UV layout, with seam dilation | `core/uv_bake.h`; [texture baking](../user/texture-baking.md) |
+| Textures | Data-root loading with explicit mipmap, filtering, wrapping, and ownership | `core/texture.h` |
+| Textures | Bake a material shader into a mesh's UV layout, with seam dilation and mip-safe background fill | `core/uv_bake.h`; [texture baking](../user/texture-baking.md) |
 | Textures | Surface maps: colour plus height in one texture, normal derived from it | `core/shaders/surface_map.glsl`; [texture baking](../user/texture-baking.md) |
 | Animation | Skeleton poses, clips, blending, aim, GPU skinning | `core/skeleton.h`, `core/animation.h`, `core/playback.h` |
 | Sprites | Grid atlases, animation, ground anchors | `core/sprite_sheet.h` |

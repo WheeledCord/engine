@@ -69,7 +69,8 @@
       "output": "docs/api/core/CoreUvBake.xml",
       "symbols": [
         "CoreBakeMeshUV",
-        "CoreDilateUVSeams"
+        "CoreDilateUVSeams",
+        "CoreFillUVBackground"
       ]
     },
     {
@@ -79,6 +80,64 @@
       "symbols": [
         "CoreReadData",
         "CoreFreeData"
+      ]
+    },
+    {
+      "name": "CoreTexture",
+      "source": "core/texture.h",
+      "output": "docs/api/core/CoreTexture.xml",
+      "symbols": [
+        "CoreTextureOptionsDefault",
+        "CoreLoadTexture",
+        "CoreUnloadTexture"
+      ]
+    },
+    {
+      "name": "CoreNetwork",
+      "source": "core/network.h",
+      "output": "docs/api/core/CoreNetwork.xml",
+      "symbols": [
+        "CoreNetWriterBegin",
+        "CoreNetWriteU8",
+        "CoreNetWriteU16",
+        "CoreNetWriteU32",
+        "CoreNetWriteF32",
+        "CoreNetReaderBegin",
+        "CoreNetReadU8",
+        "CoreNetReadU16",
+        "CoreNetReadU32",
+        "CoreNetReadF32",
+        "CoreNetOpenServer",
+        "CoreNetOpenClient",
+        "CoreNetConnect",
+        "CoreNetClose",
+        "CoreNetPoll",
+        "CoreNetEventFree",
+        "CoreNetSend",
+        "CoreNetBroadcast",
+        "CoreNetFlush",
+        "CoreNetPort",
+        "CoreNetRoundTripTime"
+      ]
+    },
+    {
+      "name": "CoreNetSync",
+      "source": "core/net_sync.h",
+      "output": "docs/api/core/CoreNetSync.xml",
+      "symbols": [
+        "CoreNetSyncInit",
+        "CoreNetSyncFree",
+        "CoreNetSyncRegister",
+        "CoreNetSyncSpawn",
+        "CoreNetSyncSpawnNext",
+        "CoreNetSyncDespawn",
+        "CoreNetSyncFind",
+        "CoreNetObjectCanWrite",
+        "CoreNetObjectWrite",
+        "CoreNetSyncReadObject",
+        "CoreNetSyncWrite",
+        "CoreNetSyncRead",
+        "CoreNetObjectSample"
       ]
     }
   ]

@@ -4,8 +4,13 @@
 
 #ifndef GAMEPLAY_SCRIPT_H
 #define GAMEPLAY_SCRIPT_H
+#include "core/audio.h"
+#include "core/camera2d.h"
+#include "core/collision2d.h"
+#include "core/diagnostics.h"
 #include "core/sprite_sheet.h"
 #include "core/transform.h"
+#include "gameplay/iso_move.h"
 #include "gameplay/runtime.h"
 #include "script_api.h"
 
@@ -19,6 +24,25 @@
 #define SCRIPT_SOUND_CAPACITY 16
 #define SCRIPT_SHEET_CAPACITY 32
 #define SCRIPT_ADDED_CAPACITY 32 // calls a game may add on top of the engine's
+#define SCRIPT_CAMERA_CAPACITY 4
+#define SCRIPT_AUDIO_CAPACITY 4
+#define SCRIPT_COLLISION_CAPACITY 4
+#define SCRIPT_PATHFINDER_CAPACITY 4
+#define SCRIPT_MOVER_CAPACITY 8
+#define SCRIPT_PATH_STEP_CAP 4096 // longest route a solved path will hold
+#define SCRIPT_SAVE_CAPACITY 64
+#define SCRIPT_SAVE_KEY 48
+#define SCRIPT_SAVE_VALUE 128
+
+// One slot per resource in a pool: the generation that increments on free, and whether it is live.
+typedef struct ScriptResSlot { uint8_t generation; bool live; } ScriptResSlot;
+
+// What the pathfinder's blocked-hex callback needs: the array pathfinder-block! fills and the
+// grid bounds it came from. Passed as IsoBlockedFn's user pointer.
+typedef struct ScriptHexBlocked { const bool *blocked; int width, height; } ScriptHexBlocked;
+
+// A saved key/value pair, held as text so a file is the only format there is.
+typedef struct ScriptSaveEntry { char key[SCRIPT_SAVE_KEY]; char value[SCRIPT_SAVE_VALUE]; } ScriptSaveEntry;
 
 // The payload every scripted entity carries: a transform, where it was a step ago so drawing can
 // interpolate, and the fields the class declared.
@@ -72,6 +96,31 @@ struct ScriptHost
     Sound sounds[SCRIPT_SOUND_CAPACITY];
     size_t soundCount;
     bool audioReady;
+    // Resource pools: generational handles for caller-owned engine services.
+    ScriptResSlot cameraSlots[SCRIPT_CAMERA_CAPACITY];
+    CoreCamera2D cameras[SCRIPT_CAMERA_CAPACITY];
+    ScriptResSlot audioSlots[SCRIPT_AUDIO_CAPACITY];
+    CoreAudio audios[SCRIPT_AUDIO_CAPACITY];
+    bool audioInitialized[SCRIPT_AUDIO_CAPACITY];
+    ScriptResSlot collisionSlots[SCRIPT_COLLISION_CAPACITY];
+    Collision2DWorld collisions[SCRIPT_COLLISION_CAPACITY];
+    bool collisionInitialized[SCRIPT_COLLISION_CAPACITY];
+    ScriptResSlot pathfinderSlots[SCRIPT_PATHFINDER_CAPACITY];
+    IsoPathfinder pathfinders[SCRIPT_PATHFINDER_CAPACITY];
+    bool *pathfinderBlocked[SCRIPT_PATHFINDER_CAPACITY]; // heap-allocated blocked arrays
+    int pathfinderWidth[SCRIPT_PATHFINDER_CAPACITY];
+    int pathfinderHeight[SCRIPT_PATHFINDER_CAPACITY];
+    bool pathfinderInitialized[SCRIPT_PATHFINDER_CAPACITY];
+    ScriptHexBlocked pathfinderCtx[SCRIPT_PATHFINDER_CAPACITY];
+    IsoPath paths[SCRIPT_PATHFINDER_CAPACITY];       // the route the last solve filled
+    bool pathInitialized[SCRIPT_PATHFINDER_CAPACITY];
+    ScriptResSlot moverSlots[SCRIPT_MOVER_CAPACITY];
+    IsoMover movers[SCRIPT_MOVER_CAPACITY];
+    bool moverInitialized[SCRIPT_MOVER_CAPACITY];
+    CoreDebug debug;                                 // one queue for all debug drawing
+    bool debugReady;
+    ScriptSaveEntry saves[SCRIPT_SAVE_CAPACITY];     // script key/value persistence
+    size_t saveCount;
 };
 
 /* One host per program: entity callbacks reach it through EntityClass, which carries no user data
@@ -86,6 +135,10 @@ void ScriptHostUseLanguage(ScriptHost *host, const ScriptLanguage *language);
 void ScriptHostFlush(ScriptHost *host);
 // Drawing callbacks need to know how far between steps the frame is.
 void ScriptHostSetAlpha(ScriptHost *host, float alpha);
+/* Advances per-frame resources owned by the host: audio streams, and the debug queue, which is
+   also drawn here. Call once per rendered frame from the project's Draw callback, after
+   ScriptHostSetAlpha, because the debug overlay must draw inside BeginDrawing/EndDrawing. */
+void ScriptHostUpdate(ScriptHost *host, double dt);
 
 ScriptClass *ScriptHostClass(ScriptHost *host, const char *name);
 // The handle a script sees: the slot and enough of the generation to notice a stale one.
@@ -98,4 +151,11 @@ bool ScriptClassRegister(ScriptHost *host, ScriptClass *type);
    than loading its own. NULL when it cannot be found or there is no room left. */
 const SpriteSheet *ScriptHostSheet(ScriptHost *host, const char *name);
 EntityHandle ScriptHostHandleOf(ScriptHost *host, int id);
+
+/* Generic resource pool operations. Resolve returns the pool index when the handle is valid for
+   the given kind, or -1. Create finds a free slot, marks it live, and returns the new handle.
+   Destroy marks a slot dead and increments its generation. */
+int ScriptResResolve(const ScriptResSlot *slots, int capacity, int handle, ScriptResourceKind kind);
+int ScriptResCreate(ScriptResSlot *slots, int capacity, ScriptResourceKind kind, int *outIndex);
+bool ScriptResDestroy(ScriptResSlot *slots, int capacity, int handle, ScriptResourceKind kind);
 #endif
