@@ -50,4 +50,27 @@ bool CoreBakeMeshUV(Mesh mesh, Material material, RenderTexture target, Matrix t
  * @return True when the image was processed, false when it is NULL or the wrong format.
  */
 bool CoreDilateUVSeams(Image *image, int rings);
+
+/**
+ * @brief Grows baked texels outward until no empty texel is left.
+ *
+ * A few rings of dilation are enough for the filtered lookups a renderer does at full resolution,
+ * but not for mipmaps: each level averages the one above it across the whole image, so a layout
+ * whose islands cover a small part of the sheet is mostly empty space, and within a couple of
+ * levels that empty space is what a distant surface samples. A model whose regions each bake into
+ * one shared layout is exactly that case -- every region's map holds only its own islands. This
+ * grows the written texels outward repeatedly until the image is full, so every level averages
+ * surface colour instead of the background.
+ *
+ * Colours spread from the nearest written texels, so the fill is only meaningful beside the
+ * islands; it is padding for filtering, not authored surface. Alpha payloads are averaged the same
+ * way CoreDilateUVSeams averages them, which means coverage is no longer readable from alpha
+ * afterwards -- run any step that needs to know what a triangle covered before this one.
+ *
+ * The image is modified in place and must be PIXELFORMAT_UNCOMPRESSED_R8G8B8A8.
+ * @param image Borrowed image, modified in place; NULL is rejected.
+ * @return True when the image was processed, false when it is NULL, the wrong format, or holds no
+ * written texel at all to spread from.
+ */
+bool CoreFillUVBackground(Image *image);
 #endif

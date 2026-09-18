@@ -9,12 +9,16 @@ RLSRC := $(BUILD)/raylib/src
 RLLIB := $(RLSRC)/libraylib.a
 CORE_SRC := $(filter-out core/entry.c,$(wildcard core/*.c))
 CORE_OBJ := $(patsubst core/%.c,$(BUILD)/%.o,$(CORE_SRC))
+ENET_SRC := vendor/enet/callbacks.c vendor/enet/compress.c vendor/enet/host.c vendor/enet/list.c \
+	vendor/enet/packet.c vendor/enet/peer.c vendor/enet/protocol.c vendor/enet/unix.c
+ENET_OBJ := $(patsubst vendor/enet/%.c,$(BUILD)/vendor/enet_%.o,$(ENET_SRC))
 GAMEPLAY_SRC := $(wildcard gameplay/*.c)
 GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC))
 SCRIPT_SRC := $(wildcard gameplay/script/*.c)
 SCRIPT_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(SCRIPT_SRC)) $(BUILD)/vendor/s7.o \
 	$(BUILD)/vendor/amx.o $(BUILD)/vendor/amxaux.o $(BUILD)/vendor/amxfloat.o $(PAWN_VM_EXTRA)
-CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21
+CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21 \
+	-Ivendor/enet/include
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
 RAYLIB_CFLAGS := -DSUPPORT_FILEFORMAT_BDF
 RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
@@ -41,9 +45,14 @@ boundary: $(RLSRC)/.exported
 	python3 tools/check_core_dependencies.py --cc '$(CC)' --cflags '$(CFLAGS)' --raylib $(RLSRC)
 $(BUILD)/%.o: core/%.c $(RLSRC)/.exported | boundary
 	$(CC) $(CFLAGS) -I$(RLSRC) -MMD -MP -c $< -o $@
-$(BUILD)/libcore.a: $(CORE_OBJ) Makefile.core
+$(BUILD)/vendor/enet_%.o: vendor/enet/%.c
+	@mkdir -p $(@D)
+	$(CC) -std=c99 -O2 -w -D_DEFAULT_SOURCE -Ivendor/enet/include -DHAS_SOCKLEN_T -DHAS_POLL -DHAS_FCNTL \
+		-DHAS_INET_PTON -DHAS_INET_NTOP -DHAS_GETADDRINFO -DHAS_GETNAMEINFO \
+		-c $< -o $@
+$(BUILD)/libcore.a: $(CORE_OBJ) $(ENET_OBJ) Makefile.core
 	rm -f $@
-	$(AR) rcs $@ $(CORE_OBJ)
+	$(AR) rcs $@ $(CORE_OBJ) $(ENET_OBJ)
 $(BUILD)/gameplay_%.o: gameplay/%.c $(RLSRC)/.exported | boundary
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -I. -I$(RLSRC) -Ivendor/s7 -Ivendor/pawn/amx -Ivendor/pawn/linux -DPAWN_CELL_SIZE=32 -MMD -MP -c $< -o $@
@@ -168,6 +177,7 @@ integration: $(BUILD)/core_integration $(BUILD)/regression_test tests/regression
 	./$(BUILD)/core_integration --smoke
 	./$(BUILD)/regression_test --runner
 smoke: test-gameplay test-regression
+	python3 tools/test_engine_build.py
 	$(MAKE) -f Makefile.core docs-check
 full-check: smoke integration
 api-docs-update:

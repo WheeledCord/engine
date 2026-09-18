@@ -53,6 +53,7 @@ for (int i = 0; i < model.meshCount; i++)
 Image baked = LoadImageFromTexture(atlas.texture);
 ImageFormat(&baked, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
 CoreDilateUVSeams(&baked, 4);
+CoreFillUVBackground(&baked);
 ExportImage(baked, "assets/rifle_albedo.png");
 ```
 
@@ -71,6 +72,18 @@ bilinear and a few mip levels. It averages every channel, including alpha, so a 
 there continues smoothly across the padding instead of turning into a height cliff. Alpha zero marks
 empty space; encode a covered texel whose payload is truly zero as the smallest nonzero value. Do the
 dilation before exporting, not after loading.
+
+A bounded number of rings is not enough once the texture is mipmapped. Every level averages the one
+above it across the whole image, so whatever fraction of the sheet the islands do not cover is what
+a distant surface ends up sampling — a layout that is a few percent covered goes black within two
+levels, whatever the dilation. `CoreFillUVBackground` keeps growing until nothing empty is left, so
+every level averages surface colour. Run it after the seam dilation and after anything that needs to
+know what a triangle covered: it spreads colour everywhere, so alpha stops reporting coverage.
+
+The better answer to a mostly-empty sheet is usually to stop making one. A model's regions share its
+UV layout, so bake them all into one texture and bind that one texture to the model, the way a model
+is textured anywhere else. One map per region means each map holds one region's islands and nothing
+else.
 
 ## Pitfalls
 

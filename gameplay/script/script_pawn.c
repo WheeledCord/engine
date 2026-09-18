@@ -112,6 +112,9 @@ static cell Dispatch(AMX *amx, int index, const cell *params)
             case SCRIPT_ENTITY:
                 values[i] = ScriptHandle((int)params[at]);
                 break;
+            case SCRIPT_RESOURCE:
+                values[i] = ScriptResource((int)params[at]);
+                break;
             case SCRIPT_VECTOR2:
                 values[i] = ScriptVector2(
                     (Vector2){CellToFloat(params[at]), CellToFloat(params[at + 1])});

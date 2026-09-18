@@ -4,6 +4,7 @@
 
 #include "sprite_sheet.h"
 #include "file.h"
+#include "texture.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -114,8 +115,8 @@ bool SpriteSheetLoad(SpriteSheet *out, const char *imagePath, const char *sheetP
     CoreFreeFile(text);
     if (!ok)
         return false;
-    Texture2D atlas = LoadTexture(imagePath);
-    if (!atlas.id)
+    Texture2D atlas = {0};
+    if (!CoreLoadTexture(&atlas, imagePath, CoreTextureOptionsDefault()))
         return false;
     out->atlas = atlas;
     out->meta = meta;
@@ -123,8 +124,7 @@ bool SpriteSheetLoad(SpriteSheet *out, const char *imagePath, const char *sheetP
 }
 void SpriteSheetUnload(SpriteSheet *sheet)
 {
-    if (sheet->atlas.id)
-        UnloadTexture(sheet->atlas);
+    CoreUnloadTexture(&sheet->atlas);
     *sheet = (SpriteSheet){0};
 }
 Rectangle SpriteSheetFrameRect(const SpriteSheet *sheet, int frame)

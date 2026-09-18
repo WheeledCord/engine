@@ -45,6 +45,8 @@ static s7_pointer ToScheme(s7_scheme *sc, ScriptValue value)
             return s7_make_integer(sc, value.as.integer);
         case SCRIPT_ENTITY:
             return s7_make_integer(sc, value.as.entity);
+        case SCRIPT_RESOURCE:
+            return s7_make_integer(sc, value.as.integer);
         case SCRIPT_FLOAT:
             return s7_make_real(sc, value.as.number);
         case SCRIPT_VECTOR2:
@@ -108,6 +110,11 @@ static bool FromScheme(s7_scheme *sc, s7_pointer p, ScriptType wanted, ScriptVal
             if (!Number(sc, p, numbers))
                 return false;
             *out = ScriptHandle((int)numbers[0]);
+            return true;
+        case SCRIPT_RESOURCE:
+            if (!Number(sc, p, numbers))
+                return false;
+            *out = ScriptResource((int)numbers[0]);
             return true;
         case SCRIPT_FLOAT:
             if (!Number(sc, p, numbers))

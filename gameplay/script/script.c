@@ -6,6 +6,7 @@
 #include "script.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static ScriptHost *active;
@@ -32,6 +33,26 @@ void ScriptHostFree(ScriptHost *host)
         UnloadSound(host->sounds[i]);
     if (host->audioReady)
         CloseAudioDevice();
+    // Resource pools: free each live resource.
+    for (int i = 0; i < SCRIPT_AUDIO_CAPACITY; i++)
+        if (host->audioInitialized[i])
+            CoreAudioFree(&host->audios[i]);
+    for (int i = 0; i < SCRIPT_COLLISION_CAPACITY; i++)
+        if (host->collisionInitialized[i])
+            Collision2DWorldFree(&host->collisions[i]);
+    for (int i = 0; i < SCRIPT_PATHFINDER_CAPACITY; i++)
+    {
+        if (host->pathfinderInitialized[i])
+            IsoPathfinderFree(&host->pathfinders[i]);
+        free(host->pathfinderBlocked[i]);
+        if (host->pathInitialized[i])
+            IsoPathFree(&host->paths[i]);
+    }
+    for (int i = 0; i < SCRIPT_MOVER_CAPACITY; i++)
+        if (host->moverInitialized[i])
+            IsoMoverFree(&host->movers[i]);
+    if (host->debugReady)
+        CoreDebugFree(&host->debug);
     if (active == host)
         active = NULL;
     *host = (ScriptHost){0};
@@ -190,5 +211,63 @@ bool ScriptClassRegister(ScriptHost *host, ScriptClass *type)
     }
     type->registered = true;
     type->language = host->language;
+    return true;
+}
+
+// ---- host update and resource pool operations -----------------------------------------------
+
+void ScriptHostUpdate(ScriptHost *host, double dt)
+{
+    if (!host)
+        return;
+    for (int i = 0; i < SCRIPT_AUDIO_CAPACITY; i++)
+        if (host->audioSlots[i].live && host->audioInitialized[i])
+            CoreAudioUpdate(&host->audios[i]);
+    if (host->debugReady)
+    {
+        CoreDebugUpdate(&host->debug, dt);
+        // Drawing must happen inside BeginDrawing/EndDrawing, so the project calls this from Draw.
+        CoreDebugDraw(&host->debug);
+    }
+}
+
+int ScriptResResolve(const ScriptResSlot *slots, int capacity, int handle, ScriptResourceKind kind)
+{
+    if (handle == 0)
+        return -1;
+    if (ScriptResKind(handle) != kind)
+        return -1;
+    int index = ScriptResIndex(handle);
+    if (index < 0 || index >= capacity)
+        return -1;
+    if (!slots[index].live)
+        return -1;
+    if (slots[index].generation != ScriptResGeneration(handle))
+        return -1;
+    return index;
+}
+
+int ScriptResCreate(ScriptResSlot *slots, int capacity, ScriptResourceKind kind, int *outIndex)
+{
+    for (int i = 0; i < capacity; i++)
+    {
+        if (!slots[i].live)
+        {
+            slots[i].live = true;
+            if (outIndex)
+                *outIndex = i;
+            return ScriptResPack(kind, i, slots[i].generation);
+        }
+    }
+    return 0;
+}
+
+bool ScriptResDestroy(ScriptResSlot *slots, int capacity, int handle, ScriptResourceKind kind)
+{
+    int index = ScriptResResolve(slots, capacity, handle, kind);
+    if (index < 0)
+        return false;
+    slots[index].live = false;
+    slots[index].generation++;
     return true;
 }

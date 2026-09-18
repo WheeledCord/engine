@@ -1,7 +1,7 @@
 # Architecture
 
 ```text
-project code  -->  gameplay (optional)  -->  core  -->  raylib / system
+project code  -->  gameplay (optional)  -->  core  -->  raylib / ENet / system
                     |                         |
                     +-- scripting              +-- window, input, rendering, UI
 ```

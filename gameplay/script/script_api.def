@@ -99,6 +99,19 @@ SCRIPT_BINDING(key_pressed, "key-pressed?", SCRIPT_BOOL, "was a key pressed this
 SCRIPT_BINDING(key_code, "key", SCRIPT_INT, "the code for a key named w or left or space",
                (SCRIPT_NONE, SCRIPT_STRING))
 
+// ---- small math and queries a game callback keeps reaching for -----------------------------------
+SCRIPT_BINDING(random_int, "random-int", SCRIPT_INT, "a random integer from min to max, inclusive",
+               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
+SCRIPT_BINDING(vec_length, "vec-length", SCRIPT_FLOAT, "how long a vector is", (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(vec_distance, "vec-distance", SCRIPT_FLOAT, "how far apart two points are",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
+SCRIPT_BINDING(vec_normalize, "vec-normalize", SCRIPT_VECTOR2, "a vector of length one, same direction",
+               (SCRIPT_NONE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(sprite_size, "sprite-size", SCRIPT_VECTOR2, "one frame of a named sprite sheet, in pixels",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(text_width, "text-width", SCRIPT_INT, "how wide drawn text would be, in pixels",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_INT))
+
 // ---- time
 SCRIPT_BINDING(step, "dt", SCRIPT_FLOAT, "how long one simulation step is", (SCRIPT_NONE))
 SCRIPT_BINDING(now, "now", SCRIPT_FLOAT, "gameplay time in seconds", (SCRIPT_NONE))
@@ -139,9 +152,162 @@ SCRIPT_BINDING(draw_triangle, "draw-triangle", SCRIPT_NONE, "a triangle from thr
 SCRIPT_BINDING(draw_text, "draw-text", SCRIPT_NONE, "text at a position, in a size and colour",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_INT))
 
+// ---- mouse state
+SCRIPT_BINDING(mouse_position, "mouse-position", SCRIPT_VECTOR2, "the mouse position in pixels",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(mouse_delta, "mouse-delta", SCRIPT_VECTOR2, "the mouse movement this step",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(mouse_wheel, "mouse-wheel", SCRIPT_FLOAT, "the scroll wheel this step",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(mouse_down, "mouse-down?", SCRIPT_BOOL, "is a mouse button held",
+               (SCRIPT_NONE, SCRIPT_INT))
+SCRIPT_BINDING(mouse_pressed, "mouse-pressed?", SCRIPT_BOOL, "was a mouse button pressed this step",
+               (SCRIPT_NONE, SCRIPT_INT))
+
 // ---- sound and scenes
 SCRIPT_BINDING(play_sound, "play-sound", SCRIPT_BOOL, "play a sound file once",
                (SCRIPT_NONE, SCRIPT_STRING))
 SCRIPT_BINDING(load_scene, "load-scene", SCRIPT_BOOL,
                "replace the world with a scene, once this callback has finished",
                (SCRIPT_NONE, SCRIPT_STRING))
+
+// ---- camera resources
+SCRIPT_BINDING(camera_create, "camera-create", SCRIPT_RESOURCE, "a default 2D camera",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(camera_destroy, "camera-destroy", SCRIPT_BOOL, "release a camera",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(camera_position, "camera-position", SCRIPT_VECTOR2, "where the camera is looking",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(camera_set_position, "camera-set-position!", SCRIPT_NONE, "put the camera somewhere",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(camera_zoom, "camera-zoom", SCRIPT_FLOAT, "the camera's magnification",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(camera_set_zoom, "camera-set-zoom!", SCRIPT_NONE, "set the camera's magnification",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT))
+SCRIPT_BINDING(camera_follow, "camera-follow!", SCRIPT_NONE,
+               "move a camera toward a target over dt seconds",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT))
+SCRIPT_BINDING(camera_world_to_screen, "camera-world-to-screen", SCRIPT_VECTOR2,
+               "a world point in screen pixels", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(camera_screen_to_world, "camera-screen-to-world", SCRIPT_VECTOR2,
+               "screen pixels in world coordinates", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(camera_interpolated, "camera-interpolated", SCRIPT_VECTOR2,
+               "where to draw the camera between steps", (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(camera_set_viewport, "camera-set-viewport!", SCRIPT_NONE,
+               "the screen size for world/screen conversion",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+
+// ---- audio resources
+SCRIPT_BINDING(audio_create, "audio-create", SCRIPT_RESOURCE, "an empty audio service",
+               (SCRIPT_NONE))
+SCRIPT_BINDING(audio_destroy, "audio-destroy", SCRIPT_BOOL, "release an audio service",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(audio_add_bus, "audio-add-bus", SCRIPT_BOOL, "add a named volume group",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_FLOAT))
+SCRIPT_BINDING(audio_bus_volume, "audio-bus-volume!", SCRIPT_BOOL, "set a named group's volume",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_FLOAT))
+SCRIPT_BINDING(audio_bus_muted, "audio-bus-muted!", SCRIPT_BOOL, "mute or unmute a named group",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_BOOL))
+SCRIPT_BINDING(audio_play_sound, "audio-play-sound", SCRIPT_BOOL,
+               "play a sound on a named bus", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_STRING))
+SCRIPT_BINDING(audio_play_music, "audio-play-music", SCRIPT_BOOL,
+               "stream music on a named bus", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_STRING))
+SCRIPT_BINDING(audio_stop_music, "audio-stop-music", SCRIPT_BOOL, "stop a music stream by path",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING))
+
+// ---- collision resources
+SCRIPT_BINDING(collision_create, "collision-create", SCRIPT_RESOURCE,
+               "a spatial-hash query world: max shapes, cell size",
+               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_FLOAT))
+SCRIPT_BINDING(collision_destroy, "collision-destroy", SCRIPT_BOOL, "release a collision world",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(collision_add_circle, "collision-add-circle", SCRIPT_INT,
+               "register a circle proxy: centre, radius, layer, mask",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT, SCRIPT_INT))
+SCRIPT_BINDING(collision_remove, "collision-remove", SCRIPT_BOOL, "remove a proxy by its handle",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
+SCRIPT_BINDING(collision_move_circle, "collision-move-circle", SCRIPT_BOOL,
+               "move a circle proxy to a new centre and radius",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT, SCRIPT_VECTOR2, SCRIPT_FLOAT))
+SCRIPT_BINDING(collision_query_circle, "collision-query-circle", SCRIPT_INT,
+               "count shapes overlapping a circle: centre, radius, mask",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT))
+SCRIPT_BINDING(collision_query_aabb, "collision-query-aabb", SCRIPT_INT,
+               "count shapes overlapping a box: centre, half-extents, mask",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT))
+SCRIPT_BINDING(collision_add_aabb, "collision-add-aabb", SCRIPT_INT,
+               "register an AABB proxy: centre, half-extents, layer, mask",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_INT))
+SCRIPT_BINDING(collision_move_aabb, "collision-move-aabb", SCRIPT_BOOL,
+               "move an AABB proxy to a new centre and half-extents",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
+SCRIPT_BINDING(collision_sweep_circle, "collision-sweep-circle", SCRIPT_FLOAT,
+               "sweep a circle: fraction 0-1 to first hit, 1 for none",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_VECTOR2, SCRIPT_INT))
+
+// ---- pathfinder resources
+SCRIPT_BINDING(pathfinder_create, "pathfinder-create", SCRIPT_RESOURCE,
+               "an A* workspace for a hex grid of width and height",
+               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
+SCRIPT_BINDING(pathfinder_destroy, "pathfinder-destroy", SCRIPT_BOOL, "release a pathfinder",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(pathfinder_block, "pathfinder-block!", SCRIPT_BOOL, "mark a hex as impassable",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(pathfinder_unblock, "pathfinder-unblock!", SCRIPT_BOOL, "mark a hex as passable",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(pathfinder_blocked, "pathfinder-blocked?", SCRIPT_BOOL, "is a hex impassable",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(pathfinder_solve, "pathfinder-solve", SCRIPT_INT,
+               "route from one hex to another: length, or 0 for none",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
+SCRIPT_BINDING(pathfinder_path_length, "pathfinder-path-length", SCRIPT_INT,
+               "hexes in the route the last solve found", (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(pathfinder_path_get, "pathfinder-path-get", SCRIPT_VECTOR2,
+               "one hex of the last solved route, 0 first", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
+
+// ---- mover resources
+SCRIPT_BINDING(mover_create, "mover-create", SCRIPT_RESOURCE,
+               "a walker on the hex grid, starting on a hex, holding so many steps of route",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_INT))
+SCRIPT_BINDING(mover_destroy, "mover-destroy", SCRIPT_BOOL, "release a mover",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(mover_goto, "mover-go-to", SCRIPT_BOOL, "plan a walk through a pathfinder to a hex",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
+SCRIPT_BINDING(mover_truncate, "mover-truncate!", SCRIPT_NONE, "cut the walk to at most so many hexes",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
+SCRIPT_BINDING(mover_remaining, "mover-remaining", SCRIPT_INT, "hexes still to be entered",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(mover_stop, "mover-stop!", SCRIPT_NONE, "stop where it stands",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(mover_moving, "mover-moving?", SCRIPT_BOOL, "is a walk underway",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(mover_update, "mover-update!", SCRIPT_NONE, "advance a walk over dt seconds",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT))
+SCRIPT_BINDING(mover_screen, "mover-screen", SCRIPT_VECTOR2,
+               "where to draw a mover between hexes", (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(mover_hex, "mover-hex", SCRIPT_VECTOR2, "the hex a mover occupies",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+
+// ---- saved key/values
+SCRIPT_BINDING(save_set_number, "save-set-number!", SCRIPT_BOOL, "remember a number under a key",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_FLOAT))
+SCRIPT_BINDING(save_set_string, "save-set-string!", SCRIPT_BOOL, "remember text under a key",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_STRING))
+SCRIPT_BINDING(save_get_number, "save-get-number", SCRIPT_FLOAT,
+               "the number under a key, 0 when there is none", (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(save_get_string, "save-get-string", SCRIPT_STRING,
+               "the text under a key, empty when there is none", (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(save_write, "save-write", SCRIPT_BOOL, "write every pair to a file, all or nothing",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(save_read, "save-read", SCRIPT_BOOL, "replace the pairs with a file's contents",
+               (SCRIPT_NONE, SCRIPT_STRING))
+
+// ---- debug drawing, for what a script wants to see while it runs
+SCRIPT_BINDING(debug_line, "debug-line", SCRIPT_BOOL, "show a line for so many seconds",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_FLOAT))
+SCRIPT_BINDING(debug_circle, "debug-circle", SCRIPT_BOOL, "show a circle for so many seconds",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT, SCRIPT_FLOAT))
+SCRIPT_BINDING(debug_rect, "debug-rect", SCRIPT_BOOL, "show a rectangle for so many seconds",
+               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_FLOAT))
+SCRIPT_BINDING(debug_text, "debug-text", SCRIPT_BOOL, "show text for so many seconds",
+               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_FLOAT))

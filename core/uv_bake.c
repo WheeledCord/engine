@@ -30,6 +30,41 @@ bool CoreBakeMeshUV(Mesh mesh, Material material, RenderTexture target, Matrix t
     EndTextureMode();
     return true;
 }
+/* One ring of growth, shared by the two dilation entry points. Returns how many texels it filled,
+   so the caller that must not stop early can tell when there is nothing left to do. */
+static int DilateRing(Color *pixels, Color *previous, int w, int h)
+{
+    int filled = 0;
+    memcpy(previous, pixels, (size_t)w * (size_t)h * sizeof *previous);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+        {
+            if (previous[y * w + x].a)
+                continue; // already surface
+            int r = 0, g = 0, b = 0, a = 0, found = 0;
+            for (int dy = -1; dy <= 1; dy++)
+                for (int dx = -1; dx <= 1; dx++)
+                {
+                    int nx = x + dx, ny = y + dy;
+                    if (nx < 0 || ny < 0 || nx >= w || ny >= h)
+                        continue;
+                    Color n = previous[ny * w + nx];
+                    if (!n.a)
+                        continue;
+                    r += n.r;
+                    g += n.g;
+                    b += n.b;
+                    a += n.a;
+                    found++;
+                }
+            if (!found)
+                continue;
+            pixels[y * w + x] = (Color){(unsigned char)(r / found), (unsigned char)(g / found),
+                                        (unsigned char)(b / found), (unsigned char)(a / found)};
+            filled++;
+        }
+    return filled;
+}
 
 bool CoreDilateUVSeams(Image *image, int rings)
 {
@@ -43,35 +78,27 @@ bool CoreDilateUVSeams(Image *image, int rings)
     if (!previous)
         return false;
     for (int ring = 0; ring < rings; ring++)
-    {
-        memcpy(previous, pixels, (size_t)w * (size_t)h * sizeof *previous);
-        for (int y = 0; y < h; y++)
-            for (int x = 0; x < w; x++)
-            {
-                if (previous[y * w + x].a)
-                    continue; // already surface
-                int r = 0, g = 0, b = 0, a = 0, found = 0;
-                for (int dy = -1; dy <= 1; dy++)
-                    for (int dx = -1; dx <= 1; dx++)
-                    {
-                        int nx = x + dx, ny = y + dy;
-                        if (nx < 0 || ny < 0 || nx >= w || ny >= h)
-                            continue;
-                        Color n = previous[ny * w + nx];
-                        if (!n.a)
-                            continue;
-                        r += n.r;
-                        g += n.g;
-                        b += n.b;
-                        a += n.a;
-                        found++;
-                    }
-                if (!found)
-                    continue;
-                pixels[y * w + x] = (Color){(unsigned char)(r / found), (unsigned char)(g / found),
-                                            (unsigned char)(b / found), (unsigned char)(a / found)};
-            }
-    }
+        DilateRing(pixels, previous, w, h);
     free(previous);
     return true;
+}
+
+bool CoreFillUVBackground(Image *image)
+{
+    if (!image || !image->data || image->format != PIXELFORMAT_UNCOMPRESSED_R8G8B8A8)
+        return false;
+    int w = image->width, h = image->height;
+    Color *pixels = (Color *)image->data;
+    Color *previous = malloc((size_t)w * (size_t)h * sizeof *previous);
+    if (!previous)
+        return false;
+    /* Each pass reaches one texel further, so the worst case is the longest run of empty space,
+       bounded by the image itself. Stopping when a pass fills nothing ends it as soon as the image
+       is full -- and also ends it immediately when there was nothing written to spread from, which
+       is the false below rather than a silent success on an untouched image. */
+    int filled = 0, total = 0;
+    while ((filled = DilateRing(pixels, previous, w, h)) > 0)
+        total += filled;
+    free(previous);
+    return total > 0;
 }

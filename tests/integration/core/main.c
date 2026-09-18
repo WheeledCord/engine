@@ -338,6 +338,29 @@ static void UvBakeCheck(Project *p)
                  seamPixels[0].a == 64 && seamPixels[2].a == 64,
           "seam dilation preserves an alpha payload");
 
+    // A few rings are right for full-resolution filtering and wrong for mipmaps: a sparse layout
+    // is mostly empty space, and a mip level averages that in. One written texel in a wide row is
+    // that case in miniature -- after a bounded dilation the row is still mostly background, and
+    // the fill has to reach the far end.
+    Check(p, !CoreFillUVBackground(NULL), "background fill rejects a NULL image");
+    Color rowPixels[16];
+    for (int i = 0; i < 16; i++)
+        rowPixels[i] = BLANK;
+    rowPixels[0] = (Color){200, 100, 50, 64};
+    Image rowImage = {rowPixels, 16, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    Check(p, CoreDilateUVSeams(&rowImage, 2), "bounded dilation runs");
+    Check(p, rowPixels[15].a == 0, "bounded dilation leaves distant background empty");
+    Check(p, CoreFillUVBackground(&rowImage), "background fill runs");
+    bool rowFilled = true;
+    for (int i = 0; i < 16; i++)
+        if (!rowPixels[i].a || !rowPixels[i].r)
+            rowFilled = false;
+    Check(p, rowFilled, "background fill reaches every texel");
+    Color emptyPixels[4] = {BLANK, BLANK, BLANK, BLANK};
+    Image emptyImage = {emptyPixels, 4, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    Check(p, !CoreFillUVBackground(&emptyImage),
+          "background fill reports an image with nothing to spread from");
+
     Image baked = LoadImageFromTexture(target.texture);
     ImageFormat(&baked, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
     Color *texels = (Color *)baked.data;
