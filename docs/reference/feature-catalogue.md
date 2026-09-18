@@ -10,7 +10,7 @@ not an engine feature.
 | Runtime | Timing snapshot and opt-in debug overlay, text and transient primitives | `core/diagnostics.h` |
 | Audio | Owned sound/music cache, data-root paths and named volume groups | `core/audio.h` |
 | Runtime | GPU capability contract | `core/capabilities.h` |
-| Input | Raw input, actions, axes, vectors | `core/input.h` |
+| Input | Raw input, actions, axes, vectors, and focus-safe relative pointer capture | `core/input.h`; [mouse capture](../user/mouse-capture.md) |
 | Files | Data-root resolution, checked reads, atomic writes | `core/file.h` |
 | Networking | ENet-backed client/server endpoints, peer events, reliable messages and replaceable snapshots | `core/network.h`; [networking](../user/networking.md) |
 | Networking | Declarative replicated-object schemas, stable identities, ownership checks, full snapshots, and field interpolation | `core/net_sync.h`; [networking](../user/networking.md) |

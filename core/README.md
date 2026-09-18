@@ -152,6 +152,11 @@ occurs during queries. Alternate bindings do not retrigger an action already hel
 As with raw EngineInput, multiple transitions within a pending interval coalesce; event ordering is not
 preserved. A press and release before the next update are both reported.
 
+`CoreMouseCaptureUpdate` owns relative pointer capture for first-person and free-look views. Call it
+once per rendered frame with whether gameplay currently wants the pointer; use only its returned
+delta. It releases capture while the window is unfocused and suppresses cursor rebasing after focus,
+fullscreen, or size transitions. Call `CoreMouseCaptureRelease` before destroying the window.
+
 For UI-aware applications, supply `app.ui` and `app.BuildUi`. The runner starts a deferred UI frame,
 calls BuildUi exactly once, finishes interaction, filters gameplay input, performs updates and world
 drawing, then renders the recorded UI. A zero-initialized UI gets the default theme automatically; the
