@@ -1482,3 +1482,191 @@ bool ScriptInvoke(ScriptHost *host, const ScriptBinding *binding, const ScriptVa
         *result = value;
     return true;
 }
+
+/* ---- networking clocks ----------------------------------------------------
+   A server simulates on a fixed tick and sends snapshots at its own lower rate; a client draws the
+   world slightly in the past so the pair of snapshots it interpolates between have both arrived.
+   Both are plain owned state, so scripts get them as handles. */
+
+SCRIPT_BODY(net_clock_create)
+{
+    int index = 0;
+    int handle = ScriptResCreate(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 SCRIPT_RES_NETCLOCK, &index);
+    if (!handle)
+        return ScriptResource(0);
+    if (!CoreNetClockInit(&host->netClocks[index], a[0].as.integer, a[1].as.integer))
+    {
+        host->netClockSlots[index].live = false;
+        host->netClockSlots[index].generation++;
+        return ScriptResource(0);
+    }
+    return ScriptResource(handle);
+}
+
+SCRIPT_BODY(net_clock_destroy)
+{
+    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
+    if (index < 0)
+        return ScriptBool(false);
+    host->netClockSlots[index].live = false;
+    host->netClockSlots[index].generation++;
+    return ScriptBool(true);
+}
+
+SCRIPT_BODY(net_clock_advance)
+{
+    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
+    if (index < 0)
+        return ScriptInt(0);
+    return ScriptInt(CoreNetClockAdvance(&host->netClocks[index], a[1].as.number,
+                                         a[2].as.integer));
+}
+
+SCRIPT_BODY(net_clock_ticked)
+{
+    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
+    if (index < 0)
+        return ScriptInt(0);
+    return ScriptInt((int)CoreNetClockTicked(&host->netClocks[index]));
+}
+
+SCRIPT_BODY(net_clock_should_send)
+{
+    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
+    if (index < 0)
+        return ScriptBool(false);
+    return ScriptBool(CoreNetClockShouldSend(&host->netClocks[index]));
+}
+
+SCRIPT_BODY(net_clock_tick)
+{
+    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
+    if (index < 0)
+        return ScriptInt(0);
+    return ScriptInt((int)host->netClocks[index].tick);
+}
+
+SCRIPT_BODY(net_clock_now)
+{
+    (void)host; (void)a;
+    return ScriptFloat((float)CoreNetClockNow());
+}
+
+SCRIPT_BODY(net_interp_create)
+{
+    int index = 0;
+    int handle = ScriptResCreate(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 SCRIPT_RES_NETINTERP, &index);
+    if (!handle)
+        return ScriptResource(0);
+    if (!CoreNetInterpolatorInit(&host->netInterps[index], a[0].as.integer, a[1].as.integer))
+    {
+        host->netInterpSlots[index].live = false;
+        host->netInterpSlots[index].generation++;
+        return ScriptResource(0);
+    }
+    return ScriptResource(handle);
+}
+
+SCRIPT_BODY(net_interp_destroy)
+{
+    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
+    if (index < 0)
+        return ScriptBool(false);
+    host->netInterpSlots[index].live = false;
+    host->netInterpSlots[index].generation++;
+    return ScriptBool(true);
+}
+
+SCRIPT_BODY(net_interp_snapshot)
+{
+    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
+    if (index < 0 || a[1].as.integer < 0)
+        return ScriptBool(false);
+    CoreNetInterpolatorSnapshot(&host->netInterps[index], (uint32_t)a[1].as.integer);
+    return ScriptBool(true);
+}
+
+SCRIPT_BODY(net_interp_advance)
+{
+    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
+    if (index < 0)
+        return ScriptBool(false);
+    CoreNetInterpolatorAdvance(&host->netInterps[index], a[1].as.number);
+    return ScriptBool(true);
+}
+
+SCRIPT_BODY(net_interp_render_tick)
+{
+    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
+    if (index < 0)
+        return ScriptFloat(0.0f);
+    return ScriptFloat((float)CoreNetInterpolatorRenderTick(&host->netInterps[index]));
+}
+
+/* ---- textures ---------------------------------------------------------- */
+
+static ScriptValue ScriptTextureLoad(ScriptHost *host, const ScriptValue *a, CoreTextureOptions o)
+{
+    int index = 0;
+    int handle = ScriptResCreate(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
+                                 SCRIPT_RES_TEXTURE, &index);
+    if (!handle)
+        return ScriptResource(0);
+    if (!CoreLoadTexture(&host->textures[index], a[0].as.string, o))
+    {
+        host->textureSlots[index].live = false;
+        host->textureSlots[index].generation++;
+        return ScriptResource(0);
+    }
+    return ScriptResource(handle);
+}
+
+SCRIPT_BODY(texture_load)
+{
+    return ScriptTextureLoad(host, a, CoreTextureOptionsDefault());
+}
+
+SCRIPT_BODY(texture_load_smooth)
+{
+    CoreTextureOptions options = CoreTextureOptionsDefault();
+    options.mipmaps = true;
+    options.filter = TEXTURE_FILTER_TRILINEAR;
+    return ScriptTextureLoad(host, a, options);
+}
+
+SCRIPT_BODY(texture_destroy)
+{
+    int index = ScriptResResolve(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_TEXTURE);
+    if (index < 0)
+        return ScriptBool(false);
+    CoreUnloadTexture(&host->textures[index]);
+    host->textureSlots[index].live = false;
+    host->textureSlots[index].generation++;
+    return ScriptBool(true);
+}
+
+SCRIPT_BODY(texture_width)
+{
+    int index = ScriptResResolve(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_TEXTURE);
+    return ScriptInt(index < 0 ? 0 : host->textures[index].width);
+}
+
+SCRIPT_BODY(texture_height)
+{
+    int index = ScriptResResolve(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
+                                 a[0].as.integer, SCRIPT_RES_TEXTURE);
+    return ScriptInt(index < 0 ? 0 : host->textures[index].height);
+}

@@ -11,6 +11,7 @@
 #include "core/frame_uniforms.h"
 #include "core/iso_grid.h"
 #include "core/network.h"
+#include "core/net_clock.h"
 #include "core/net_sync.h"
 #include "core/sprite_sheet.h"
 #include "core/texture.h"
@@ -695,6 +696,86 @@ static void ScriptChecks(void)
 
     // Resource handle system: create, use, destroy, stale rejection, kind mismatch.
     ScriptValue camHandle = ScriptNone();
+    /* Networking is script-facing like everything else: a script must be able to run a server's
+       fixed tick and a client's view of it without writing C. */
+    ScriptValue netClock = ScriptNone();
+    bool clockMade = ScriptInvoke(&host, ScriptBindingNamed("net-clock-create"),
+                                  (ScriptValue[]){ScriptInt(60), ScriptInt(20)}, 2, &netClock,
+                                  &message) &&
+                     netClock.type == SCRIPT_RESOURCE && netClock.as.integer != 0;
+    Check(clockMade, "net-clock-create returns a live resource handle");
+
+    ScriptValue bad = ScriptNone();
+    Check(!ScriptInvoke(&host, ScriptBindingNamed("net-clock-create"),
+                        (ScriptValue[]){ScriptInt(60), ScriptInt(0)}, 2, &bad, &message) ||
+              bad.as.integer == 0,
+          "net-clock-create refuses a zero send rate");
+
+    ScriptValue due = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-advance"),
+                       (ScriptValue[]){netClock, ScriptFloat(2.0f / 60.0f), ScriptInt(8)}, 3,
+                       &due, &message) && due.as.integer == 2,
+          "net-clock-advance runs every step a long frame owes");
+
+    ScriptValue ticked = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-ticked"),
+                       (ScriptValue[]){netClock}, 1, &ticked, &message) &&
+              ticked.as.integer == 1,
+          "net-clock-ticked counts a simulated step");
+
+    ScriptValue send = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-should-send?"),
+                       (ScriptValue[]){netClock}, 1, &send, &message) && !send.as.boolean,
+          "net-clock-should-send? is false before a send interval has passed");
+
+    ScriptValue when = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-now"),
+                       (ScriptValue[]){ScriptNone()}, 0, &when, &message) &&
+              when.type == SCRIPT_FLOAT,
+          "net-clock-now reads a monotonic clock");
+
+    ScriptValue interp = ScriptNone();
+    bool interpMade = ScriptInvoke(&host, ScriptBindingNamed("net-interp-create"),
+                                   (ScriptValue[]){ScriptInt(60), ScriptInt(20)}, 2, &interp,
+                                   &message) &&
+                      interp.type == SCRIPT_RESOURCE && interp.as.integer != 0;
+    Check(interpMade, "net-interp-create returns a live resource handle");
+
+    ScriptValue ok = ScriptNone(), render = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-interp-snapshot"),
+                       (ScriptValue[]){interp, ScriptInt(600)}, 2, &ok, &message) &&
+              ok.as.boolean,
+          "net-interp-snapshot records an arriving snapshot");
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-interp-render-tick"),
+                       (ScriptValue[]){interp}, 1, &render, &message) &&
+              render.as.number < 600.0f && render.as.number > 590.0f,
+          "net-interp-render-tick draws behind the newest snapshot");
+
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-destroy"),
+                       (ScriptValue[]){netClock}, 1, &ok, &message) && ok.as.boolean,
+          "net-clock-destroy releases the handle");
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-tick"),
+                       (ScriptValue[]){netClock}, 1, &ticked, &message) &&
+              ticked.as.integer == 0,
+          "a destroyed clock handle no longer resolves");
+    Check(ScriptInvoke(&host, ScriptBindingNamed("net-interp-destroy"),
+                       (ScriptValue[]){interp}, 1, &ok, &message) && ok.as.boolean,
+          "net-interp-destroy releases the handle");
+
+    /* Textures are a normal game facility and so are script-facing like the rest. */
+    ScriptValue tex = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("texture-load"),
+                       (ScriptValue[]){ScriptString("no-such-image.png")}, 1, &tex, &message) &&
+              tex.as.integer == 0,
+          "texture-load refuses an image that is not there");
+    ScriptValue texSize = ScriptNone();
+    Check(ScriptInvoke(&host, ScriptBindingNamed("texture-width"),
+                       (ScriptValue[]){tex}, 1, &texSize, &message) && texSize.as.integer == 0,
+          "a texture that never loaded has no width");
+    Check(ScriptInvoke(&host, ScriptBindingNamed("texture-destroy"),
+                       (ScriptValue[]){tex}, 1, &texSize, &message) && !texSize.as.boolean,
+          "and releasing it reports that there was nothing to release");
+
     bool camMade = ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
                                 (ScriptValue[]){ScriptNone()}, 0, &camHandle, &message) &&
                    camHandle.type == SCRIPT_RESOURCE && camHandle.as.integer != 0;
@@ -1665,6 +1746,276 @@ typedef struct NetTestState
     bool carrying;
 } NetTestState;
 
+static void NetDeltaChecks(void)
+{
+    /* A world that is mostly still should cost almost nothing to send. id Tech 3 deltas each
+       snapshot against the newest one the receiver has acknowledged, and falls back to a full
+       snapshot when that acknowledgement is missing or too old. */
+    const CoreNetField fields[] = {
+        CORE_NET_FIELD_LERP(NetTestState, position, CORE_NET_VECTOR3),
+        CORE_NET_FIELD_LERP(NetTestState, yaw, CORE_NET_F32),
+        CORE_NET_FIELD(NetTestState, health, CORE_NET_I32),
+        CORE_NET_FIELD(NetTestState, carrying, CORE_NET_BOOL),
+    };
+    const CoreNetSchema schema = {9, "delta", sizeof(NetTestState), fields,
+                                  sizeof fields / sizeof fields[0], CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync server = {0}, client = {0};
+    Check(CoreNetSyncInit(&server, 4, 2) && CoreNetSyncRegister(&server, &schema) &&
+          CoreNetSyncInit(&client, 4, 2) && CoreNetSyncRegister(&client, &schema),
+          "delta registries start");
+
+    CoreNetObject *object = CoreNetSyncSpawn(&server, 1, 9, 0);
+    Check(object != NULL, "delta object spawns");
+    NetTestState *live = (NetTestState *)object->state;
+    live->position = (Vector3){1.0f, 2.0f, 3.0f};
+    live->health = 100;
+
+    unsigned char full[512];
+    CoreNetWriter writer = CoreNetWriterBegin(full, sizeof full);
+    Check(CoreNetSyncWrite(&server, 10, &writer), "a full snapshot writes");
+    size_t fullSize = writer.size;
+    Check(CoreNetSyncRemember(&server, 10), "the sender remembers what it sent");
+
+    uint32_t readTick = 0;
+    CoreNetReader reader = CoreNetReaderBegin(full, fullSize);
+    Check(CoreNetSyncRead(&client, &reader, &readTick) && readTick == 10,
+          "the receiver applies the full snapshot");
+    Check(CoreNetSyncRemember(&client, 10), "the receiver remembers it too");
+    CoreNetObject *mirror = CoreNetSyncFind(&client, 1);
+    Check(mirror && ((NetTestState *)mirror->state)->health == 100, "the full snapshot arrived");
+
+    /* Nothing has changed: the delta should be markedly smaller than the full snapshot. */
+    unsigned char quiet[512];
+    writer = CoreNetWriterBegin(quiet, sizeof quiet);
+    Check(CoreNetSyncWriteDelta(&server, 11, 10, &writer), "an unchanged delta writes");
+    Check(writer.size < fullSize, "an unchanged world costs less than a full snapshot");
+
+    reader = CoreNetReaderBegin(quiet, writer.size);
+    Check(CoreNetSyncRead(&client, &reader, &readTick) && readTick == 11, "the delta applies");
+    mirror = CoreNetSyncFind(&client, 1);
+    Check(mirror && ((NetTestState *)mirror->state)->health == 100 &&
+              ((NetTestState *)mirror->state)->position.x == 1.0f,
+          "fields nobody sent keep the value they had");
+    Check(CoreNetSyncRemember(&client, 11), "the receiver remembers the delta result");
+    Check(CoreNetSyncRemember(&server, 11), "so does the sender");
+
+    /* One field moves: it arrives, and the others are still not on the wire. */
+    live->health = 55;
+    unsigned char moved[512];
+    writer = CoreNetWriterBegin(moved, sizeof moved);
+    Check(CoreNetSyncWriteDelta(&server, 12, 11, &writer), "a changed delta writes");
+    reader = CoreNetReaderBegin(moved, writer.size);
+    Check(CoreNetSyncRead(&client, &reader, &readTick), "the changed delta applies");
+    mirror = CoreNetSyncFind(&client, 1);
+    Check(mirror && ((NetTestState *)mirror->state)->health == 55, "the changed field arrived");
+    Check(mirror && ((NetTestState *)mirror->state)->position.x == 1.0f,
+          "an unchanged field beside it was not disturbed");
+
+    /* A baseline the receiver never had cannot be reconstructed, and must not be half applied. */
+    CoreNetSync fresh = {0};
+    Check(CoreNetSyncInit(&fresh, 4, 2) && CoreNetSyncRegister(&fresh, &schema),
+          "a late joiner starts");
+    reader = CoreNetReaderBegin(moved, writer.size);
+    Check(CoreNetSyncRead(&fresh, &reader, &readTick),
+          "a delta against an unknown baseline is understood");
+    Check(CoreNetSyncFind(&fresh, 1) == NULL,
+          "a delta against an unknown baseline changes nothing");
+
+    /* The sender is in the same position when the receiver's acknowledgement is too old: it must
+       fall back to a full snapshot rather than emit something unreadable. */
+    writer = CoreNetWriterBegin(moved, sizeof moved);
+    Check(CoreNetSyncWriteDelta(&server, 13, 999999, &writer),
+          "a baseline the sender has forgotten still writes");
+    reader = CoreNetReaderBegin(moved, writer.size);
+    Check(CoreNetSyncRead(&fresh, &reader, &readTick) && CoreNetSyncFind(&fresh, 1) != NULL,
+          "it fell back to a full snapshot the late joiner could read");
+
+    /* A schema that promises to mark its own changes buys the right to be skipped entirely: an
+       object nobody touched costs nothing, not even the comparison. Forgetting the mark is then a
+       field that stops replicating, which is why it has to be asked for rather than assumed. */
+    const CoreNetSchema explicitSchema = {12, "explicit", sizeof(NetTestState), fields,
+                                          sizeof fields / sizeof fields[0],
+                                          CORE_NET_AUTHORITY_SERVER,
+                                          CORE_NET_SCHEMA_EXPLICIT_DIRTY};
+    CoreNetSync marked = {0};
+    Check(CoreNetSyncInit(&marked, 4, 2) && CoreNetSyncRegister(&marked, &explicitSchema),
+          "an explicitly-dirtied registry starts");
+    CoreNetObject *watched = CoreNetSyncSpawn(&marked, 1, 12, 0);
+    Check(watched != NULL, "its object spawns");
+    unsigned char first[512];
+    writer = CoreNetWriterBegin(first, sizeof first);
+    Check(CoreNetSyncWrite(&marked, 20, &writer), "its first snapshot writes in full");
+    Check(CoreNetSyncRemember(&marked, 20), "and is remembered");
+    size_t firstSize = writer.size;
+
+    writer = CoreNetWriterBegin(first, sizeof first);
+    Check(CoreNetSyncWriteDelta(&marked, 21, 20, &writer), "an unmarked delta writes");
+    size_t quietSize = writer.size;
+    Check(quietSize < firstSize, "an object nobody marked is left out of it entirely");
+
+    ((NetTestState *)watched->state)->health = 9;
+    Check(CoreNetSyncDirty(&marked, 1), "marking it changed succeeds");
+    writer = CoreNetWriterBegin(first, sizeof first);
+    Check(CoreNetSyncWriteDelta(&marked, 22, 20, &writer), "a marked delta writes");
+    Check(writer.size > quietSize, "and carries the object again");
+    Check(!CoreNetSyncDirty(&marked, 999), "marking an object that is not there fails");
+    CoreNetSyncFree(&marked);
+
+    CoreNetSyncFree(&server);
+    CoreNetSyncFree(&client);
+    CoreNetSyncFree(&fresh);
+}
+
+static void NetCommandChecks(void)
+{
+    /* A client cannot write the world, so a pickup or a drop is a request it sends and the server
+       executes. Sent reliably and numbered, because doing a pickup twice is not doing it once. */
+    unsigned char packet[64];
+    CoreNetWriter w = CoreNetWriterBegin(packet, sizeof packet);
+    CoreNetCommand out = {7, 4002, 2};
+    Check(CoreNetCommandWrite(&w, out), "a command writes");
+    Check(CoreNetWriteF32(&w, 1.5f), "the game's own payload follows it");
+
+    CoreNetReader r = CoreNetReaderBegin(packet, w.size);
+    CoreNetCommand in;
+    float payload = 0.0f;
+    Check(CoreNetCommandRead(&r, &in) && in.sequence == 7 && in.object == 4002 && in.op == 2,
+          "the command reads back as it was written");
+    Check(CoreNetReadF32(&r, &payload) && payload == 1.5f,
+          "the reader is left on the payload, not past it");
+    Check(r.at == r.size, "between them they consumed the packet exactly");
+
+    Check(!CoreNetCommandRead(&r, NULL), "reading into nothing is refused");
+    CoreNetReader truncated = CoreNetReaderBegin(packet, 3);
+    Check(!CoreNetCommandRead(&truncated, &in), "a truncated command is refused");
+
+    /* Executing the same request twice is the bug this guards: the thing gets picked up twice. */
+    uint32_t last = 0;
+    Check(CoreNetCommandAccept(&last, 1), "the first command is new");
+    Check(!CoreNetCommandAccept(&last, 1), "the same command again is not");
+    Check(CoreNetCommandAccept(&last, 2), "a later command is new");
+    Check(!CoreNetCommandAccept(&last, 2), "and only once");
+    Check(!CoreNetCommandAccept(&last, 1), "one that arrived late is still not new");
+    last = 0;   /* what the server does when a client connects */
+    Check(CoreNetCommandAccept(&last, 1),
+          "a reconnected client is admitted by resetting the counter, not by guessing");
+    Check(!CoreNetCommandAccept(NULL, 1), "accepting against nothing is refused");
+}
+
+static void NetPackedObjectChecks(void)
+{
+    /* A packet may carry several objects. Reading one must consume only its own bytes and leave the
+       rest, or a sender that packs more than one has every object but the last rejected. */
+    const CoreNetField fields[] = {
+        CORE_NET_FIELD(NetTestState, health, CORE_NET_I32),
+    };
+    const CoreNetSchema schema = {11, "packed", sizeof(NetTestState), fields, 1,
+                                  CORE_NET_AUTHORITY_OWNER, 0};
+    CoreNetSync sync = {0};
+    Check(CoreNetSyncInit(&sync, 4, 2) && CoreNetSyncRegister(&sync, &schema),
+          "packed registry starts");
+    CoreNetObject *a = CoreNetSyncSpawn(&sync, 1, 11, 5);
+    CoreNetObject *b = CoreNetSyncSpawn(&sync, 2, 11, 5);
+    Check(a && b, "two objects for one owner spawn");
+    ((NetTestState *)a->state)->health = 11;
+    ((NetTestState *)b->state)->health = 22;
+
+    unsigned char packet[256];
+    CoreNetWriter writer = CoreNetWriterBegin(packet, sizeof packet);
+    Check(CoreNetObjectWrite(a, &writer) && CoreNetObjectWrite(b, &writer),
+          "two objects pack into one packet");
+
+    ((NetTestState *)a->state)->health = 0;
+    ((NetTestState *)b->state)->health = 0;
+    CoreNetReader reader = CoreNetReaderBegin(packet, writer.size);
+    Check(CoreNetSyncReadObject(&sync, &reader, 5, false),
+          "the first of two packed objects reads");
+    Check(reader.at < reader.size, "it left the second one in the buffer");
+    Check(CoreNetSyncReadObject(&sync, &reader, 5, false),
+          "the second packed object reads too");
+    Check(reader.at == reader.size, "between them they consumed the packet exactly");
+    Check(((NetTestState *)a->state)->health == 11 && ((NetTestState *)b->state)->health == 22,
+          "both objects arrived with their own values");
+    CoreNetSyncFree(&sync);
+}
+
+static void NetClockChecks(void)
+{
+    /* A server simulates at a fixed rate and sends snapshots at its own, lower one -- Source runs
+       66 ticks and about 20 snapshots a second and never sends more snapshots than ticks. */
+    CoreNetClock clock;
+    Check(!CoreNetClockInit(&clock, 0, 20), "clock rejects a zero tick rate");
+    Check(!CoreNetClockInit(&clock, 60, 0), "clock rejects a zero send rate");
+    Check(CoreNetClockInit(&clock, 60, 20), "clock starts");
+    Check(clock.sendInterval > clock.tickInterval, "snapshots are rarer than ticks");
+
+    CoreNetClock capped;
+    Check(CoreNetClockInit(&capped, 30, 60), "clock accepts a send rate above the tick rate");
+    Check(capped.sendInterval >= capped.tickInterval,
+          "a send rate above the tick rate is clamped to it");
+
+    /* Time is banked, not rounded: a frame worth three steps runs three, a frame worth none runs
+       none, and the simulation keeps its rate whatever the frame rate does. */
+    Check(CoreNetClockAdvance(&clock, 1.0 / 240.0, 8) == 0, "a short frame runs no tick");
+    int ran = CoreNetClockAdvance(&clock, 3.0 / 60.0, 8);
+    Check(ran == 3, "a long frame runs every step it owes");
+    Check(CoreNetClockTicked(&clock) == 1, "ticks are counted");
+
+    /* A stall must not demand an unbounded catch up on the next frame. */
+    CoreNetClock stalled;
+    CoreNetClockInit(&stalled, 60, 20);
+    Check(CoreNetClockAdvance(&stalled, 10.0, 5) == 5, "a stall is capped at the ceiling");
+    Check(CoreNetClockAdvance(&stalled, 1.0 / 60.0, 5) <= 1,
+          "the unrun backlog is discarded, not banked into a spiral");
+
+    CoreNetClock sender;
+    CoreNetClockInit(&sender, 60, 20);
+    Check(!CoreNetClockShouldSend(&sender), "nothing is due before any time passes");
+    CoreNetClockAdvance(&sender, 1.0 / 60.0, 8);
+    Check(!CoreNetClockShouldSend(&sender), "one tick is not yet a snapshot");
+    CoreNetClockAdvance(&sender, 1.0 / 20.0, 8);
+    Check(CoreNetClockShouldSend(&sender), "a snapshot falls due at the send rate");
+    Check(!CoreNetClockShouldSend(&sender), "the due snapshot is consumed, not repeated");
+
+    /* The client draws in the past, far enough back that both snapshots bracketing the moment it
+       is drawing have arrived. */
+    CoreNetInterpolator interp;
+    Check(!CoreNetInterpolatorInit(&interp, 60, 0), "interpolator rejects a zero send rate");
+    Check(CoreNetInterpolatorInit(&interp, 60, 20), "interpolator starts");
+    Check(CoreNetInterpolatorRenderTick(&interp) == 0.0, "nothing is drawn before a snapshot");
+    CoreNetInterpolatorSnapshot(&interp, 600);
+    double render = CoreNetInterpolatorRenderTick(&interp);
+    Check(render < 600.0, "the client draws behind the newest snapshot");
+    Check(fabs((600.0 - render) - 6.0) < 0.001,
+          "the delay is two snapshot intervals of ticks");
+    CoreNetInterpolatorSnapshot(&interp, 500);
+    Check(CoreNetInterpolatorRenderTick(&interp) == render,
+          "a snapshot that overtook an older one cannot drag the clock backwards");
+    CoreNetInterpolatorAdvance(&interp, 1.0 / 60.0);
+    Check(CoreNetInterpolatorRenderTick(&interp) > render, "the drawn moment runs forward");
+
+    /* Drift is closed by retiming playback, not by moving the drawn moment: a correction applied to
+       the position makes the whole world jump by exactly that much. So a step must never advance by
+       more than a little over one tick, however far behind it is. */
+    CoreNetInterpolator drifting;
+    CoreNetInterpolatorInit(&drifting, 60, 20);
+    CoreNetInterpolatorSnapshot(&drifting, 1000);
+    CoreNetInterpolatorSnapshot(&drifting, 1012);      /* suddenly twelve ticks further on */
+    double before = CoreNetInterpolatorRenderTick(&drifting);
+    CoreNetInterpolatorAdvance(&drifting, 1.0 / 60.0);
+    double step = CoreNetInterpolatorRenderTick(&drifting) - before;
+    Check(step > 0.0 && step < 1.0 + CORE_NET_RETIME_LIMIT + 0.001,
+          "catching up never advances the world by more than a fraction over one tick");
+
+    CoreNetInterpolator jumped;
+    CoreNetInterpolatorInit(&jumped, 60, 20);
+    CoreNetInterpolatorSnapshot(&jumped, 1000);
+    CoreNetInterpolatorSnapshot(&jumped, 9000);        /* a join, a stall, or a restart */
+    CoreNetInterpolatorAdvance(&jumped, 1.0 / 60.0);
+    Check(CoreNetInterpolatorRenderTick(&jumped) > 8000.0,
+          "a gap too large to retime across is snapped instead");
+}
+
 static void NetSyncChecks(void)
 {
     const CoreNetField fields[] = {
@@ -1674,7 +2025,7 @@ static void NetSyncChecks(void)
         CORE_NET_FIELD(NetTestState, carrying, CORE_NET_BOOL),
     };
     const CoreNetSchema schema = {7, "player", sizeof(NetTestState), fields,
-                                  sizeof fields / sizeof fields[0], CORE_NET_AUTHORITY_OWNER};
+                                  sizeof fields / sizeof fields[0], CORE_NET_AUTHORITY_OWNER, 0};
     CoreNetSync server = {0}, client = {0};
     Check(CoreNetSyncInit(&server, 4, 2) && CoreNetSyncInit(&client, 4, 2),
           "replication allocates server and client registries");
@@ -1785,6 +2136,10 @@ int main(int argc, char **argv)
     IsoGridChecks();
     IsoMoveChecks();
     NetworkChecks();
+    NetCommandChecks();
+    NetPackedObjectChecks();
+    NetClockChecks();
+    NetDeltaChecks();
     NetSyncChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);

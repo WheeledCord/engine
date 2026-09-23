@@ -34,25 +34,33 @@ static cell FloatToCell(float number)
    say — its identifiers have no dashes or question marks, and a native returns a single cell — so
    this file holds the rules for spelling a row's name and for carrying values in and out. */
 
-typedef struct ScriptPawn
-{
-    AMX amx;
-    void *program;
-    ScriptHost *host;
-    ScriptLanguage language;
-    AMX_NATIVE_INFO natives[128];
-    char names[128][48];
-    bool loaded;
-} ScriptPawn;
-
-static ScriptPawn state;
-
 #define SCRIPT_BINDING(id, name, result, help, types) SCRIPT_INDEX_##id,
 enum
 {
 #include "script_api.def"
     SCRIPT_INDEX_COUNT
 };
+
+#define SCRIPT_PAWN_ADDED_CAPACITY 32
+#define SCRIPT_PAWN_NATIVE_CAPACITY (SCRIPT_INDEX_COUNT + SCRIPT_PAWN_ADDED_CAPACITY + 1)
+
+typedef struct ScriptPawn
+{
+    AMX amx;
+    void *program;
+    ScriptHost *host;
+    ScriptLanguage language;
+    /* Sized from the table itself, plus the rows a project may add and one for Pawn's terminator.
+       A fixed 128 meant that adding an engine binding silently took the count past it, registration
+       refused the lot, and every Pawn native in the language stopped existing -- a long way from
+       the change that caused it. Sized this way, it cannot happen again. */
+    AMX_NATIVE_INFO natives[SCRIPT_PAWN_NATIVE_CAPACITY];
+    char names[SCRIPT_PAWN_NATIVE_CAPACITY][48];
+    bool loaded;
+} ScriptPawn;
+
+static ScriptPawn state;
+
 #undef SCRIPT_BINDING
 
 // Pawn identifiers carry neither dashes nor the marks Scheme puts on questions and changes, so a

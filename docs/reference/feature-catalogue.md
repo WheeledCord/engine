@@ -13,7 +13,8 @@ not an engine feature.
 | Input | Raw input, actions, axes, vectors, and focus-safe relative pointer capture | `core/input.h`; [mouse capture](../user/mouse-capture.md) |
 | Files | Data-root resolution, checked reads, atomic writes | `core/file.h` |
 | Networking | ENet-backed client/server endpoints, peer events, reliable messages and replaceable snapshots | `core/network.h`; [networking](../user/networking.md) |
-| Networking | Declarative replicated-object schemas, stable identities, ownership checks, full snapshots, and field interpolation | `core/net_sync.h`; [networking](../user/networking.md) |
+| Networking | Declarative replicated-object schemas, stable identities, ownership checks, full snapshots, stale-snapshot rejection, and interpolation against server time | `core/net_sync.h`; [networking](../user/networking.md) |
+| Networking | Fixed server tick, a separate snapshot rate, and the client clock that draws the world in the past | `core/net_clock.h`; [networking](../user/networking.md) |
 | Rendering | GLSL 120 shader tables, `#include` expansion, and frame uniforms | `core/shader.h`, `core/frame_uniforms.h` |
 | Rendering | Colour/depth render targets | `core/render_target.h` |
 | Rendering | Model instances and shader overrides | `core/world_draw.h` |

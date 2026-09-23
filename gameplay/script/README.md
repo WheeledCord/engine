@@ -161,3 +161,15 @@ Add the row. Both languages have it on the next build, and so will the node edit
 make -f Makefile.core run-script        # Scheme, with the REPL
 make -f Makefile.core run-script-pawn   # the same entity in Pawn
 ```
+
+## Bindings deliberately omitted
+
+`CoreNetSyncObserve` and `CoreNetSyncSerialize` take a C function pointer that the engine calls in
+both directions. A script cannot be handed one, and inventing a per-language callback registry to
+fake it would be a second binding mechanism beside the table -- the thing this file exists to avoid.
+Scripts get the state itself instead: the clocks are bound, and a replicated object's fields are
+reachable through the schema. `CoreNetObjectIsMine` is bindable and should be bound when the
+replicated-object handles are.
+
+`CoreFillUVBackground` and the rest of `core/uv_bake.h` are offline tooling: they run in the texture
+baker, before a game exists, and have no meaning at runtime.
