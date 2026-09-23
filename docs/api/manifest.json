@@ -130,6 +130,22 @@
       ]
     },
     {
+      "name": "CoreNetClock",
+      "source": "core/net_clock.h",
+      "output": "docs/api/core/CoreNetClock.xml",
+      "symbols": [
+        "CoreNetClockNow",
+        "CoreNetClockInit",
+        "CoreNetClockAdvance",
+        "CoreNetClockTicked",
+        "CoreNetClockShouldSend",
+        "CoreNetInterpolatorInit",
+        "CoreNetInterpolatorSnapshot",
+        "CoreNetInterpolatorAdvance",
+        "CoreNetInterpolatorRenderTick"
+      ]
+    },
+    {
       "name": "CoreNetSync",
       "source": "core/net_sync.h",
       "output": "docs/api/core/CoreNetSync.xml",
@@ -146,7 +162,19 @@
         "CoreNetSyncReadObject",
         "CoreNetSyncWrite",
         "CoreNetSyncRead",
-        "CoreNetObjectSample"
+        "CoreNetObjectSample",
+        "CoreNetObjectSampleAt",
+        "CoreNetSyncRemember",
+        "CoreNetSyncWriteDelta",
+        "CoreNetObjectIsMine",
+        "CoreNetSyncObserve",
+        "CoreNetSyncSerialize",
+        "CoreNetCommandWrite",
+        "CoreNetCommandRead",
+        "CoreNetCommandAccept",
+        "CoreNetSyncBindState",
+        "CoreNetSyncDirty",
+        "CoreNetSyncSetLocalActor"
       ]
     }
   ]

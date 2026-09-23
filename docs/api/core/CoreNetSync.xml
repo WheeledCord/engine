@@ -186,5 +186,173 @@
       </param>
       <description>Produces render state between an object's previous and latest snapshots.</description>
     </method>
+    <method name="CoreNetObjectSampleAt" brief="Samples a replicated object at a point in server time, interpolating the pair it lies between.">
+      <return type="bool">
+        <description>True when a state was written, false when an argument is missing or unusable.</description>
+      </return>
+      <param name="object" type="const CoreNetObject *">
+        <description>Borrowed replicated object.</description>
+      </param>
+      <param name="renderTick" type="double">
+        <description>Server tick to sample at, fractional; typically now minus an interpolation delay of two or more snapshot intervals.</description>
+      </param>
+      <param name="outState" type="void *">
+        <description>Caller-owned buffer of the schema's state size.</description>
+      </param>
+      <description>The client renders the world slightly in the past so that the two snapshots bracketing the moment it is drawing have both arrived; this reads that moment. renderTick is in server ticks and may be fractional. Where it falls between the object's two buffered snapshots decides the blend, so a snapshot that arrived late, early, or not at all changes the blend rather than being assumed evenly spaced -- which is what sampling by a fixed alpha assumes and gets wrong. Fields flagged CORE_NET_FIELD_INTERPOLATED are blended; everything else is taken from the newer snapshot. A renderTick outside the pair is clamped to it, so falling behind holds the oldest state rather than extrapolating into a guess.</description>
+    </method>
+    <method name="CoreNetSyncRemember" brief="Remembers the current state of every object as the snapshot for a tick.">
+      <return type="bool">
+        <description>True when it was recorded, false on an unusable argument or an allocation failure, in which case the sender must fall back to a full snapshot.</description>
+      </return>
+      <param name="sync" type="CoreNetSync *">
+        <description>Registry to record.</description>
+      </param>
+      <param name="tick" type="uint32_t">
+        <description>The tick this snapshot represents.</description>
+      </param>
+      <description>Call on the sender immediately after writing a snapshot, and on the receiver immediately after applying one. Both sides then hold the same set of past snapshots, and a delta can name one of them as the baseline it was built against. The oldest remembered snapshot is displaced.</description>
+    </method>
+    <method name="CoreNetSyncWriteDelta" brief="Writes a snapshot as the difference from a remembered one.">
+      <return type="bool">
+        <description>True when a complete snapshot was written.</description>
+      </return>
+      <param name="sync" type="const CoreNetSync *">
+        <description>Borrowed registry, already recorded up to the previous tick.</description>
+      </param>
+      <param name="tick" type="uint32_t">
+        <description>The tick being sent.</description>
+      </param>
+      <param name="baselineTick" type="uint32_t">
+        <description>The remembered tick to encode against, or CORE_NET_BASELINE_NONE for a full snapshot.</description>
+      </param>
+      <param name="writer" type="CoreNetWriter *">
+        <description>Destination.</description>
+      </param>
+      <description>Only objects that changed are written, and within them only the fields that changed, so a world that is mostly still costs almost nothing to send. Objects that vanished are named so the receiver can drop them. baselineTick must be a tick the receiver also remembers -- in practice the newest one it has acknowledged. If it is not in this registry's history, the snapshot is written in full instead, which is always correct and is what a receiver that has fallen too far behind needs anyway.</description>
+    </method>
+    <method name="CoreNetObjectIsMine" brief="Says whether this machine is the one that decides an object's state.">
+      <return type="bool">
+        <description>True when the object is owned here, so this machine writes it and everyone else reads. A schema declaring CORE_NET_AUTHORITY_SERVER is the server's wherever it is asked.</description>
+      </return>
+      <param name="object" type="const CoreNetObject *">
+        <description>Borrowed object; NULL answers false.</description>
+      </param>
+      <param name="localActor" type="uint16_t">
+        <description>This machine's actor id, or CORE_NET_SERVER_ACTOR on the machine running the server.</description>
+      </param>
+      <description>Says whether this machine is the one that decides an object's state.</description>
+    </method>
+    <method name="CoreNetSyncObserve" brief="Attaches the function that moves state between an object and the live game.">
+      <return type="bool">
+        <description>True when the object exists and the callback was attached.</description>
+      </return>
+      <param name="sync" type="CoreNetSync *">
+        <description>Registry holding the object.</description>
+      </param>
+      <param name="id" type="uint32_t">
+        <description>The object's identity.</description>
+      </param>
+      <param name="serialize" type="CoreNetSerializeFn">
+        <description>Callback, or NULL to detach.</description>
+      </param>
+      <param name="user" type="void *">
+        <description>Passed back to the callback untouched; the registry does not own it.</description>
+      </param>
+      <description>One callback serves both directions, so the two can never disagree about the field order or the meaning of a value. Attach it once after spawning; it is called by CoreNetSyncSerialize.</description>
+    </method>
+    <method name="CoreNetSyncSerialize" brief="Runs every attached callback in the direction ownership implies.">
+      <return type="size_t">
+        <description>How many callbacks ran.</description>
+      </return>
+      <param name="sync" type="CoreNetSync *">
+        <description>Registry to walk.</description>
+      </param>
+      <param name="localActor" type="uint16_t">
+        <description>This machine's actor id.</description>
+      </param>
+      <param name="renderTick" type="double">
+        <description>Server tick to sample incoming objects at, from CoreNetInterpolatorRenderTick; objects owned here ignore it.</description>
+      </param>
+      <description>Call once a frame. Objects owned here are written from the live game; the rest are read into it. This is the whole of what a game has to do per frame to keep replicated state and live state together -- there is no separate publish and apply pass to keep in step.</description>
+    </method>
+    <method name="CoreNetCommandWrite" brief="Writes a command header; the game's own payload follows it.">
+      <return type="bool">
+        <description>True when it was written.</description>
+      </return>
+      <param name="writer" type="CoreNetWriter *">
+        <description>Destination.</description>
+      </param>
+      <param name="command" type="CoreNetCommand">
+        <description>Sequence, target object and operation.</description>
+      </param>
+      <description>Writes a command header; the game's own payload follows it.</description>
+    </method>
+    <method name="CoreNetCommandRead" brief="Reads a command header written by CoreNetCommandWrite.">
+      <return type="bool">
+        <description>True when a whole header was read.</description>
+      </return>
+      <param name="reader" type="CoreNetReader *">
+        <description>Source, left positioned at the game's payload.</description>
+      </param>
+      <param name="command" type="CoreNetCommand *">
+        <description>Receives the header.</description>
+      </param>
+      <description>Reads a command header written by CoreNetCommandWrite.</description>
+    </method>
+    <method name="CoreNetCommandAccept" brief="Decides whether a command is new, and records it if so.">
+      <return type="bool">
+        <description>True when the command has not been executed yet.</description>
+      </return>
+      <param name="lastSequence" type="uint32_t *">
+        <description>The highest sequence executed for this client so far; updated on acceptance.</description>
+      </param>
+      <param name="sequence" type="uint32_t">
+        <description>The incoming command's sequence.</description>
+      </param>
+      <description>Commands are sent reliably, but a server that has seen a sequence must not act on it twice -- picking a thing up twice is not the same as picking it up once. Only a strictly higher sequence is new. Reset the counter when a client connects: a late packet and a reconnected client that restarted its numbering are indistinguishable here, and the server knows which it has.</description>
+    </method>
+    <method name="CoreNetSyncBindState" brief="Points a replicated object at the game's own variable, so no copy is needed.">
+      <return type="bool">
+        <description>True when the object exists and the binding was made.</description>
+      </return>
+      <param name="sync" type="CoreNetSync *">
+        <description>Registry holding the object.</description>
+      </param>
+      <param name="id" type="uint32_t">
+        <description>The object's identity.</description>
+      </param>
+      <param name="state" type="void *">
+        <description>The game's own variable; NULL hands ownership back to the registry.</description>
+      </param>
+      <description>The replicated state then IS the state the game reads and writes every frame: an arriving snapshot is written straight into it, and what is sent is read straight out of it. Mirror's SyncVar, Netcode for GameObjects' NetworkVariable and Godot's replicated properties all work this way, and none of them asks a game to write code that copies between two versions of the same thing -- because the moment two copies exist, they can disagree. The buffer must be at least the schema's stateSize, must outlive the object, and belongs to the caller: the registry never frees it, and keeps using it across snapshots.</description>
+    </method>
+    <method name="CoreNetSyncDirty" brief="Says that an object has changed, so the next snapshot carries it.">
+      <return type="bool">
+        <description>True when the object exists and was marked.</description>
+      </return>
+      <param name="sync" type="CoreNetSync *">
+        <description>Registry holding the object.</description>
+      </param>
+      <param name="id" type="uint32_t">
+        <description>The object's identity.</description>
+      </param>
+      <description>Call it where the change is made. Comparing every field of every object against a baseline on every send finds the same answer at the cost of doing the work for everything that did not move; RobustToolbox raises EntityDirtied at the write site and keeps a per-tick set for this reason (PvsSystem.Dirty.cs), and Mirror sets a dirty bit in the SyncVar setter. An object never marked dirty is still sent when a receiver has not seen it at all, and fields declared CORE_NET_FIELD_SYNC are still sent every time -- those are promises about the wire, not about change. Marks are counted rather than timed, so this is meaningful on a server, which never reads a snapshot and so has no tick of its own.</description>
+    </method>
+    <method name="CoreNetSyncSetLocalActor" brief="Tells a registry who this machine is, so it can refuse to be told its own state.">
+      <return type="void">
+        <description>Nothing.</description>
+      </return>
+      <param name="sync" type="CoreNetSync *">
+        <description>Registry to configure. A listen server is both at once -- a player, and the machine deciding the world -- so it says so with both arguments rather than having to choose.</description>
+      </param>
+      <param name="localActor" type="uint16_t">
+        <description>Which player this machine is; zero when it is only a server.</description>
+      </param>
+      <param name="isServer" type="bool">
+        <description>Whether this machine also runs the server, and so decides server-owned objects.</description>
+      </param>
+      <description>An arriving snapshot must never overwrite an object this machine has authority over: it decides that object, and what came back is its own word, older. On a listen server the same variable is both the simulation's and the client's, and without this it is written twice a cycle -- once live, once by its own echo -- which reads as jitter. Every one of Godot, Netcode for GameObjects and Mirror checks authority on receive for the same reason.</description>
+    </method>
   </methods>
 </class>

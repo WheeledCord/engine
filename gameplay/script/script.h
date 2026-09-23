@@ -12,6 +12,8 @@
 #include "core/transform.h"
 #include "gameplay/iso_move.h"
 #include "gameplay/runtime.h"
+#include "core/net_clock.h"
+#include "core/texture.h"
 #include "script_api.h"
 
 /* What the frontends share: the world, the classes scripts declared, and which entity's callback is
@@ -25,6 +27,8 @@
 #define SCRIPT_SHEET_CAPACITY 32
 #define SCRIPT_ADDED_CAPACITY 32 // calls a game may add on top of the engine's
 #define SCRIPT_CAMERA_CAPACITY 4
+#define SCRIPT_NETCLOCK_CAPACITY 4
+#define SCRIPT_TEXTURE_CAPACITY 16
 #define SCRIPT_AUDIO_CAPACITY 4
 #define SCRIPT_COLLISION_CAPACITY 4
 #define SCRIPT_PATHFINDER_CAPACITY 4
@@ -99,6 +103,14 @@ struct ScriptHost
     // Resource pools: generational handles for caller-owned engine services.
     ScriptResSlot cameraSlots[SCRIPT_CAMERA_CAPACITY];
     CoreCamera2D cameras[SCRIPT_CAMERA_CAPACITY];
+    /* A server's fixed tick and a client's view of where the server is. Both are plain state a
+       script can own, so they are handles like any other resource. */
+    ScriptResSlot netClockSlots[SCRIPT_NETCLOCK_CAPACITY];
+    CoreNetClock netClocks[SCRIPT_NETCLOCK_CAPACITY];
+    ScriptResSlot netInterpSlots[SCRIPT_NETCLOCK_CAPACITY];
+    CoreNetInterpolator netInterps[SCRIPT_NETCLOCK_CAPACITY];
+    ScriptResSlot textureSlots[SCRIPT_TEXTURE_CAPACITY];
+    Texture2D textures[SCRIPT_TEXTURE_CAPACITY];
     ScriptResSlot audioSlots[SCRIPT_AUDIO_CAPACITY];
     CoreAudio audios[SCRIPT_AUDIO_CAPACITY];
     bool audioInitialized[SCRIPT_AUDIO_CAPACITY];

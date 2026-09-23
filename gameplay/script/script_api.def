@@ -311,3 +311,51 @@ SCRIPT_BINDING(debug_rect, "debug-rect", SCRIPT_BOOL, "show a rectangle for so m
                (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_FLOAT))
 SCRIPT_BINDING(debug_text, "debug-text", SCRIPT_BOOL, "show text for so many seconds",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_FLOAT))
+
+// ---- networking: a server's fixed tick, and a client's view of where the server is
+SCRIPT_BINDING(net_clock_create, "net-clock-create", SCRIPT_RESOURCE,
+               "a server clock ticking at a rate, sending snapshots at a lower one",
+               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
+SCRIPT_BINDING(net_clock_destroy, "net-clock-destroy", SCRIPT_BOOL, "release a server clock",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(net_clock_advance, "net-clock-advance", SCRIPT_INT,
+               "add elapsed seconds; how many fixed steps are now due, at most the ceiling given",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT, SCRIPT_INT))
+SCRIPT_BINDING(net_clock_ticked, "net-clock-ticked", SCRIPT_INT,
+               "count one simulated step; the tick just run",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(net_clock_should_send, "net-clock-should-send?", SCRIPT_BOOL,
+               "is a snapshot due; true at most once per send interval",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(net_clock_tick, "net-clock-tick", SCRIPT_INT, "the current tick number",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(net_clock_now, "net-clock-now", SCRIPT_FLOAT,
+               "monotonic seconds, usable with no window open", (SCRIPT_NONE))
+SCRIPT_BINDING(net_interp_create, "net-interp-create", SCRIPT_RESOURCE,
+               "a client clock that draws the world far enough in the past to interpolate",
+               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
+SCRIPT_BINDING(net_interp_destroy, "net-interp-destroy", SCRIPT_BOOL, "release a client clock",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(net_interp_snapshot, "net-interp-snapshot", SCRIPT_BOOL,
+               "record the server tick of a snapshot as it arrives",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
+SCRIPT_BINDING(net_interp_advance, "net-interp-advance", SCRIPT_BOOL,
+               "move the drawn moment forward by elapsed seconds",
+               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT))
+SCRIPT_BINDING(net_interp_render_tick, "net-interp-render-tick", SCRIPT_FLOAT,
+               "the server tick to sample replicated objects at, fractional",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+
+// ---- textures: loading one, and letting go of it
+SCRIPT_BINDING(texture_load, "texture-load", SCRIPT_RESOURCE,
+               "load an image as a texture; mipmaps, filter and wrap follow the defaults",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(texture_load_smooth, "texture-load-smooth", SCRIPT_RESOURCE,
+               "the same, with bilinear filtering and generated mipmaps",
+               (SCRIPT_NONE, SCRIPT_STRING))
+SCRIPT_BINDING(texture_destroy, "texture-destroy", SCRIPT_BOOL, "release a texture",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(texture_width, "texture-width", SCRIPT_INT, "its width in pixels",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
+SCRIPT_BINDING(texture_height, "texture-height", SCRIPT_INT, "its height in pixels",
+               (SCRIPT_NONE, SCRIPT_RESOURCE))
