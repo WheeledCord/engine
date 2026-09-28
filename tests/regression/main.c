@@ -14,6 +14,7 @@
 #include "core/net_clock.h"
 #include "core/net_sync.h"
 #include "core/object.h"
+#include "core/audio.h"
 #include "core/sprite_sheet.h"
 #include "core/texture.h"
 #include "core/playback.h"
@@ -777,6 +778,11 @@ static void ScriptChecks(void)
     Check(ScriptS7Eval("(define au (make 'audio))", NULL) && EvalIs("(au 'add-bus! \"voice\" 0.5)", "#t") &&
               EvalIs("(au 'add-bus! \"voice\" 0.5)", "#f") && EvalIs("(au 'set-bus-muted! \"voice\" #t)", "#t"),
           "an audio service adds and mutes its own volume groups");
+    Check(ScriptS7Eval("(au 'set-listener! (list 0 0 0) (list 0 0 1) (list 0 1 0))", NULL) &&
+              EvalIs("(au 'play-sound-at! \"no-such.wav\" \"sfx\" (list 0 0 900) 10.0 1.0)", "#f") &&
+              !ScriptS7Eval("(make 'voice au \"no-such.wav\" \"sfx\")", NULL) &&
+              !ScriptS7Eval("(make 'voice (make 'timer) \"x.wav\" \"sfx\")", NULL),
+          "positional sound and voices are reachable from scripts, and refuse what cannot work");
 
     Check(EvalIs("(free! a)", "#t") && !EntityAlive(&world, entity),
           "freeing an entity takes it out of the world");
@@ -2360,6 +2366,74 @@ static void GameObjectChecks(void)
     GameplayWorldFree(&world);
 }
 
+// ---- positional audio: distance, pan, voices -------------------------------------------------
+static void AudioChecks(void)
+{
+    // Distance: full at the source, gone at the edge, linear between -- Godot's max_distance falloff.
+    Check(CoreAudioFalloff(0, 10) == 1.0f && fabsf(CoreAudioFalloff(5, 10) - 0.5f) < 1e-6f &&
+              CoreAudioFalloff(10, 10) == 0.0f && CoreAudioFalloff(25, 10) == 0.0f &&
+              CoreAudioFalloff(3, 0) == 1.0f,
+          "a sound falls off linearly to silence at its range, and a zero range never falls off");
+
+    CoreAudio audio;
+    CoreAudioInit(&audio);
+    CoreAudioSetListener(&audio, (Vector3){0, 0, 0}, (Vector3){0, 0, 1}, (Vector3){0, 1, 0});
+    // The engine's convention: facing +Z with +Y up, the listener's right is -X (core/README.md).
+    float right = CoreAudioPanAt(&audio, (Vector3){-5, 0, 0});
+    float left = CoreAudioPanAt(&audio, (Vector3){5, 0, 0});
+    float ahead = CoreAudioPanAt(&audio, (Vector3){0, 0, 5});
+    float above = CoreAudioPanAt(&audio, (Vector3){0, 5, 0});
+    Check(right < 0.5f && left > 0.5f && fabsf(ahead - 0.5f) < 1e-6f && fabsf(above - 0.5f) < 1e-6f &&
+              fabsf((right - 0.5f) + (left - 0.5f)) < 1e-6f,
+          "a sound to the listener's right pans right, left pans left, and ahead or overhead stays centred");
+    CoreAudioSetListener(&audio, (Vector3){0, 0, 0}, (Vector3){1, 0, 0}, (Vector3){0, 1, 0});
+    Check(CoreAudioPanAt(&audio, (Vector3){0, 0, 5}) < 0.5f && CoreAudioPanAt(&audio, (Vector3){0, 0, -5}) > 0.5f,
+          "panning follows the way the listener faces, not the world axes");
+    Check(fabsf(CoreAudioGainAt(&audio, (Vector3){3, 0, 4}, 10, 0.8f) - 0.4f) < 1e-6f,
+          "a placed sound's gain is its own gain times the falloff at its distance from the listener");
+
+    // Everything past here needs a real device and a real sound.
+    Wave wave = {.frameCount = 4410, .sampleRate = 44100, .sampleSize = 16, .channels = 1};
+    short *samples = calloc(wave.frameCount, sizeof *samples);
+    for (unsigned int i = 0; samples && i < wave.frameCount; i++)
+        samples[i] = (short)(8000 * sinf((float)i * 0.05f));
+    wave.data = samples;
+    char path[512];
+    snprintf(path, sizeof path, "%s", Scratch("regression_tone.wav"));
+    bool exported = samples && ExportWave(wave, path);
+    free(samples);
+    if (!exported || !CoreAudioLoadSound(&audio, path, "sfx"))
+    {
+        printf("  audio device unavailable: voice checks skipped\n");
+        CoreAudioFree(&audio);
+        return;
+    }
+    Check(CoreAudioPlaySoundGain(&audio, path, "sfx", 0.5f) &&
+              CoreAudioPlaySoundGain(&audio, path, "sfx", 0.5f) && CoreAudioSoundPlaying(&audio, path) &&
+              !CoreAudioPlaySoundGain(&audio, path, "no-such-bus", 1.0f),
+          "one sound plays over itself on separate voices, and an unknown bus is refused");
+    Check(!CoreAudioPlaySoundAt(&audio, path, "sfx", (Vector3){100, 0, 0}, 10, 1.0f) &&
+              CoreAudioPlaySoundAt(&audio, path, "sfx", (Vector3){2, 0, 0}, 10, 1.0f),
+          "a placed sound out of range is not started, and one in range is");
+    CoreAudioStopSound(&audio, path);
+    Check(!CoreAudioSoundPlaying(&audio, path), "stopping a sound stops every voice of it");
+
+    CoreAudioVoice voice = CoreAudioVoiceCreate(&audio, path, "sfx");
+    Check(CoreAudioVoiceValid(&audio, voice) && CoreAudioVoicePlayAt(&audio, voice, (Vector3){0, 0, 2}, 10, 1.0f) &&
+              CoreAudioVoicePlaying(&audio, voice),
+          "a held voice starts at a place");
+    Check(CoreAudioVoiceMove(&audio, voice, (Vector3){0, 0, 50}) && CoreAudioVoiceGain(&audio, voice) == 0.0f,
+          "moving a held voice out of range silences it");
+    CoreAudioVoiceSetLoop(&audio, voice, true);
+    CoreAudioVoiceStop(&audio, voice);
+    CoreAudioUpdate(&audio);
+    Check(!CoreAudioVoicePlaying(&audio, voice), "a stopped looping voice is not restarted by the update");
+    CoreAudioVoiceFree(&audio, voice);
+    Check(!CoreAudioVoiceValid(&audio, voice) && !CoreAudioVoicePlay(&audio, voice, 1.0f),
+          "a freed voice's handle is refused");
+    CoreAudioFree(&audio);
+}
+
 static void NetOwnershipChecks(void)
 {
     /* A listen server's client registry has localIsServer true and localActor its own player id
@@ -2446,6 +2520,7 @@ int main(int argc, char **argv)
     NetOwnershipChecks();
     ObjectChecks();
     GameObjectChecks();
+    AudioChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();
