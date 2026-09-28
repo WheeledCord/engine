@@ -137,6 +137,14 @@ CoreNetPeer CoreNetConnect(CoreNetEndpoint *endpoint, const char *hostname, uint
  * @return No value. */
 void CoreNetClose(CoreNetEndpoint *endpoint);
 
+/** @brief Ends one peer's connection.
+ * @param endpoint Open endpoint that owns peer.
+ * @param peer Local peer handle from connect or poll.
+ * @param afterQueued True to send everything already queued to the peer first, which needs the
+ * endpoint to keep being polled; false to say goodbye now, for an endpoint about to close.
+ * @return No value. A DISCONNECTED event for the peer follows. */
+void CoreNetDisconnect(CoreNetEndpoint *endpoint, CoreNetPeer peer, bool afterQueued);
+
 /** @brief Polls one connection or packet event.
  * @param endpoint Open endpoint.
  * @param timeoutMs Maximum milliseconds to wait; zero performs a nonblocking poll.

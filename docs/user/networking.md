@@ -1,48 +1,60 @@
 # Networking
 
-`core/network.h` supplies a small message transport over vendored ENet. The engine owns connection
-management, peer handles, channels, reliable delivery, and sequenced unreliable delivery.
-`core/net_sync.h` optionally adds declarative object state replication. A project declares what its
-state means and remains responsible for its game rules.
+A game says what is shared and what it means; the engine does the rest. `core/net_session.h` hosts
+and joins games, `core/net_sync.h` holds the replicated objects, `core/net_clock.h` keeps the server
+tick and the client's interpolation clock, and `core/network.h` is the ENet transport under all of
+them.
 
-Open a server and poll it without blocking the game loop:
-
-```c
-CoreNetEndpoint server = {0};
-if (!CoreNetOpenServer(&server, 27960, 8, 2))
-    return false;
-
-CoreNetEvent event;
-while (CoreNetPoll(&server, 0, &event))
-{
-    if (event.type == CORE_NET_EVENT_RECEIVED)
-        ReadProjectMessage(event.peer, event.data, event.size);
-    CoreNetEventFree(&event);
-}
-```
-
-A client opens its endpoint separately and receives a connection event asynchronously:
+## A session
 
 ```c
-CoreNetEndpoint client = {0};
-if (!CoreNetOpenClient(&client, 2))
-    return false;
-CoreNetPeer server = CoreNetConnect(&client, "127.0.0.1", 27960);
+static const CoreNetSessionConfig config = {
+    .game = "my-game", .version = 3,        /* a joiner that differs is refused, with the reason */
+    .registerSchemas = RegisterSchemas,     /* the same schemas on every machine */
+    .started = SpawnWorld,                  /* server: objects the server owns */
+    .writeWelcome = WriteSeed,              /* server: what a joiner needs to build the world */
+    .readWelcome = ReadSeed,                /* joiner: build it, then CoreNetSessionReady */
+    .joined = SpawnPlayer,                  /* server: a player is in; spawn what he owns */
+    .command = HandleCommand,               /* server: a player asks for something */
+    .event = HandleEvent,                   /* player: the server says something happened */
+};
+
+CoreNetSession session = {0};
+CoreNetSessionHost(&session, &config, 7431, true);          /* host with a player of our own */
+/* or */ CoreNetSessionJoin(&session, &config, "10.0.0.2", 7431);
+
+/* every frame */
+CoreNetSessionStep(&session, dt, 0);
 ```
 
-Use reliable delivery for messages that must arrive, such as joining, spawning, inventory changes,
-or chat. Use unreliable delivery for frequent state snapshots that replace older snapshots. Keeping
-these message classes on separate channels prevents their ordering from interfering with each other.
+The host is the server. It keeps one registry, its own player is actor 1 in it like anyone else, and
+nothing goes through a socket to itself: `CoreNetSessionCommand` on the host runs the server's
+command handler in the call, the same handler a joiner's command reaches, and an event addressed to
+the host's player is delivered in the call as well. Netcode for GameObjects handles a host's
+ServerRpc the same way. A dedicated server is `CoreNetSessionHost(..., false)`: no player of its own.
 
-Every event produced by `CoreNetPoll` must be passed to `CoreNetEventFree`, including connection and
-error events. Received packet storage remains valid until that call. Peer handles are local to one
-endpoint and become invalid on disconnect. Close each successfully opened endpoint with
-`CoreNetClose`.
+Joining is three steps, as id Tech 3's connected / primed / active: the joiner connects and says
+which engine protocol, game and version it runs; the server refuses a mismatch with a reason
+(`session.refusal`, `CoreNetRefusalText`) or welcomes it with an actor number and the game's welcome
+data; the joiner builds its world from that and calls `CoreNetSessionReady`, and only then is it
+`joined` and sent snapshots. A player who leaves takes the objects he owned with him.
 
-Do not transmit C structs directly: padding, byte order, and revisions make them an unstable wire
-format. Give the project protocol a magic value and version, encode fields explicitly, validate every
-length and finite numeric value, and reject unknown messages. Keep snapshots comfortably below the
-path MTU where practical even though ENet can fragment larger messages.
+Each frame `CoreNetSessionStep` handles what arrived, runs every replicated object's serialize
+callback in the direction ownership says (see below), and sends what is due: the server a delta
+snapshot per player at the send rate, a player its own objects at the upload rate.
+
+Commands and events:
+
+- `CoreNetSessionCommand(session, op, object, payload, size)` asks the server to do something and
+  returns a sequence number. Every snapshot says the highest sequence handled for that player, and it
+  never goes backwards, so `CoreNetSessionCommandDone(session, sequence)` tells a refusal from a slow
+  reply. A game that shows the result early -- an item where the player put it -- keeps showing its
+  own version until the command is done, then takes the server's.
+- `CoreNetSessionEvent(session, actor, op, object, payload, size)` is the server telling one player,
+  or `CORE_NET_EVERYONE`, that something happened. Events are reliable.
+
+`CoreNetSessionIsMine(session, object)` answers "does this machine decide it". The server decides
+the objects it owns; a player decides the objects it owns; everyone else reads them.
 
 ## Replicated objects
 
@@ -86,8 +98,8 @@ the accepted simulation and emits snapshots at a fixed rate. Render remote entit
 snapshot history so packet timing does not become visible motion jitter. Prediction and reconciliation
 are project policy because they depend on the project's movement and collision rules.
 
-The package does not provide matchmaking, authentication, encryption, NAT traversal, RPCs, delta
-compression, interest management, prediction, reconciliation, or lag compensation.
+The engine does not provide matchmaking, authentication, encryption, NAT traversal, interest
+management, prediction, reconciliation, or lag compensation.
 
 ## Two rates, and drawing in the past
 
@@ -174,8 +186,8 @@ different packets cannot share a baseline, which is why id Tech 3 keeps its back
 
 ## What is still missing
 
-There is no client-side prediction of the local player, so a player moves at the speed of a round
-trip; no reconciliation, no numbered input commands, and no server movement authority -- the server
-accepts the position a client claims, checked only for sanity. There is no lag compensation, no
-interest management, no protocol version handshake, and no encryption. See NETWORKING.md at the
-repository root for the full list and what each one blocks.
+There is no client-side prediction of a player's own movement against the server and no
+reconciliation: the server accepts the state a player publishes about his own body, checked by the
+game's `accept` callback. There is no lag compensation, no interest management (every player is sent
+every object), no encryption and no authentication. Scripts cannot host or join yet; networking is
+C only.
