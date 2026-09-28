@@ -32,6 +32,19 @@ static const CoreNetSchema *Schema(const CoreNetSync *sync, uint16_t type)
     return NULL;
 }
 
+/* One rule for "is this mine," used both when a snapshot arrives and when deciding which way to
+   serialize -- so a listen server's client half and server half can never disagree about one of
+   its own objects. Server authority follows localIsServer; owner authority follows localActor,
+   and owner zero means the room or the server, never a player. */
+static bool LocallyOwned(const CoreNetSync *sync, const CoreNetObject *object)
+{
+    if (!sync || !object || !object->active || !object->schema)
+        return false;
+    if (object->schema->authority == CORE_NET_AUTHORITY_SERVER)
+        return sync->localIsServer;
+    return object->owner != 0 && object->owner == sync->localActor;
+}
+
 bool CoreNetSyncInit(CoreNetSync *sync, size_t objectCapacity, size_t schemaCapacity)
 {
     if (!sync || sync->ready || !objectCapacity || objectCapacity > UINT16_MAX || !schemaCapacity)
@@ -127,16 +140,20 @@ void CoreNetSyncFree(CoreNetSync *sync)
 bool CoreNetSyncRegister(CoreNetSync *sync, const CoreNetSchema *schema)
 {
     if (!sync || !sync->ready || !schema || !schema->type || !schema->name || !schema->stateSize ||
-        !schema->fields || !schema->fieldCount || sync->schemaCount == sync->schemaCapacity ||
-        Schema(sync, schema->type))
+        schema->stateSize > CORE_NET_STATE_MAX || !schema->fields || !schema->fieldCount ||
+        sync->schemaCount == sync->schemaCapacity || Schema(sync, schema->type))
         return false;
+    const unsigned int allowedFlags =
+        CORE_NET_FIELD_INTERPOLATED | CORE_NET_FIELD_SYNC | CORE_NET_FIELD_SPAWN;
     for (size_t i = 0; i < schema->fieldCount; i++)
     {
         const CoreNetField *field = &schema->fields[i];
         size_t expected = FieldSize(field->type);
         if (!field->name || !expected || field->size != expected || field->offset > schema->stateSize ||
             expected > schema->stateSize - field->offset ||
-            (field->flags & ~CORE_NET_FIELD_INTERPOLATED) ||
+            (field->flags & ~allowedFlags) ||
+            /* SYNC (every time) and SPAWN (once, ever) are contradictory promises about the wire. */
+            ((field->flags & CORE_NET_FIELD_SYNC) && (field->flags & CORE_NET_FIELD_SPAWN)) ||
             ((field->flags & CORE_NET_FIELD_INTERPOLATED) && field->type != CORE_NET_F32 &&
              field->type != CORE_NET_VECTOR2 && field->type != CORE_NET_VECTOR3))
             return false;
@@ -490,9 +507,9 @@ bool CoreNetSyncRead(CoreNetSync *sync, CoreNetReader *reader, uint32_t *tick)
         else
         {
             memcpy(incoming[i].previous, incoming[i].state, incoming[i].schema->stateSize);
-            incoming[i].previousTick = sync->tick;
+            incoming[i].previousTick = incomingTick;
         }
-        incoming[i].currentTick = sync->tick;
+        incoming[i].currentTick = incomingTick;
         incoming[i].active = true;
     }
     if (scan.at != scan.size)
@@ -523,10 +540,7 @@ bool CoreNetSyncRead(CoreNetSync *sync, CoreNetReader *reader, uint32_t *tick)
             continue;
         /* Ours to decide: keep what we have and ignore what we were told about it. Server-owned
            objects are ours when this machine runs the server; a player's own body is his. */
-        bool mine = existing->schema->authority == CORE_NET_AUTHORITY_SERVER
-                        ? sync->localIsServer
-                        : (existing->owner && existing->owner == sync->localActor);
-        if (mine)
+        if (LocallyOwned(sync, existing))
         {
             memcpy(incoming[i].state, existing->state, existing->schema->stateSize);
             memcpy(incoming[i].previous, existing->state, existing->schema->stateSize);
@@ -774,16 +788,9 @@ bool CoreNetSyncWriteDelta(const CoreNetSync *sync, uint32_t tick, uint32_t base
     return !writer->failed;
 }
 
-bool CoreNetObjectIsMine(const CoreNetObject *object, uint16_t localActor)
+bool CoreNetSyncIsMine(const CoreNetSync *sync, const CoreNetObject *object)
 {
-    /* Owner zero means the server owns it, and actor zero means you are the server -- so the one
-       comparison answers for both. A schema declaring CORE_NET_AUTHORITY_SERVER is server-owned by
-       definition, whatever owner was stamped on the object. */
-    if (!object || !object->active || !object->schema)
-        return false;
-    if (object->schema->authority == CORE_NET_AUTHORITY_SERVER)
-        return localActor == CORE_NET_SERVER_ACTOR;
-    return object->owner == localActor;
+    return LocallyOwned(sync, object);
 }
 
 bool CoreNetSyncDirty(CoreNetSync *sync, uint32_t id)
@@ -812,13 +819,17 @@ size_t CoreNetSyncSerialize(CoreNetSync *sync, uint16_t localActor, double rende
 {
     if (!sync || !sync->ready)
         return 0;
+    /* The ownership rule reads localActor from the sync, not a parameter, so the read path and
+       this path can never disagree; this keeps it current for callers that never call
+       CoreNetSyncSetLocalActor and just pass their actor id here every frame. */
+    sync->localActor = localActor;
     size_t ran = 0;
     for (size_t i = 0; i < sync->objectCapacity; i++)
     {
         CoreNetObject *object = &sync->objects[i];
         if (!object->active || !object->serialize || !object->schema)
             continue;
-        if (CoreNetObjectIsMine(object, localActor))
+        if (LocallyOwned(sync, object))
         {
             /* Ours: the live game is the truth, and the replicated copy is brought up to it. */
             object->serialize(object->serializeUser, object->state, true);
@@ -828,7 +839,7 @@ size_t CoreNetSyncSerialize(CoreNetSync *sync, uint16_t localActor, double rende
             /* Somebody else's: sample it at the moment being drawn, then hand that to the game.
                Sampling into a scratch copy rather than the object keeps the two snapshots the
                interpolation runs between intact. */
-            unsigned char scratch[512];
+            unsigned char scratch[CORE_NET_STATE_MAX];
             if (object->schema->stateSize > sizeof scratch)
                 continue;
             if (!CoreNetObjectSampleAt(object, renderTick, scratch))

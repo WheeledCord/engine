@@ -1937,6 +1937,104 @@ static void NetDeltaChecks(void)
     Check(!CoreNetSyncDirty(&marked, 999), "marking an object that is not there fails");
     CoreNetSyncFree(&marked);
 
+    /* STREAM and ONCE are the documented macros for a steady interpolation feed and a
+       decided-once value; both must register, and a field cannot claim both jobs at once. */
+    typedef struct NetFlagState
+    {
+        float tracked;
+        int32_t born;
+    } NetFlagState;
+    const CoreNetField streamFields[] = {
+        CORE_NET_FIELD_STREAM(NetFlagState, tracked, CORE_NET_F32),
+    };
+    const CoreNetSchema streamSchema = {20, "stream", sizeof(NetFlagState), streamFields, 1,
+                                        CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync streamSync = {0};
+    Check(CoreNetSyncInit(&streamSync, 4, 2) && CoreNetSyncRegister(&streamSync, &streamSchema),
+          "a schema using CORE_NET_FIELD_STREAM registers");
+    CoreNetSyncFree(&streamSync);
+
+    const CoreNetField onceFields[] = {
+        CORE_NET_FIELD_ONCE(NetFlagState, born, CORE_NET_I32),
+    };
+    const CoreNetSchema onceSchema = {21, "once", sizeof(NetFlagState), onceFields, 1,
+                                      CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync onceSync = {0};
+    Check(CoreNetSyncInit(&onceSync, 4, 2) && CoreNetSyncRegister(&onceSync, &onceSchema),
+          "a schema using CORE_NET_FIELD_ONCE registers");
+    CoreNetSyncFree(&onceSync);
+
+    CoreNetField badField = CORE_NET_FIELD(NetFlagState, born, CORE_NET_I32);
+    badField.flags = CORE_NET_FIELD_SYNC | CORE_NET_FIELD_SPAWN;
+    const CoreNetField badFields[] = {badField};
+    const CoreNetSchema badSchema = {22, "bad", sizeof(NetFlagState), badFields, 1,
+                                     CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync badSync = {0};
+    Check(CoreNetSyncInit(&badSync, 4, 2) && !CoreNetSyncRegister(&badSync, &badSchema),
+          "a field cannot be marked both SYNC and SPAWN at once");
+    CoreNetSyncFree(&badSync);
+
+    /* Behaviour: an unchanged SYNC field still rides every delta; an unchanged SPAWN field rides
+       only the first snapshot that ever mentions the object. */
+    const CoreNetField mixedFields[] = {
+        CORE_NET_FIELD_STREAM(NetFlagState, tracked, CORE_NET_F32),
+        CORE_NET_FIELD_ONCE(NetFlagState, born, CORE_NET_I32),
+    };
+    const CoreNetSchema mixedSchema = {23, "mixed", sizeof(NetFlagState), mixedFields, 2,
+                                       CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync mixedServer = {0}, mixedClient = {0};
+    Check(CoreNetSyncInit(&mixedServer, 4, 2) && CoreNetSyncRegister(&mixedServer, &mixedSchema) &&
+              CoreNetSyncInit(&mixedClient, 4, 2) && CoreNetSyncRegister(&mixedClient, &mixedSchema),
+          "STREAM/ONCE registries start");
+    CoreNetObject *mixedObject = CoreNetSyncSpawn(&mixedServer, 1, 23, 0);
+    Check(mixedObject != NULL, "the mixed-flags object spawns");
+    ((NetFlagState *)mixedObject->state)->tracked = 1.0f;
+    ((NetFlagState *)mixedObject->state)->born = 5;
+
+    unsigned char mixedFull[512];
+    CoreNetWriter mixedWriter = CoreNetWriterBegin(mixedFull, sizeof mixedFull);
+    Check(CoreNetSyncWrite(&mixedServer, 30, &mixedWriter), "the first mixed-flags snapshot writes");
+    Check(CoreNetSyncRemember(&mixedServer, 30), "the sender remembers it");
+    CoreNetReader mixedReader = CoreNetReaderBegin(mixedFull, mixedWriter.size);
+    uint32_t mixedTick = 0;
+    Check(CoreNetSyncRead(&mixedClient, &mixedReader, &mixedTick), "the client applies it");
+
+    unsigned char mixedDelta[512];
+    mixedWriter = CoreNetWriterBegin(mixedDelta, sizeof mixedDelta);
+    Check(CoreNetSyncWriteDelta(&mixedServer, 31, 30, &mixedWriter),
+          "an unchanged mixed-flags delta writes");
+    CoreNetReader raw = CoreNetReaderBegin(mixedDelta, mixedWriter.size);
+    uint32_t rawMagic, rawTick, rawBaseline, rawId;
+    uint16_t rawCount, rawRemoved, rawType, rawOwner;
+    uint8_t mask = 0;
+    Check(CoreNetReadU32(&raw, &rawMagic) && CoreNetReadU32(&raw, &rawTick) &&
+              CoreNetReadU32(&raw, &rawBaseline) && CoreNetReadU16(&raw, &rawCount) &&
+              CoreNetReadU16(&raw, &rawRemoved) && rawCount == 1 && rawRemoved == 0 &&
+              CoreNetReadU32(&raw, &rawId) && CoreNetReadU16(&raw, &rawType) &&
+              CoreNetReadU16(&raw, &rawOwner) && CoreNetReadU8(&raw, &mask),
+          "the unchanged delta's header and mask byte are read back");
+    Check((mask & 1u) != 0, "an unchanged SYNC field still rides every delta");
+    Check((mask & 2u) == 0, "an unchanged SPAWN field is left out after the first snapshot");
+    CoreNetSyncFree(&mixedServer);
+    CoreNetSyncFree(&mixedClient);
+
+    /* A state larger than the serializer's scratch buffer must be refused at registration, not
+       silently dropped every frame at runtime. */
+    const CoreNetField sizeField[] = {
+        {.name = "byte", .type = CORE_NET_U8, .offset = 0, .size = 1, .flags = 0},
+    };
+    const CoreNetSchema tooBigSchema = {24, "toobig", CORE_NET_STATE_MAX + 1, sizeField, 1,
+                                        CORE_NET_AUTHORITY_SERVER, 0};
+    const CoreNetSchema atMaxSchema = {25, "atmax", CORE_NET_STATE_MAX, sizeField, 1,
+                                       CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync sizeSync = {0};
+    Check(CoreNetSyncInit(&sizeSync, 4, 2), "a size-limit registry starts");
+    Check(!CoreNetSyncRegister(&sizeSync, &tooBigSchema),
+          "a schema larger than CORE_NET_STATE_MAX is refused at registration");
+    Check(CoreNetSyncRegister(&sizeSync, &atMaxSchema),
+          "a schema exactly at CORE_NET_STATE_MAX registers");
+    CoreNetSyncFree(&sizeSync);
+
     CoreNetSyncFree(&server);
     CoreNetSyncFree(&client);
     CoreNetSyncFree(&fresh);
@@ -2136,6 +2234,8 @@ static void NetSyncChecks(void)
               received->position.z == 6 && received->yaw == 0.5f && received->health == 80 &&
               received->carrying,
           "replication creates remote objects and applies every described field");
+    Check(copy->currentTick == 11 && copy->previousTick == 11,
+          "a freshly seen object is stamped with the snapshot's own tick, not the registry's previous one");
 
     *received = (NetTestState){{3, 5, 7}, 0.75f, 70, false};
     writer = CoreNetWriterBegin(packet, sizeof packet);
@@ -2165,6 +2265,13 @@ static void NetSyncChecks(void)
               sampled.position.y == 6.5f && sampled.position.z == 8.5f && sampled.yaw == 1.125f &&
               sampled.health == 35 && !sampled.carrying,
           "replication interpolates marked fields and applies discrete fields immediately");
+    Check(copy->previousTick == 11 && copy->currentTick == 12,
+          "a later snapshot moves previousTick to the last one and currentTick to its own, not both to the old one");
+    NetTestState atLatest = {0};
+    Check(CoreNetObjectSampleAt(copy, 12.0, &atLatest) && atLatest.position.x == 6.0f &&
+              atLatest.position.y == 8.0f && atLatest.position.z == 10.0f && atLatest.yaw == 1.5f &&
+              atLatest.health == 35 && !atLatest.carrying,
+          "sampling exactly at the newest tick returns its state, not a blend with the old one");
 
     NetTestState before = *(NetTestState *)copy->state;
     reader = CoreNetReaderBegin(packet, writer.size - 1);
@@ -2180,6 +2287,60 @@ static void NetSyncChecks(void)
           "a complete snapshot removes objects that no longer exist");
     CoreNetSyncFree(&client);
     CoreNetSyncFree(&server);
+}
+
+static void NetOwnerRecordCall(void *user, void *state, bool writing)
+{
+    bool *record = (bool *)user;   /* record[0] = called, record[1] = writing */
+    record[0] = true;
+    record[1] = writing;
+    (void)state;
+}
+
+static void NetOwnershipChecks(void)
+{
+    /* A listen server's client registry has localIsServer true and localActor its own player id
+       (not zero), so the read path's "is this mine" and CoreNetSyncSerialize's must agree, or the
+       host reads its own old snapshots back over the live world it is simulating. */
+    const CoreNetField fields[] = {
+        CORE_NET_FIELD(NetTestState, health, CORE_NET_I32),
+    };
+    const CoreNetSchema serverSchema = {30, "hostmine", sizeof(NetTestState), fields, 1,
+                                        CORE_NET_AUTHORITY_SERVER, 0};
+    const CoreNetSchema ownerSchema = {31, "ownermine", sizeof(NetTestState), fields, 1,
+                                       CORE_NET_AUTHORITY_OWNER, 0};
+    CoreNetSync sync = {0};
+    Check(CoreNetSyncInit(&sync, 4, 2) && CoreNetSyncRegister(&sync, &serverSchema) &&
+              CoreNetSyncRegister(&sync, &ownerSchema),
+          "ownership registry starts with a server-authority and an owner-authority schema");
+
+    CoreNetObject *serverObject = CoreNetSyncSpawn(&sync, 1, 30, 0);
+    Check(serverObject != NULL, "the server-authority object spawns");
+
+    bool record[2] = {false, false};
+    Check(CoreNetSyncObserve(&sync, 1, NetOwnerRecordCall, record),
+          "a callback attaches to the server-authority object");
+
+    CoreNetSyncSetLocalActor(&sync, 3, true);   /* a listen-server host whose player is actor 3 */
+    Check(CoreNetSyncSerialize(&sync, 3, 0.0) == 1 && record[0] && record[1],
+          "a listen-server host writes its own server-authority object instead of reading it back");
+
+    Check(CoreNetSyncIsMine(&sync, serverObject),
+          "CoreNetSyncIsMine agrees: the host owns the server object it also runs");
+    CoreNetSyncSetLocalActor(&sync, 3, false);
+    Check(!CoreNetSyncIsMine(&sync, serverObject),
+          "a plain client with the same actor id does not own that server object");
+
+    CoreNetObject *mineObject = CoreNetSyncSpawn(&sync, 2, 31, 3);
+    CoreNetObject *otherObject = CoreNetSyncSpawn(&sync, 3, 31, 4);
+    Check(mineObject && otherObject, "two owner-authority objects spawn for two different owners");
+    CoreNetSyncSetLocalActor(&sync, 3, false);
+    Check(CoreNetSyncIsMine(&sync, mineObject), "client 3 owns the owner-authority object it owns");
+    Check(!CoreNetSyncIsMine(&sync, otherObject),
+          "client 3 does not own another actor's owner-authority object");
+    Check(!CoreNetSyncIsMine(&sync, NULL), "a null object is never mine");
+
+    CoreNetSyncFree(&sync);
 }
 
 int main(int argc, char **argv)
@@ -2218,6 +2379,7 @@ int main(int argc, char **argv)
     NetClockChecks();
     NetDeltaChecks();
     NetSyncChecks();
+    NetOwnershipChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

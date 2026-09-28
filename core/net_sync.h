@@ -27,9 +27,6 @@
    in an object's first, full state: a thing that is decided once and never changes. */
 #define CORE_NET_FIELD_SYNC  2u
 #define CORE_NET_FIELD_SPAWN 4u
-/* Only the owner and the server may see it. Netcode for GameObjects' NetworkVariableReadPermission;
-   Godot's visibility filters do the same job per object. */
-#define CORE_NET_FIELD_OWNER_ONLY 8u
 /* How many sent snapshots each side remembers, so a delta can name one of them as its baseline.
    id Tech 3 keeps 32 (PACKET_BACKUP) and refuses a baseline older than PACKET_BACKUP - 3, which at
    20 snapshots a second is well over a second of loss before a full snapshot is forced. */
@@ -94,6 +91,8 @@ typedef struct CoreNetField
    forgotten mark is a field that silently stops replicating: a worse fault than the work saved.
    So it is asked for, per schema, by a game that has made every mutation go through one place. */
 #define CORE_NET_SCHEMA_EXPLICIT_DIRTY 1u
+/* The largest stateSize CoreNetSyncSerialize's scratch buffer can sample a remote object into. */
+#define CORE_NET_STATE_MAX 512
 
 typedef struct CoreNetSchema
 {
@@ -257,12 +256,10 @@ bool CoreNetCommandRead(CoreNetReader *reader, CoreNetCommand *command);
 bool CoreNetCommandAccept(uint32_t *lastSequence, uint32_t sequence);
 
 /** @brief Says whether this machine is the one that decides an object's state.
- * @param object Borrowed object; NULL answers false.
- * @param localActor This machine's actor id, or CORE_NET_SERVER_ACTOR on the machine running the
- * server.
- * @return True when the object is owned here, so this machine writes it and everyone else reads.
- * A schema declaring CORE_NET_AUTHORITY_SERVER is the server's wherever it is asked. */
-bool CoreNetObjectIsMine(const CoreNetObject *object, uint16_t localActor);
+ * @param sync Registry holding this machine's localActor and localIsServer.
+ * @param object Borrowed object; NULL or inactive answers false.
+ * @return True when the object is owned here, so this machine writes it and everyone else reads. */
+bool CoreNetSyncIsMine(const CoreNetSync *sync, const CoreNetObject *object);
 
 /** @brief Points a replicated object at the game's own variable, so no copy is needed.
  *
