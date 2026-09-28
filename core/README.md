@@ -8,6 +8,9 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   Camera, audio, collision world, network clocks, texture and timer each declare their type in
   their own file.
 - `timer`: a countdown object that emits `timeout`, then starts again unless it is one-shot.
+- `waypoints`: a fixed-capacity point graph -- up to 256 points, 8 links each -- with shortest-path
+  queries by summed straight-line edge distance (A*, as Godot's AStar3D). A project builds its own
+  graph over it; `next-hop` and `path` answer the route between two of its points.
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
   A project that declares nothing boots with no probe and no shader compiled; declaring
   `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.
