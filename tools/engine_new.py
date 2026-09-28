@@ -59,9 +59,8 @@ static bool Init(GameplayRuntime *runtime)
 static bool Update(GameplayRuntime *runtime, double dt, const EngineInput *input)
 {
     (void)runtime;
-    (void)dt;
     ScriptS7Repl(&host); // anything typed at the terminal, against the running world
-    ScriptHostFlush(&host);
+    ScriptHostStep(&host, (float)dt); // timers, movers and the rest of what scripts made
     return !input->pressed[KEY_ESCAPE];
 }
 
@@ -95,17 +94,18 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
 }
 '''
 
-SCHEME_SCRIPT = '''; %(name)s. Every call here comes from the engine's binding table.
+SCHEME_SCRIPT = '''; %(name)s. Each callback is handed its entity as `self`: (self 'position) reads a property,
+; (self 'think-next!) calls a method, and (set! (self 'position) (vec 0 0)) writes one.
 
-(define (thing-spawn)
-  (think-next))
+(define (thing-spawn self)
+  (self 'think-next!))
 
-(define (thing-think)
-  (move-world! (vec* (input-vector) (* 200 (dt))))
-  (think-next))
+(define (thing-think self)
+  (self 'move-world! (vec* (input-vector) (* 200 (dt))))
+  (self 'think-next!))
 
-(define (thing-draw)
-  (draw-rect (interpolated) (vec 32 32) (rgba 102 191 255 255)))
+(define (thing-draw self)
+  (draw-rect (self 'drawn-position) (vec 32 32) (rgba 102 191 255 255)))
 
 (define-entity "thing"
   '()

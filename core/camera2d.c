@@ -68,3 +68,73 @@ Vector2 CoreCamera2DScreenToWorld(const CoreCamera2D *camera, float alpha, Vecto
     return (Vector2){position.x + (screen.x - camera->viewport.x * .5f) / camera->zoom,
                      position.y + (screen.y - camera->viewport.y * .5f) / camera->zoom};
 }
+
+// ---- as an engine type ---------------------------------------------------------------------------
+static bool CameraCreate(EngineCall *call)
+{
+    *(CoreCamera2D *)call->data = CoreCamera2DDefault();
+    return true;
+}
+static bool CameraSetViewport(void *object, const EngineValue *value)
+{
+    CoreCamera2DSetViewport(object, value->as.vector2);
+    return true;
+}
+static bool CameraGetViewport(const void *object, EngineValue *out)
+{
+    *out = EngineVector2(((const CoreCamera2D *)object)->viewport);
+    return true;
+}
+static bool CameraFollow(EngineCall *call)
+{
+    CoreCamera2DFollow(call->data, call->arguments[0].as.vector2, call->arguments[1].as.number);
+    return true;
+}
+static bool CameraWorldToScreen(EngineCall *call)
+{
+    call->result = EngineVector2(
+        CoreCamera2DWorldToScreen(call->data, call->objects->alpha, call->arguments[0].as.vector2));
+    return true;
+}
+static bool CameraScreenToWorld(EngineCall *call)
+{
+    call->result = EngineVector2(
+        CoreCamera2DScreenToWorld(call->data, call->objects->alpha, call->arguments[0].as.vector2));
+    return true;
+}
+static bool CameraInterpolated(EngineCall *call)
+{
+    call->result = EngineVector2(CoreCamera2DInterpolated(call->data, call->objects->alpha));
+    return true;
+}
+static const EngineProperty cameraProperties[] = {
+    ENGINE_FIELD("position", CoreCamera2D, position, ENGINE_VECTOR2, ENGINE_PROPERTY_SAVE,
+                 "the world point at the centre of the view"),
+    ENGINE_FIELD("zoom", CoreCamera2D, zoom, ENGINE_FLOAT, ENGINE_PROPERTY_SAVE, "magnification"),
+    ENGINE_FIELD("follow-rate", CoreCamera2D, followRate, ENGINE_FLOAT, 0,
+                 "how quickly follow! closes the gap, per second; zero snaps"),
+    ENGINE_FIELD("clamp-bounds", CoreCamera2D, clampBounds, ENGINE_BOOL, 0,
+                 "keep the view inside its bounds"),
+    ENGINE_COMPUTED("viewport", ENGINE_VECTOR2, 0, CameraGetViewport, CameraSetViewport,
+                    "the screen size used for world and screen conversion"),
+};
+static const EngineMethod cameraMethods[] = {
+    {"follow!", ENGINE_NONE, {ENGINE_VECTOR2, ENGINE_FLOAT}, 2, CameraFollow,
+     "move toward a target over dt seconds"},
+    {"world->screen", ENGINE_VECTOR2, {ENGINE_VECTOR2}, 1, CameraWorldToScreen,
+     "a world point in screen pixels, as drawn this frame"},
+    {"screen->world", ENGINE_VECTOR2, {ENGINE_VECTOR2}, 1, CameraScreenToWorld,
+     "screen pixels as a world point, as drawn this frame"},
+    {"interpolated", ENGINE_VECTOR2, {ENGINE_NONE}, 0, CameraInterpolated,
+     "where the camera is drawn this frame, between steps"},
+};
+const EngineType CoreCamera2DType = {
+    .name = "camera2d",
+    .size = sizeof(CoreCamera2D),
+    .properties = cameraProperties,
+    .propertyCount = sizeof cameraProperties / sizeof cameraProperties[0],
+    .methods = cameraMethods,
+    .methodCount = sizeof cameraMethods / sizeof cameraMethods[0],
+    .create = CameraCreate,
+    .help = "a 2D camera that follows, clamps and converts between world and screen",
+};

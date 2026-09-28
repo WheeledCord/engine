@@ -4,6 +4,7 @@
 #ifndef CORE_CAMERA2D_H
 #define CORE_CAMERA2D_H
 
+#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 
@@ -62,4 +63,8 @@ Vector2 CoreCamera2DWorldToScreen(const CoreCamera2D *camera, float alpha, Vecto
  * @return World-space point.
  */
 Vector2 CoreCamera2DScreenToWorld(const CoreCamera2D *camera, float alpha, Vector2 screen);
+/* The camera as an engine type, "camera2d": position, zoom, viewport, follow-rate and
+   clamp-bounds; follow!, world->screen, screen->world and interpolated. */
+extern const EngineType CoreCamera2DType;
+
 #endif

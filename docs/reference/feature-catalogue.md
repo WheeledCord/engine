@@ -39,7 +39,9 @@ linked guide explains authoring where one exists.
 | Gameplay | Entity-count diagnostic bridge | `gameplay/debug.h` |
 | Gameplay | Core application adapter | `gameplay/runtime.h` |
 | Gameplay | A* routing and movement over the isometric hex grid | `gameplay/iso_move.h` |
-| Scripting | Scheme binding table and scripted entities | `gameplay/script/script.h`; [scripting guide](../user/scripting.md) |
+| Objects | Types described once as properties, methods and signals; a pool of generational handles; signal connections | `core/object.h` |
+| Objects | A timer that emits timeout | `core/timer.h` |
+| Scripting | Scheme: engine objects as values, scripted entities, free-standing calls | `gameplay/script/script.h`; [scripting guide](../user/scripting.md) |
 
 ## Not provided yet
 

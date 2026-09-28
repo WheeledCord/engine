@@ -4,6 +4,7 @@
 
 #ifndef GAMEPLAY_SCRIPT_API_H
 #define GAMEPLAY_SCRIPT_API_H
+#include "core/object.h"
 #include "gameplay/entity.h"
 #include <stdint.h>
 
@@ -12,49 +13,18 @@
    the result back. Nothing here knows about a particular language, and a new call is one row in
    script_api.def rather than a change in each frontend. */
 
-typedef enum ScriptType
-{
-    SCRIPT_NONE,
-    SCRIPT_BOOL,
-    SCRIPT_INT,
-    SCRIPT_FLOAT,
-    SCRIPT_VECTOR2,
-    SCRIPT_VECTOR3,
-    SCRIPT_STRING,
-    SCRIPT_ENTITY,   // an entity handle, as the script sees it: see ScriptEntityId
-    SCRIPT_RESOURCE  // a generational resource handle: see ScriptResourceKind
-} ScriptType;
-
-/* Resource kinds for the generational handle system. Each kind owns a fixed-capacity pool in
-   ScriptHost. A handle packs kind, index and generation so a stale or mistyped handle is rejected
-   without reaching freed memory. Zero is the null handle. */
-typedef enum ScriptResourceKind
-{
-    SCRIPT_RES_CAMERA2D,
-    SCRIPT_RES_AUDIO,
-    SCRIPT_RES_COLLISION,
-    SCRIPT_RES_PATHFINDER,
-    SCRIPT_RES_MOVER,
-    SCRIPT_RES_NETCLOCK,
-    SCRIPT_RES_NETINTERP,
-    SCRIPT_RES_TEXTURE,
-    SCRIPT_RES_KIND_COUNT
-} ScriptResourceKind;
-
-typedef struct ScriptValue
-{
-    ScriptType type;
-    union
-    {
-        bool boolean;
-        int integer;
-        float number;
-        Vector2 vector2;
-        Vector3 vector3;
-        const char *string; // borrowed for the length of the call
-        int entity;
-    } as;
-} ScriptValue;
+/* Values a script and the engine pass each other are the engine's own (core/object.h), so an
+   object's properties, a method's arguments and a table row's all mean the same thing. */
+typedef EngineValueType ScriptType;
+typedef EngineValue ScriptValue;
+#define SCRIPT_NONE ENGINE_NONE
+#define SCRIPT_BOOL ENGINE_BOOL
+#define SCRIPT_INT ENGINE_INT
+#define SCRIPT_FLOAT ENGINE_FLOAT
+#define SCRIPT_VECTOR2 ENGINE_VECTOR2
+#define SCRIPT_VECTOR3 ENGINE_VECTOR3
+#define SCRIPT_STRING ENGINE_STRING
+#define SCRIPT_OBJECT ENGINE_OBJECT /* an engine object: a scripted entity, a camera, a timer... */
 
 typedef struct ScriptHost ScriptHost;
 typedef ScriptValue (*ScriptCall)(ScriptHost *host, const ScriptValue *arguments);
@@ -119,71 +89,12 @@ const char *ScriptTypeName(ScriptType type);
 bool ScriptInvoke(ScriptHost *host, const ScriptBinding *binding, const ScriptValue *arguments,
                   int count, ScriptValue *result, const char **message);
 
-static inline ScriptValue ScriptNone(void) { return (ScriptValue){SCRIPT_NONE, {0}}; }
-static inline ScriptValue ScriptBool(bool v)
-{
-    ScriptValue value = {SCRIPT_BOOL, {0}};
-    value.as.boolean = v;
-    return value;
-}
-static inline ScriptValue ScriptInt(int v)
-{
-    ScriptValue value = {SCRIPT_INT, {0}};
-    value.as.integer = v;
-    return value;
-}
-static inline ScriptValue ScriptFloat(float v)
-{
-    ScriptValue value = {SCRIPT_FLOAT, {0}};
-    value.as.number = v;
-    return value;
-}
-static inline ScriptValue ScriptVector2(Vector2 v)
-{
-    ScriptValue value = {SCRIPT_VECTOR2, {0}};
-    value.as.vector2 = v;
-    return value;
-}
-static inline ScriptValue ScriptVector3(Vector3 v)
-{
-    ScriptValue value = {SCRIPT_VECTOR3, {0}};
-    value.as.vector3 = v;
-    return value;
-}
-static inline ScriptValue ScriptString(const char *v)
-{
-    ScriptValue value = {SCRIPT_STRING, {0}};
-    value.as.string = v ? v : "";
-    return value;
-}
-static inline ScriptValue ScriptHandle(int v)
-{
-    ScriptValue value = {SCRIPT_ENTITY, {0}};
-    value.as.entity = v;
-    return value;
-}
-static inline ScriptValue ScriptResource(int v)
-{
-    ScriptValue value = {SCRIPT_RESOURCE, {0}};
-    value.as.integer = v;
-    return value;
-}
-
-/* Pack a resource handle: kind(8) | (index+1)(16) | generation(8). Zero is null. */
-static inline int ScriptResPack(ScriptResourceKind kind, int index, uint8_t generation)
-{
-    return (int)(((unsigned)kind << 24) | (((unsigned)(index + 1)) << 8) | (unsigned)(generation & 0xff));
-}
-static inline ScriptResourceKind ScriptResKind(int handle)
-{
-    return (ScriptResourceKind)(((unsigned)handle >> 24) & 0xff);
-}
-static inline int ScriptResIndex(int handle)
-{
-    return (int)(((unsigned)handle >> 8) & 0xffff) - 1;
-}
-static inline uint8_t ScriptResGeneration(int handle)
-{
-    return (uint8_t)((unsigned)handle & 0xff);
-}
+static inline ScriptValue ScriptNone(void) { return EngineNone(); }
+static inline ScriptValue ScriptBool(bool v) { return EngineBool(v); }
+static inline ScriptValue ScriptInt(int v) { return EngineInt(v); }
+static inline ScriptValue ScriptFloat(float v) { return EngineFloat(v); }
+static inline ScriptValue ScriptVector2(Vector2 v) { return EngineVector2(v); }
+static inline ScriptValue ScriptVector3(Vector3 v) { return EngineVector3(v); }
+static inline ScriptValue ScriptString(const char *v) { return EngineString(v); }
+static inline ScriptValue ScriptObject(EngineObjectId v) { return EngineObject(v); }
 #endif

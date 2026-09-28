@@ -135,3 +135,103 @@ double CoreNetInterpolatorRenderTick(const CoreNetInterpolator *interp)
         return 0.0;
     return interp->renderTick;
 }
+
+// ---- as engine types -----------------------------------------------------------------------------
+static bool ClockCreate(EngineCall *call)
+{
+    return CoreNetClockInit(call->data, call->arguments[0].as.integer, call->arguments[1].as.integer);
+}
+static bool ClockAdvance(EngineCall *call)
+{
+    call->result = EngineInt(CoreNetClockAdvance(call->data, call->arguments[0].as.number,
+                                                 call->arguments[1].as.integer));
+    return true;
+}
+static bool ClockTicked(EngineCall *call)
+{
+    call->result = EngineInt((int)CoreNetClockTicked(call->data));
+    return true;
+}
+static bool ClockShouldSend(EngineCall *call)
+{
+    call->result = EngineBool(CoreNetClockShouldSend(call->data));
+    return true;
+}
+static bool ClockTick(const void *object, EngineValue *out)
+{
+    *out = EngineInt((int)((const CoreNetClock *)object)->tick);
+    return true;
+}
+static const EngineProperty clockProperties[] = {
+    ENGINE_COMPUTED("tick", ENGINE_INT, ENGINE_PROPERTY_READ_ONLY, ClockTick, NULL,
+                    "the number of the last simulated step"),
+};
+static const EngineMethod clockMethods[] = {
+    {"advance!", ENGINE_INT, {ENGINE_FLOAT, ENGINE_INT}, 2, ClockAdvance,
+     "add elapsed seconds; answers how many fixed steps are due, at most the ceiling given"},
+    {"ticked!", ENGINE_INT, {ENGINE_NONE}, 0, ClockTicked, "count one simulated step; answers its tick"},
+    {"should-send?", ENGINE_BOOL, {ENGINE_NONE}, 0, ClockShouldSend,
+     "whether a snapshot is due; true at most once per send interval"},
+};
+const EngineType CoreNetClockType = {
+    .name = "net-clock",
+    .size = sizeof(CoreNetClock),
+    .properties = clockProperties,
+    .propertyCount = 1,
+    .methods = clockMethods,
+    .methodCount = sizeof clockMethods / sizeof clockMethods[0],
+    .createArguments = {ENGINE_INT, ENGINE_INT},
+    .createArgumentCount = 2,
+    .createRequired = 2,
+    .create = ClockCreate,
+    .help = "a server's fixed simulation tick and its lower snapshot rate",
+};
+
+static bool InterpolatorCreate(EngineCall *call)
+{
+    return CoreNetInterpolatorInit(call->data, call->arguments[0].as.integer,
+                                   call->arguments[1].as.integer);
+}
+static bool InterpolatorSnapshot(EngineCall *call)
+{
+    if (call->arguments[0].as.integer < 0)
+    {
+        call->error = "a tick cannot be negative";
+        return false;
+    }
+    CoreNetInterpolatorSnapshot(call->data, (uint32_t)call->arguments[0].as.integer);
+    return true;
+}
+static bool InterpolatorAdvance(EngineCall *call)
+{
+    CoreNetInterpolatorAdvance(call->data, call->arguments[0].as.number);
+    return true;
+}
+static bool InterpolatorRenderTick(const void *object, EngineValue *out)
+{
+    *out = EngineFloat((float)CoreNetInterpolatorRenderTick(object));
+    return true;
+}
+static const EngineProperty interpolatorProperties[] = {
+    ENGINE_COMPUTED("render-tick", ENGINE_FLOAT, ENGINE_PROPERTY_READ_ONLY, InterpolatorRenderTick,
+                    NULL, "the server tick to sample replicated objects at, fractional"),
+};
+static const EngineMethod interpolatorMethods[] = {
+    {"snapshot!", ENGINE_NONE, {ENGINE_INT}, 1, InterpolatorSnapshot,
+     "record the server tick of a snapshot as it arrives"},
+    {"advance!", ENGINE_NONE, {ENGINE_FLOAT}, 1, InterpolatorAdvance,
+     "move the drawn moment forward by elapsed seconds"},
+};
+const EngineType CoreNetInterpolatorType = {
+    .name = "net-interpolator",
+    .size = sizeof(CoreNetInterpolator),
+    .properties = interpolatorProperties,
+    .propertyCount = 1,
+    .methods = interpolatorMethods,
+    .methodCount = sizeof interpolatorMethods / sizeof interpolatorMethods[0],
+    .createArguments = {ENGINE_INT, ENGINE_INT},
+    .createArgumentCount = 2,
+    .createRequired = 2,
+    .create = InterpolatorCreate,
+    .help = "a client's clock, drawing the world far enough in the past to interpolate",
+};

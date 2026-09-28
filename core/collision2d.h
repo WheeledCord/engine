@@ -4,6 +4,7 @@
 #ifndef CORE_COLLISION2D_H
 #define CORE_COLLISION2D_H
 
+#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -115,4 +116,9 @@ int Collision2DQueryCircle(Collision2DWorld *world, Vector2 center, float radius
  * @return True when the sweep hits during the closed fraction [0, 1]. */
 bool Collision2DSweepCircle(Collision2DWorld *world, Vector2 center, float radius, Vector2 delta,
                             uint32_t mask, Collision2DSweep *out);
+/* A query world as an engine type, "collision-world", created with a shape capacity and a cell
+   size: add-circle!, add-aabb!, move-circle!, move-aabb!, remove!, query-circle, query-aabb and
+   sweep-circle. Shapes inside it are named by integers, zero for none. */
+extern const EngineType Collision2DWorldType;
+
 #endif
