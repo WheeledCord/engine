@@ -10,6 +10,13 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
 - `timer`: a countdown object that emits `timeout`, then starts again unless it is one-shot.
 - `node`: a `node3d` object with a local position, rotation and scale and an optional parent, whose
   world transform is its parent's world transform times its own, as in Godot's Node3D.
+- `network`, `net_clock`, `net_sync`, `net_session`: multiplayer. `network` is the ENet transport;
+  `net_clock` the server tick and the client's interpolation clock; `net_sync` the registry of
+  replicated objects, whose schemas mark which fields are shared, with delta snapshots and ownership;
+  `net_session` hosting and joining around it — the host is the server, with one registry, and its own
+  player's commands run in place; a joiner is checked for engine protocol, game and version, welcomed
+  with what it needs to build the world, and sent snapshots once ready. Commands go up to the
+  server, events come down to players. See `docs/user/networking.md`.
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
   A project that declares nothing boots with no probe and no shader compiled; declaring
   `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.
