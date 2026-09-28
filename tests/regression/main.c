@@ -17,6 +17,8 @@
 #include "core/texture.h"
 #include "core/playback.h"
 #include "core/file.h"
+#include "core/save.h"
+#include "core/input_map.h"
 #include "gameplay/iso_move.h"
 #include "core/transform.h"
 #include "core/ui.h"
@@ -1158,6 +1160,110 @@ static void StorageChecks(void)
     GameplayWorldFree(&world);
 }
 
+// ---- save files and input maps: an empty string, and a load that must not half-apply -------------
+typedef struct SaveThing
+{
+    char name[32];
+    int amount;
+} SaveThing;
+
+static void SaveAndInputMapChecks(void)
+{
+    CoreSaveField fields[] = {
+        {"name", CORE_SAVE_STRING, offsetof(SaveThing, name), sizeof(((SaveThing *)0)->name)},
+        {"amount", CORE_SAVE_INT, offsetof(SaveThing, amount), sizeof(int)},
+    };
+
+    // Bug: a written empty string could not be read back at all.
+    SaveThing emptyThing = {.name = "", .amount = 7};
+    const char *emptyPath = Scratch("regression_save_empty.txt");
+    SaveThing emptyLoaded;
+    memset(&emptyLoaded, 0xaa, sizeof emptyLoaded);
+    bool emptyRoundTrip = CoreSaveWrite(emptyPath, 1, &emptyThing, fields, 2) &&
+                          CoreSaveRead(emptyPath, 1, &emptyLoaded, fields, 2, NULL, NULL);
+    Check(emptyRoundTrip && emptyLoaded.name[0] == '\0' && emptyLoaded.amount == 7,
+          "a saved empty string loads back empty, with the rest of the record intact");
+
+    // A non-empty string must still round-trip the same way.
+    SaveThing fullThing = {.name = "Fionn", .amount = 99};
+    const char *fullPath = Scratch("regression_save_string.txt");
+    SaveThing fullLoaded;
+    memset(&fullLoaded, 0xaa, sizeof fullLoaded);
+    bool fullRoundTrip = CoreSaveWrite(fullPath, 1, &fullThing, fields, 2) &&
+                         CoreSaveRead(fullPath, 1, &fullLoaded, fields, 2, NULL, NULL);
+    Check(fullRoundTrip && !strcmp(fullLoaded.name, "Fionn") && fullLoaded.amount == 99,
+          "a non-empty saved string still round-trips");
+
+    // Two actions, currently jump=Enter and fire=Space.
+    InputBinding jumpDefault[] = {{INPUT_KEY, KEY_ENTER}};
+    InputBinding fireDefault[] = {{INPUT_KEY, KEY_SPACE}};
+    InputMapDefinition defs[] = {
+        {"jump", jumpDefault, 1},
+        {"fire", fireDefault, 1},
+    };
+    InputMap map = {0};
+    bool mapInit = InputMapInit(&map, defs, 2);
+
+    // A file with the same two actions but their keys swapped: jump=Space, fire=Enter.
+    InputBinding jumpSwapped[] = {{INPUT_KEY, KEY_SPACE}};
+    InputBinding fireSwapped[] = {{INPUT_KEY, KEY_ENTER}};
+    InputMapDefinition swappedDefs[] = {
+        {"jump", jumpSwapped, 1},
+        {"fire", fireSwapped, 1},
+    };
+    InputMap swapped = {0};
+    bool swappedInit = InputMapInit(&swapped, swappedDefs, 2);
+    const char *swappedPath = Scratch("regression_input_swapped.txt");
+    bool swappedWritten = swappedInit && InputMapWrite(&swapped, swappedPath);
+    InputMapFree(&swapped);
+
+    // Bug: applying line by line always conflicted on a plain swap.
+    bool loadedSwap = mapInit && swappedWritten && InputMapRead(&map, swappedPath);
+    InputBinding jumpAfterSwap = InputMapActionGet(&map, "jump").bindings[0];
+    InputBinding fireAfterSwap = InputMapActionGet(&map, "fire").bindings[0];
+    Check(loadedSwap && jumpAfterSwap.type == INPUT_KEY && jumpAfterSwap.code == KEY_SPACE &&
+              fireAfterSwap.type == INPUT_KEY && fireAfterSwap.code == KEY_ENTER,
+          "a file with two bindings swapped relative to the map loads in one pass");
+
+    // A file whose own two lines collide with each other must fail, and change nothing.
+    InputBinding jumpBefore = InputMapActionGet(&map, "jump").bindings[0];
+    InputBinding fireBefore = InputMapActionGet(&map, "fire").bindings[0];
+    const char *conflictPath = Scratch("regression_input_conflict.txt");
+    FILE *conflictFile = fopen(conflictPath, "w");
+    bool conflictWritten = conflictFile != NULL;
+    if (conflictFile)
+    {
+        fprintf(conflictFile, "input-map 1\njump 0 0 %d\nfire 0 0 %d\n", KEY_A, KEY_A);
+        fclose(conflictFile);
+    }
+    bool conflictFailed = conflictWritten && !InputMapRead(&map, conflictPath);
+    InputBinding jumpAfterConflict = InputMapActionGet(&map, "jump").bindings[0];
+    InputBinding fireAfterConflict = InputMapActionGet(&map, "fire").bindings[0];
+    Check(conflictFailed && jumpAfterConflict.type == jumpBefore.type &&
+              jumpAfterConflict.code == jumpBefore.code && fireAfterConflict.type == fireBefore.type &&
+              fireAfterConflict.code == fireBefore.code,
+          "a file whose own bindings collide fails to load, and leaves the map untouched");
+
+    // A file naming an action the map does not have must fail the same way.
+    const char *unknownPath = Scratch("regression_input_unknown.txt");
+    FILE *unknownFile = fopen(unknownPath, "w");
+    bool unknownWritten = unknownFile != NULL;
+    if (unknownFile)
+    {
+        fprintf(unknownFile, "input-map 1\ngrapple 0 0 %d\n", KEY_A);
+        fclose(unknownFile);
+    }
+    bool unknownFailed = unknownWritten && !InputMapRead(&map, unknownPath);
+    InputBinding jumpAfterUnknown = InputMapActionGet(&map, "jump").bindings[0];
+    InputBinding fireAfterUnknown = InputMapActionGet(&map, "fire").bindings[0];
+    Check(unknownFailed && jumpAfterUnknown.type == jumpBefore.type &&
+              jumpAfterUnknown.code == jumpBefore.code && fireAfterUnknown.type == fireBefore.type &&
+              fireAfterUnknown.code == fireBefore.code,
+          "a file naming an unknown action fails to load, and leaves the map untouched");
+
+    InputMapFree(&map);
+}
+
 // ---- the runner: its own window, so it runs as a second pass -------------------------------------
 static int updates;
 static double engineStep, worldStep;
@@ -2127,6 +2233,7 @@ int main(int argc, char **argv)
     DeferredChecks();
     ScriptChecks();
     StorageChecks();
+    SaveAndInputMapChecks();
     GameCallChecks();
     PlaybackChecks();
     SpriteSheetChecks();
