@@ -109,8 +109,9 @@ All EngineProject callbacks are now optional; absent Update keeps running, absen
 application clear colour. Invalid configuration logs a reason before returning failure.
 
 `EngineApplicationDefault()` combines config, callbacks, context and clear colour. Run it with
-`EngineRunApplication`, or define `EngineApplicationMain(argc, argv)` and opt into `core/entry.c`.
-That entry file is separate from libcore; custom main functions remain supported. Returning a descriptor
+`EngineRunApplication` from your own `main`, or define only `EngineApplicationMain(argc, argv)`: the
+standard `main` in `core/entry.c` is part of libcore, and the linker takes it only when a program has
+no `main` of its own. Returning a descriptor
 does not extend the lifetime of its pointers: use static state or otherwise retain it for the run.
 Games are built with `engine-build` from an `engine.project` manifest; see the root README.
 
