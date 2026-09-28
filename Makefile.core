@@ -15,8 +15,7 @@ ENET_OBJ := $(patsubst vendor/enet/%.c,$(BUILD)/vendor/enet_%.o,$(ENET_SRC))
 GAMEPLAY_SRC := $(wildcard gameplay/*.c)
 GAMEPLAY_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(GAMEPLAY_SRC))
 SCRIPT_SRC := $(wildcard gameplay/script/*.c)
-SCRIPT_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(SCRIPT_SRC)) $(BUILD)/vendor/s7.o \
-	$(BUILD)/vendor/amx.o $(BUILD)/vendor/amxaux.o $(BUILD)/vendor/amxfloat.o $(PAWN_VM_EXTRA)
+SCRIPT_OBJ := $(patsubst gameplay/%.c,$(BUILD)/gameplay_%.o,$(SCRIPT_SRC)) $(BUILD)/vendor/s7.o
 CFLAGS := -std=c99 -O2 -g -Wall -Wextra -Wpedantic -Werror -DGRAPHICS_API_OPENGL_21 \
 	-Ivendor/enet/include
 LDLIBS := -lm -lpthread -ldl -lGL -lX11
@@ -27,7 +26,7 @@ RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
 ENGINE_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
 .PHONY: sdk install sdk-example run-authoring all run test-gameplay test-regression integration smoke full-check api-docs-update docs-check script-api clean boundary FORCE
 # A normal build produces the engine and its authoring tools. Tests are opt-in commands below.
-all: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(BUILD)/pawncc
+all: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
 # the export is of that revision, so a submodule update cannot leave stale sources behind.
 FORCE:
@@ -55,52 +54,16 @@ $(BUILD)/libcore.a: $(CORE_OBJ) $(ENET_OBJ) Makefile.core
 	$(AR) rcs $@ $(CORE_OBJ) $(ENET_OBJ)
 $(BUILD)/gameplay_%.o: gameplay/%.c $(RLSRC)/.exported | boundary
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -I. -I$(RLSRC) -Ivendor/s7 -Ivendor/pawn/amx -Ivendor/pawn/linux -DPAWN_CELL_SIZE=32 -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) -I. -I$(RLSRC) -Ivendor/s7 -MMD -MP -c $< -o $@
 # Vendored interpreters are other people's code: they build under their own warning settings.
 $(BUILD)/vendor/s7.o: vendor/s7/s7.c $(RLSRC)/.exported
 	@mkdir -p $(@D)
 	$(CC) -std=gnu11 -O2 -g -w -DWITH_SYSTEM_EXTRAS=0 -DWITH_C_LOADER=0 -c $< -o $@
-# Pawn's assembly core is 32-bit x86 only; everywhere else runs its portable C VM. Override with
-# PAWN_CORE=asm on a 32-bit build, which is rejected outright on anything the assembly cannot serve.
-PAWN_CORE ?= $(if $(filter i%86,$(shell uname -m)),asm,c)
-ifeq ($(PAWN_CORE),asm)
-  ifeq ($(filter i%86,$(shell uname -m)),)
-    $(error PAWN_CORE=asm needs a 32-bit x86 target; this is $(shell uname -m))
-  endif
-  PAWN_VM_FLAGS := -DAMX_ASM
-  PAWN_VM_EXTRA := $(BUILD)/vendor/amxexec.o
-else
-  PAWN_VM_FLAGS :=
-  PAWN_VM_EXTRA :=
-endif
-$(BUILD)/vendor/amx%.o: vendor/pawn/amx/amx%.c $(RLSRC)/.exported
-	@mkdir -p $(@D)
-	$(CC) -std=gnu99 -O2 -g -w -DPAWN_CELL_SIZE=32 $(PAWN_VM_FLAGS) -Ivendor/pawn/amx -Ivendor/pawn/linux -c $< -o $@
-$(BUILD)/vendor/amx.o: vendor/pawn/amx/amx.c $(RLSRC)/.exported
-	@mkdir -p $(@D)
-	$(CC) -std=gnu99 -O2 -g -w -DPAWN_CELL_SIZE=32 $(PAWN_VM_FLAGS) -Ivendor/pawn/amx -Ivendor/pawn/linux -c $< -o $@
-# The Pawn compiler, built as a tool of the build rather than something to install.
-PAWNCC_SRC := $(wildcard vendor/pawn/compiler/sc[1-7].c) vendor/pawn/compiler/scexpand.c \
-	vendor/pawn/compiler/sci18n.c vendor/pawn/compiler/sclist.c vendor/pawn/compiler/scmemfil.c \
-	vendor/pawn/compiler/scstate.c vendor/pawn/compiler/scvars.c vendor/pawn/compiler/lstring.c \
-	vendor/pawn/compiler/memfile.c vendor/pawn/amx/keeloq.c vendor/pawn/linux/binreloc.c
-$(BUILD)/pawncc: $(PAWNCC_SRC)
-	@mkdir -p $(@D)
-	$(CC) -std=gnu99 -O2 -w -Wno-error=incompatible-pointer-types -Wno-error=implicit-function-declaration \
-		-Wno-error=int-conversion -DLINUX -DENABLE_BINRELOC -DHAVE_STDINT_H \
-		-Ivendor/pawn/compiler -Ivendor/pawn/amx -Ivendor/pawn/linux $^ -o $@ -lm
-# A Pawn script is compiled against declarations written from the binding table, so the two cannot
-# fall out of step.
-$(BUILD)/engine.inc: $(BUILD)/pawn_include
-	@mkdir -p $(@D)
-	./$(BUILD)/pawn_include $@
 $(BUILD)/script-api.md: gameplay/script/script_api.def tools/write_script_api.py
 	python3 tools/write_script_api.py --input $< --format markdown --out $@
 $(BUILD)/script-api.json: gameplay/script/script_api.def tools/write_script_api.py
 	python3 tools/write_script_api.py --input $< --format json --out $@
 script-api: $(BUILD)/script-api.md $(BUILD)/script-api.json
-%.amx: %.pwn $(BUILD)/pawncc $(BUILD)/engine.inc
-	./$(BUILD)/pawncc -i$(BUILD) -ivendor/pawn/include -o$@ $<
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(GAMEPLAY_OBJ)
@@ -120,20 +83,19 @@ endef
 $(eval $(call core_project,core_integration,core,,tests/integration/core))
 $(eval $(call core_project,gameplay_integration,gameplay,,tests/integration/gameplay))
 $(eval $(call core_project,regression_test,gameplay,,tests/regression))
-$(eval $(call core_project,pawn_include,gameplay,,tools/pawn_include))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
-# the runtime data the engine loads, the Pawn compiler and its declarations, and the tools that build
-# a project. It is written somewhere of its own, never into a project's own directory.
+# the runtime data the engine loads, and the tools that build a project. It is written somewhere of
+# its own, never into a project's own directory.
 SDK ?= $(BUILD)/sdk
 PREFIX ?= $(HOME)/.local
 SDK_HEADERS := $(filter-out core/ui_internal.h,$(wildcard core/*.h)) $(wildcard gameplay/*.h) \
 	$(wildcard gameplay/script/*.h)
-sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/pawncc $(BUILD)/engine.inc script-api
+sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) script-api
 	rm -rf $(SDK)
 	mkdir -p $(SDK)/include/core $(SDK)/include/gameplay/script $(SDK)/lib/pkgconfig $(SDK)/bin \
-		$(SDK)/share/engine/src $(SDK)/share/engine/pawn $(SDK)/share/engine/docs
+		$(SDK)/share/engine/src $(SDK)/share/engine/docs
 	cp $(filter core/%,$(SDK_HEADERS)) $(SDK)/include/core/
 	cp $(filter gameplay/%.h,$(SDK_HEADERS)) $(SDK)/include/gameplay/ 2>/dev/null || true
 	cp gameplay/script/*.h gameplay/script/script_api.def $(SDK)/include/gameplay/script/
@@ -142,12 +104,7 @@ sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(B
 	# In the tree this file sits beside engine.h; in an SDK it is included the way a project does.
 	sed 's|#include "engine.h"|#include "core/engine.h"|' core/entry.c > $(SDK)/share/engine/src/entry.c
 	cp -r core/fonts core/shaders $(SDK)/share/engine/
-	cp $(BUILD)/engine.inc vendor/pawn/include/*.inc vendor/pawn/include/*.INC $(SDK)/share/engine/pawn/
 	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(SDK)/share/engine/docs/
-	# pawncc lives beside its own includes, not in bin/: it works out where its standard includes
-	# are from its own location, and from bin/ that search reaches include/core, a directory it
-	# would open as though it were the core.inc it is looking for, and then read forever.
-	cp $(BUILD)/pawncc $(SDK)/share/engine/pawn/
 	cp tools/engine_build.py $(SDK)/bin/engine-build
 	cp tools/engine_new.py $(SDK)/bin/engine-new
 	chmod +x $(SDK)/bin/engine-build $(SDK)/bin/engine-new
@@ -171,9 +128,9 @@ run: $(BUILD)/core_integration
 	./$(BUILD)/core_integration
 test-gameplay: $(BUILD)/gameplay_integration
 	./$(BUILD)/gameplay_integration
-test-regression: $(BUILD)/regression_test tests/regression/tester.amx
+test-regression: $(BUILD)/regression_test
 	./$(BUILD)/regression_test
-integration: $(BUILD)/core_integration $(BUILD)/regression_test tests/regression/tester.amx
+integration: $(BUILD)/core_integration $(BUILD)/regression_test
 	./$(BUILD)/core_integration --smoke
 	./$(BUILD)/regression_test --runner
 smoke: test-gameplay test-regression
