@@ -18,7 +18,7 @@ import sys
 MANIFEST = 'engine.project'
 # What a manifest may say. Anything else is a mistake worth stopping for.
 KEYS = {'name', 'engine', 'module', 'source', 'script', 'assets', 'scenes', 'shaders'}
-MODULES = {'core', 'gameplay', 'script-s7', 'script-pawn', 'entry'}
+MODULES = {'core', 'gameplay', 'script-s7', 'entry'}
 
 
 def fail(message):
@@ -244,13 +244,7 @@ def main():
         source = project_dir / script
         if not source.is_file():
             fail(f'script {script} is not there')
-        if source.suffix == '.pwn':
-            compiled = out / (source.stem + '.amx')
-            command = [f'{datadir}/pawn/pawncc', f'-i{datadir}/pawn', f'-o{compiled}', str(source)]
-            if subprocess.run(command).returncode:
-                fail(f'{script} did not compile')
-        else:
-            (out / source.name).write_bytes(source.read_bytes())
+        (out / source.name).write_bytes(source.read_bytes())
     # The engine's own runtime data travels with the binary, so it runs from anywhere.
     for directory in ('fonts', 'shaders'):
         shutil.copytree(pathlib.Path(datadir) / directory, out / 'core' / directory,
