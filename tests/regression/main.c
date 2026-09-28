@@ -13,6 +13,7 @@
 #include "core/network.h"
 #include "core/net_clock.h"
 #include "core/net_sync.h"
+#include "core/node.h"
 #include "core/object.h"
 #include "core/audio.h"
 #include "core/sprite_sheet.h"
@@ -836,6 +837,16 @@ static void ScriptChecks(void)
         described = table[i].name && table[i].call && table[i].help &&
                     table[i].argumentCount >= 0 && table[i].argumentCount <= 8;
     Check(described, "every row of the table is complete enough for a frontend to register");
+
+    // node3d: a script attaches one node to another, and its world position follows its parent.
+    Check(ScriptS7Eval("(define hand (make 'node3d))", NULL) &&
+              ScriptS7Eval("(define gun (make 'node3d))", NULL) &&
+              ScriptS7Eval("(set! (gun 'parent) hand)", NULL) &&
+              ScriptS7Eval("(set! (hand 'position) (list 1 2 3))", NULL) &&
+              EvalIs("(gun 'world-position)", "(1.0 2.0 3.0)") &&
+              !ScriptS7Eval("(set! (hand 'parent) gun)", NULL),
+          "a node made and attached from Scheme follows its parent, and cannot become its own ancestor");
+
     ScriptS7Close();
     ScriptHostFree(&host);
     GameplayWorldFree(&world);
@@ -2578,6 +2589,138 @@ static void FpsControllerChecks(void)
           "the view turns while time stands still, and nothing else moves");
 }
 
+// ---- node3d: parent/child transforms -----------------------------------------------------------
+static void NodeChecks(void)
+{
+    EngineObjects objects;
+    Check(EngineObjectsInit(&objects), "a node pool starts empty");
+
+    const char *error = NULL;
+    EngineObjectId parent = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId child = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    CoreNode *parentData = EngineObjectData(&objects, parent, &CoreNodeType);
+    CoreNode *childData = EngineObjectData(&objects, child, &CoreNodeType);
+    Check(parentData && childData && Vector3Equals(parentData->scale, (Vector3){1, 1, 1}) &&
+              QuaternionEquals(parentData->rotation, QuaternionIdentity()) &&
+              EngineObjectIdIsNull(parentData->parent),
+          "a new node starts at the local identity, scale one, and no parent");
+
+    // A child at local (1,0,0) under a parent at (10,0,0) rotated 90 degrees about Y ends at the
+    // point that rotation carries local +X to, offset by the parent's position.
+    parentData->position = (Vector3){10, 0, 0};
+    parentData->rotation = QuaternionFromAxisAngle((Vector3){0, 1, 0}, PI / 2.0f);
+    childData->position = (Vector3){1, 0, 0};
+    Check(CoreNodeSetParent(&objects, child, parent, false), "a node is parented to another live node");
+
+    Vector3 childWorld = {0};
+    Matrix childMatrix = {0};
+    Check(CoreNodeWorldPosition(&objects, child, &childWorld) &&
+              Vector3Distance(childWorld, (Vector3){10, 0, -1}) < 1e-5f &&
+              CoreNodeWorld(&objects, child, &childMatrix) &&
+              Vector3Distance(Vector3Transform((Vector3){0, 0, 0}, childMatrix), (Vector3){10, 0, -1}) < 1e-5f,
+          "a child's world transform is its parent's world transform times its own local one");
+
+    // A grandchild chain: root at (1,2,3) rotated 90 about Y, a mid node one local unit along its
+    // rotated +Z, a leaf five local units along the mid node's own (equally rotated) +X.
+    EngineObjectId root = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId mid = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId leaf = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    CoreNode *rootData = EngineObjectData(&objects, root, &CoreNodeType);
+    rootData->position = (Vector3){1, 2, 3};
+    rootData->rotation = QuaternionFromAxisAngle((Vector3){0, 1, 0}, PI / 2.0f);
+    ((CoreNode *)EngineObjectData(&objects, mid, &CoreNodeType))->position = (Vector3){0, 0, 1};
+    ((CoreNode *)EngineObjectData(&objects, leaf, &CoreNodeType))->position = (Vector3){5, 0, 0};
+    CoreNodeSetParent(&objects, mid, root, false);
+    CoreNodeSetParent(&objects, leaf, mid, false);
+    Vector3 midWorld = {0}, leafWorld = {0};
+    Check(CoreNodeWorldPosition(&objects, mid, &midWorld) &&
+              Vector3Distance(midWorld, (Vector3){2, 2, 3}) < 1e-5f &&
+              CoreNodeWorldPosition(&objects, leaf, &leafWorld) &&
+              Vector3Distance(leafWorld, (Vector3){2, 2, -2}) < 1e-5f,
+          "a grandchild's world transform carries its whole ancestor chain, not just its parent");
+
+    // Moving the parent moves the child's world position by the same translation.
+    EngineObjectId still = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId moved = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    ((CoreNode *)EngineObjectData(&objects, moved, &CoreNodeType))->position = (Vector3){3, 4, 5};
+    CoreNodeSetParent(&objects, moved, still, false);
+    ((CoreNode *)EngineObjectData(&objects, still, &CoreNodeType))->position = (Vector3){1, 1, 1};
+    Vector3 afterMove = {0};
+    Check(CoreNodeWorldPosition(&objects, moved, &afterMove) &&
+              Vector3Distance(afterMove, (Vector3){4, 5, 6}) < 1e-5f,
+          "moving the parent moves the child's world position with it");
+
+    // SetParent with keepWorld: reparenting under a scaled, rotated node keeps the world position,
+    // and halves the local scale needed to reproduce the same world size under a doubled parent.
+    EngineObjectId flat = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId big = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId reparented = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    ((CoreNode *)EngineObjectData(&objects, flat, &CoreNodeType))->position = (Vector3){5, 0, 0};
+    CoreNode *bigData = EngineObjectData(&objects, big, &CoreNodeType);
+    bigData->rotation = QuaternionFromAxisAngle((Vector3){0, 1, 0}, PI / 2.0f);
+    bigData->scale = (Vector3){2, 2, 2};
+    CoreNode *reparentedData = EngineObjectData(&objects, reparented, &CoreNodeType);
+    reparentedData->position = (Vector3){1, 0, 0};
+    CoreNodeSetParent(&objects, reparented, flat, false);
+    Vector3 worldBeforeReparent = {0};
+    CoreNodeWorldPosition(&objects, reparented, &worldBeforeReparent);
+    Check(CoreNodeSetParent(&objects, reparented, big, true), "keepWorld reparents to another live node");
+    Vector3 worldAfterReparent = {0};
+    Check(CoreNodeWorldPosition(&objects, reparented, &worldAfterReparent) &&
+              Vector3Distance(worldBeforeReparent, worldAfterReparent) < 1e-5f &&
+              Vector3Distance(reparentedData->scale, (Vector3){0.5f, 0.5f, 0.5f}) < 1e-5f,
+          "SetParent with keepWorld keeps the world position, adjusting the local transform under it");
+
+    // A cycle, self-parenting included, is refused and leaves the node's parent unchanged.
+    EngineObjectId x = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId y = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId z = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    CoreNodeSetParent(&objects, y, x, false);
+    CoreNodeSetParent(&objects, z, y, false);
+    CoreNode *xData = EngineObjectData(&objects, x, &CoreNodeType);
+    Check(!CoreNodeSetParent(&objects, x, z, false) && EngineObjectIdIsNull(xData->parent) &&
+              !CoreNodeSetParent(&objects, x, x, false) && EngineObjectIdIsNull(xData->parent),
+          "a node cannot become its own ancestor, directly or through a chain, or its own parent");
+
+    // Destroying a parent reparents its children to none, keeping their world position.
+    EngineObjectId gone = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId survivor = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    CoreNode *goneData = EngineObjectData(&objects, gone, &CoreNodeType);
+    goneData->position = (Vector3){2, 3, 4};
+    goneData->rotation = QuaternionFromAxisAngle((Vector3){0, 1, 0}, PI / 2.0f);
+    ((CoreNode *)EngineObjectData(&objects, survivor, &CoreNodeType))->position = (Vector3){1, 0, 0};
+    CoreNodeSetParent(&objects, survivor, gone, false);
+    Vector3 survivorWorldBefore = {0};
+    CoreNodeWorldPosition(&objects, survivor, &survivorWorldBefore);
+    Check(EngineObjectDestroy(&objects, gone) && !EngineObjectAlive(&objects, gone),
+          "the parent is destroyed");
+    Vector3 survivorWorldAfter = {0};
+    CoreNode *survivorData = EngineObjectData(&objects, survivor, &CoreNodeType);
+    Check(EngineObjectAlive(&objects, survivor) && survivorData &&
+              EngineObjectIdIsNull(survivorData->parent) &&
+              CoreNodeWorldPosition(&objects, survivor, &survivorWorldAfter) &&
+              Vector3Distance(survivorWorldBefore, survivorWorldAfter) < 1e-5f,
+          "the child outlives its destroyed parent, at the same world position, with no parent");
+
+    // Stale handles answer false rather than reaching whatever took their place.
+    EngineObjectId staleParent = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectId aliveNode = EngineObjectCreate(&objects, &CoreNodeType, NULL, 0, &error);
+    EngineObjectDestroy(&objects, staleParent);
+    Vector3 staleVector = {0};
+    Matrix staleMatrix = {0};
+    Check(!CoreNodeWorld(&objects, staleParent, &staleMatrix) &&
+              !CoreNodeWorldPosition(&objects, staleParent, &staleVector) &&
+              !CoreNodeSetWorldPosition(&objects, staleParent, (Vector3){1, 1, 1}) &&
+              !CoreNodeSetParent(&objects, staleParent, aliveNode, false),
+          "a stale node handle is refused rather than reaching whatever replaced it");
+    CoreNode *aliveData = EngineObjectData(&objects, aliveNode, &CoreNodeType);
+    Check(CoreNodeSetParent(&objects, aliveNode, staleParent, false) &&
+              EngineObjectIdIsNull(aliveData->parent),
+          "a parent argument that no longer names a live node counts as no parent");
+
+    EngineObjectsFree(&objects);
+}
+
 static void NetOwnershipChecks(void)
 {
     /* A listen server's client registry has localIsServer true and localActor its own player id
@@ -2664,6 +2807,7 @@ int main(int argc, char **argv)
     NetOwnershipChecks();
     ObjectChecks();
     GameObjectChecks();
+    NodeChecks();
     AudioChecks();
     FpsControllerChecks();
     UnloadRenderTexture(scratch);

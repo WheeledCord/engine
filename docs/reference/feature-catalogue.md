@@ -41,12 +41,14 @@ linked guide explains authoring where one exists.
 | Gameplay | A* routing and movement over the isometric hex grid | `gameplay/iso_move.h` |
 | Objects | Types described once as properties, methods and signals; a pool of generational handles; signal connections | `core/object.h` |
 | Objects | A timer that emits timeout | `core/timer.h` |
+| Objects | A node with a local position, rotation and scale under an optional parent, whose world transform follows it | `core/node.h` |
 | Scripting | Scheme: engine objects as values, scripted entities, free-standing calls | `gameplay/script/script.h`; [scripting guide](../user/scripting.md) |
 
 ## Not provided yet
 
-Physics, collision response and a transform hierarchy are not engine systems yet; games that need
-them currently supply their own. The collision package supplies query indexing, not a physics model.
+Physics and collision response are not engine systems yet; games that need them currently supply
+their own. The collision package supplies query indexing, not a physics model. `core/node.h` supplies
+parent/child transforms, not physics or collision response.
 See [compatibility and limits](compatibility.md).
 
 ## Reference coverage
