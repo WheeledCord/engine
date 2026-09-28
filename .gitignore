@@ -3,9 +3,6 @@ build/
 *.o
 *.d
 
-# Compiled Pawn scripts, written by the build from the .pwn sources
-*.amx
-
 # Python bytecode from tools/
 __pycache__/
 
