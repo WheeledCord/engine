@@ -169,6 +169,14 @@ void ActorLookAt(Actor *a, Vector3 from, Vector3 target, float yaw)
     wanted = atan2f(sinf(wanted), cosf(wanted));
     a->targetYaw = Clamp(wanted, -a->aim.maxYaw, a->aim.maxYaw);
     a->targetPitch = Clamp(-atan2f(d.y, sqrtf(d.x * d.x + d.z * d.z)), -a->aim.maxPitch, a->aim.maxPitch);
+    if (a->aim.response <= 0)
+    {
+        // No response means no ActorUpdate ever runs between poses of a shared actor, so a look
+        // set for this draw must take effect immediately rather than waiting for a lerp that
+        // never happens.
+        a->lookYaw = a->previousYaw = a->targetYaw;
+        a->lookPitch = a->previousPitch = a->targetPitch;
+    }
 }
 void ActorUploadPose(Actor *a, float alpha)
 {
