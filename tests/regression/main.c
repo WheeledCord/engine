@@ -21,6 +21,7 @@
 #include "core/file.h"
 #include "core/save.h"
 #include "core/input_map.h"
+#include "core/waypoints.h"
 #include "gameplay/iso_move.h"
 #include "core/transform.h"
 #include "core/ui.h"
@@ -737,6 +738,15 @@ static void ScriptChecks(void)
               EvalIs("(< (w 'sweep-circle (vec 30 10) 1.0 (vec -40 0) 1) 1.0)", "#t") &&
               EvalIs("(w 'remove! s)", "#t") && EvalIs("(w 'query-circle (vec 12 10) 3.0 1)", "0"),
           "a collision world adds, queries, sweeps and removes shapes");
+
+    Check(ScriptS7Eval("(define wp (make 'waypoints))", NULL) && EvalIs("(wp 'count)", "0") &&
+              ScriptS7Eval("(define p0 (wp 'add! (list 0 0 0)))", NULL) &&
+              ScriptS7Eval("(define p1 (wp 'add! (list 0 0 3)))", NULL) && EvalIs("(wp 'count)", "2") &&
+              EvalIs("(wp 'link! p0 p1)", "#t") && EvalIs("(wp 'next-hop p0 p1)", "1") &&
+              EvalIs("(wp 'nearest (list 0 0 4))", "1") &&
+              EvalIs("(wp 'position p1)", "(0.0 0.0 3.0)") &&
+              !ScriptS7Eval("(wp 'position 99)", NULL) && EvalIs("(wp 'link! p0 99)", "#f"),
+          "a waypoint graph is made by name, linked and queried through its methods");
 
     Check(ScriptS7Eval("(define pf (make 'pathfinder 8 8))", NULL) &&
               ScriptS7Eval("(for-each (lambda (y) (pf 'block! (vec 3 y))) '(0 1 2 3 4 5 6))", NULL) &&
@@ -2624,6 +2634,69 @@ static void NetOwnershipChecks(void)
     CoreNetSyncFree(&sync);
 }
 
+static void WaypointsChecks(void)
+{
+    CoreWaypoints w = {0};
+
+    /* Distance decides the route, not hop count. a-b-c is the fewest-hops way from a to c (2 hops)
+       but b is a long way out to the side; a-d-e-c threads the short leg in three hops and is far
+       shorter overall -- the route CoreWaypointsNextHop/Path must actually take. */
+    int a = CoreWaypointsAdd(&w, (Vector3){0, 0, 0});
+    int b = CoreWaypointsAdd(&w, (Vector3){0, 50, 1.5f});
+    int c = CoreWaypointsAdd(&w, (Vector3){0, 0, 3});
+    int d = CoreWaypointsAdd(&w, (Vector3){0, 0, 1});
+    int e = CoreWaypointsAdd(&w, (Vector3){0, 0, 2});
+    Check(a == 0 && b == 1 && c == 2 && d == 3 && e == 4, "points are added in order, indexed from zero");
+    Check(CoreWaypointsLink(&w, a, b) && CoreWaypointsLink(&w, b, c) && CoreWaypointsLink(&w, a, d) &&
+              CoreWaypointsLink(&w, d, e) && CoreWaypointsLink(&w, e, c),
+          "points link both ways");
+    Check(CoreWaypointsLink(&w, a, b), "linking an already-linked pair again still answers true");
+
+    Check(CoreWaypointsNextHop(&w, a, c) == d,
+          "the shortest route by distance is taken even though it costs more hops than the way via b");
+    int path[8];
+    int n = CoreWaypointsPath(&w, a, c, path, 8);
+    Check(n == 4 && path[0] == a && path[1] == d && path[2] == e && path[3] == c,
+          "the path follows that same distance-shortest route, from..to inclusive");
+    Check(CoreWaypointsNextHop(&w, a, a) == a, "from == to answers from without searching");
+
+    int far = CoreWaypointsAdd(&w, (Vector3){100, 100, 100}); /* linked to nothing */
+    Check(CoreWaypointsNextHop(&w, a, far) == -1, "an unreachable point answers -1");
+    Check(CoreWaypointsPath(&w, a, far, path, 8) == 0, "a path to an unreachable point writes nothing");
+
+    Check(CoreWaypointsNextHop(&w, a, 99) == -1 && CoreWaypointsNextHop(&w, -1, a) == -1,
+          "a bad index answers -1, not a wild read");
+    Check(!CoreWaypointsLink(&w, a, 99) && !CoreWaypointsLink(&w, -1, a),
+          "linking a bad index answers false");
+    Check(!CoreWaypointsLink(&w, a, a), "a point cannot link to itself");
+    Check(CoreWaypointsPath(&w, a, 99, path, 8) == 0 && CoreWaypointsPath(&w, a, c, path, 0) == 0,
+          "a bad index or too small a capacity writes nothing");
+
+    Check(CoreWaypointsNearest(&w, (Vector3){0, 0, 0.9f}) == d,
+          "the nearest point is found by straight-line distance");
+    CoreWaypoints empty = {0};
+    Check(CoreWaypointsNearest(&empty, (Vector3){0, 0, 0}) == -1, "an empty graph has no nearest point");
+
+    CoreWaypoints full = {0};
+    int last = -1;
+    for (int i = 0; i < CORE_WAYPOINTS_MAX; i++)
+        last = CoreWaypointsAdd(&full, (Vector3){(float)i, 0, 0});
+    Check(last == CORE_WAYPOINTS_MAX - 1, "the graph fills to its capacity");
+    Check(CoreWaypointsAdd(&full, (Vector3){0, 0, 0}) == -1, "a full graph refuses another point");
+
+    CoreWaypoints hub = {0};
+    int center = CoreWaypointsAdd(&hub, (Vector3){0, 0, 0});
+    int spokes[CORE_WAYPOINT_LINKS + 1];
+    for (int i = 0; i < CORE_WAYPOINT_LINKS + 1; i++)
+        spokes[i] = CoreWaypointsAdd(&hub, (Vector3){(float)(i + 1), 0, 0});
+    bool allLinked = true;
+    for (int i = 0; i < CORE_WAYPOINT_LINKS; i++)
+        allLinked = allLinked && CoreWaypointsLink(&hub, center, spokes[i]);
+    Check(allLinked, "a point links up to its capacity");
+    Check(!CoreWaypointsLink(&hub, center, spokes[CORE_WAYPOINT_LINKS]),
+          "a full link list refuses one more");
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -2662,6 +2735,7 @@ int main(int argc, char **argv)
     NetDeltaChecks();
     NetSyncChecks();
     NetOwnershipChecks();
+    WaypointsChecks();
     ObjectChecks();
     GameObjectChecks();
     AudioChecks();
