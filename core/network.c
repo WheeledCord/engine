@@ -208,6 +208,15 @@ void CoreNetClose(CoreNetEndpoint *endpoint)
     memset(endpoint, 0, sizeof *endpoint);
 }
 
+void CoreNetDisconnect(CoreNetEndpoint *endpoint, CoreNetPeer peer, bool afterQueued)
+{
+    ENetPeer *target = Peer(endpoint, peer);
+    if (target && afterQueued)
+        enet_peer_disconnect_later(target, 0);
+    else if (target)
+        enet_peer_disconnect(target, 0);
+}
+
 bool CoreNetPoll(CoreNetEndpoint *endpoint, uint32_t timeoutMs, CoreNetEvent *event)
 {
     ENetHost *host = Host(endpoint);

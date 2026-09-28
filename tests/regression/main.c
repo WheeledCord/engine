@@ -13,6 +13,7 @@
 #include "core/network.h"
 #include "core/net_clock.h"
 #include "core/net_sync.h"
+#include "core/net_session.h"
 #include "core/object.h"
 #include "core/audio.h"
 #include "core/sprite_sheet.h"
@@ -2624,6 +2625,285 @@ static void NetOwnershipChecks(void)
     CoreNetSyncFree(&sync);
 }
 
+/* What a test game records from its session callbacks. */
+typedef struct SessionTestGame
+{
+    uint32_t seed, seedRead;
+    int joined[CORE_NET_SESSION_ACTORS], left[CORE_NET_SESSION_ACTORS];
+    int commands, lastCommandActor, lastCommandOp;
+    int32_t lastCommandValue;
+    int events, lastEventOp;
+    int32_t lastEventValue;
+    bool rejectUploads;
+    NetTestState world, player, seen;
+} SessionTestGame;
+
+static const CoreNetField sessionTestFields[] = {
+    CORE_NET_FIELD(NetTestState, position, CORE_NET_VECTOR3),
+    CORE_NET_FIELD(NetTestState, health, CORE_NET_I32),
+};
+static const CoreNetSchema sessionWorldSchema = {40, "session-world", sizeof(NetTestState),
+                                                 sessionTestFields, 2, CORE_NET_AUTHORITY_SERVER, 0};
+static const CoreNetSchema sessionPlayerSchema = {41, "session-player", sizeof(NetTestState),
+                                                  sessionTestFields, 2, CORE_NET_AUTHORITY_OWNER, 0};
+
+static bool SessionTestRegister(void *user, CoreNetSync *sync)
+{
+    (void)user;
+    return CoreNetSyncRegister(sync, &sessionWorldSchema) &&
+           CoreNetSyncRegister(sync, &sessionPlayerSchema);
+}
+
+static void SessionTestStarted(void *user, CoreNetSync *sync)
+{
+    SessionTestGame *game = user;
+    CoreNetSyncSpawn(sync, 100, 40, CORE_NET_SERVER_ACTOR);
+    CoreNetSyncBindState(sync, 100, &game->world);
+}
+
+static void SessionTestWriteWelcome(void *user, CoreNetWriter *writer)
+{
+    CoreNetWriteU32(writer, ((SessionTestGame *)user)->seed);
+}
+
+static bool SessionTestReadWelcome(void *user, CoreNetReader *reader)
+{
+    return CoreNetReadU32(reader, &((SessionTestGame *)user)->seedRead);
+}
+
+static void SessionTestJoined(void *user, CoreNetSync *sync, uint16_t actor)
+{
+    SessionTestGame *game = user;
+    game->joined[actor]++;
+    CoreNetSyncSpawn(sync, actor, 41, actor);
+}
+
+static void SessionTestLeft(void *user, uint16_t actor)
+{
+    ((SessionTestGame *)user)->left[actor]++;
+}
+
+static bool SessionTestAccept(void *user, const CoreNetObject *object)
+{
+    (void)object;
+    return !((SessionTestGame *)user)->rejectUploads;
+}
+
+static void SessionTestCommand(void *user, uint16_t actor, const CoreNetCommand *command,
+                               CoreNetReader *reader)
+{
+    SessionTestGame *game = user;
+    uint32_t value = 0;
+    CoreNetReadU32(reader, &value);
+    game->commands++;
+    game->lastCommandActor = actor;
+    game->lastCommandOp = command->op;
+    game->lastCommandValue = (int32_t)value;
+}
+
+static void SessionTestEvent(void *user, uint8_t op, uint32_t object, CoreNetReader *reader)
+{
+    SessionTestGame *game = user;
+    uint32_t value = 0;
+    (void)object;
+    CoreNetReadU32(reader, &value);
+    game->events++;
+    game->lastEventOp = op;
+    game->lastEventValue = (int32_t)value;
+}
+
+static CoreNetSessionConfig SessionTestConfig(SessionTestGame *game, const char *name, uint32_t version)
+{
+    return (CoreNetSessionConfig){
+        .game = name, .version = version, .objectCapacity = 32, .schemaCapacity = 4,
+        .user = game, .registerSchemas = SessionTestRegister, .started = SessionTestStarted,
+        .writeWelcome = SessionTestWriteWelcome, .readWelcome = SessionTestReadWelcome,
+        .joined = SessionTestJoined, .left = SessionTestLeft, .accept = SessionTestAccept,
+        .command = SessionTestCommand, .event = SessionTestEvent,
+    };
+}
+
+/* Steps both ends until done() says so or about two seconds pass. */
+static bool SessionPump(CoreNetSession *host, CoreNetSession *client,
+                        bool (*done)(const CoreNetSession *, const CoreNetSession *))
+{
+    for (int i = 0; i < 400; i++)
+    {
+        CoreNetSessionStep(host, 1.0 / 60.0, 2);
+        CoreNetSessionStep(client, 1.0 / 60.0, 2);
+        if (done(host, client))
+            return true;
+    }
+    return false;
+}
+
+static bool SessionClientSettled(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    return client->status == CORE_NET_SESSION_WELCOMED || client->status == CORE_NET_SESSION_FAILED;
+}
+
+static bool SessionClientFailed(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    return client->status == CORE_NET_SESSION_FAILED;
+}
+
+static SessionTestGame *sessionHostGame, *sessionClientGame;
+
+static bool SessionWorldArrived(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    const CoreNetObject *world = CoreNetSyncFind((CoreNetSync *)&client->sync, 100);
+    return world && ((const NetTestState *)world->state)->health == 77;
+}
+
+static bool SessionUploadArrived(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)client;
+    const CoreNetObject *player = CoreNetSyncFind((CoreNetSync *)&host->sync, 2);
+    return player && ((const NetTestState *)player->state)->health == 55;
+}
+
+static bool SessionCommandHandled(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    return CoreNetSessionCommandDone(client, client->commandSequence);
+}
+
+static bool SessionEventHeard(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    (void)client;
+    return sessionClientGame->events > 0;
+}
+
+static bool SessionClientGone(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)client;
+    return sessionHostGame->left[2] > 0 && !CoreNetSyncFind((CoreNetSync *)&host->sync, 2);
+}
+
+static void NetSessionChecks(void)
+{
+    SessionTestGame hostGame = {.seed = 12345}, clientGame = {0};
+    sessionHostGame = &hostGame;
+    sessionClientGame = &clientGame;
+    CoreNetSessionConfig hostConfig = SessionTestConfig(&hostGame, "session-test", 3);
+    CoreNetSessionConfig clientConfig = SessionTestConfig(&clientGame, "session-test", 3);
+    CoreNetSession host = {0}, client = {0};
+
+    Check(CoreNetSessionHost(&host, &hostConfig, 0, true) && host.status == CORE_NET_SESSION_ACTIVE &&
+              host.isServer && host.localActor == 1,
+          "hosting opens a server whose own player is actor 1");
+    Check(hostGame.joined[1] == 1 && CoreNetSyncFind(&host.sync, 1) && CoreNetSyncFind(&host.sync, 100),
+          "the host's own player joins at once, and the server's objects are spawned");
+    Check(CoreNetSessionActorActive(&host, 1) && !CoreNetSessionActorActive(&host, 2),
+          "the host knows its own player is in the game and nobody else yet");
+
+    /* The host's command is handled in the call, by the same handler, with no socket involved. */
+    unsigned char payload[4];
+    CoreNetWriter w = CoreNetWriterBegin(payload, sizeof payload);
+    CoreNetWriteU32(&w, 9);
+    uint32_t hostCommand = CoreNetSessionCommand(&host, 7, 100, payload, w.size);
+    Check(hostCommand && hostGame.commands == 1 && hostGame.lastCommandActor == 1 &&
+              hostGame.lastCommandOp == 7 && hostGame.lastCommandValue == 9 &&
+              CoreNetSessionCommandDone(&host, hostCommand),
+          "a host's command runs immediately through the server's handler as actor 1");
+
+    uint16_t port = CoreNetPort(&host.endpoint);
+    Check(CoreNetSessionJoin(&client, &clientConfig, "127.0.0.1", port) &&
+              client.status == CORE_NET_SESSION_CONNECTING,
+          "joining puts an attempt out");
+    Check(SessionPump(&host, &client, SessionClientSettled) &&
+              client.status == CORE_NET_SESSION_WELCOMED && client.localActor == 2 &&
+              clientGame.seedRead == 12345,
+          "the server welcomes a matching joiner as actor 2 with the world's seed");
+    Check(hostGame.joined[2] == 0, "a welcomed joiner is not in the game until it says it is ready");
+    Check(CoreNetSessionReady(&client) && client.status == CORE_NET_SESSION_ACTIVE,
+          "a welcomed joiner becomes active once ready");
+
+    hostGame.world.health = 77;
+    Check(SessionPump(&host, &client, SessionWorldArrived), "a server object reaches the joiner");
+    Check(hostGame.joined[2] == 1 && CoreNetSyncFind(&client.sync, 2),
+          "the server's joined callback spawned the joiner's player, and the joiner has it");
+
+    CoreNetObject *mine = CoreNetSyncFind(&client.sync, 2);
+    Check(mine && CoreNetSessionIsMine(&client, mine) &&
+              !CoreNetSessionIsMine(&client, CoreNetSyncFind(&client.sync, 100)),
+          "the joiner owns its player and not the server's world");
+    if (mine)
+        CoreNetSyncBindState(&client.sync, 2, &clientGame.player);
+    clientGame.player.health = 55;
+    Check(SessionUploadArrived(&host, &client) || SessionPump(&host, &client, SessionUploadArrived),
+          "the joiner's own player state reaches the server");
+    hostGame.rejectUploads = true;
+    clientGame.player.health = 66;
+    for (int i = 0; i < 30; i++)
+    {
+        CoreNetSessionStep(&host, 1.0 / 60.0, 2);
+        CoreNetSessionStep(&client, 1.0 / 60.0, 2);
+    }
+    const CoreNetObject *hostCopy = CoreNetSyncFind(&host.sync, 2);
+    Check(hostCopy && ((const NetTestState *)hostCopy->state)->health == 55,
+          "an upload the game does not accept leaves the server's copy as it was");
+    hostGame.rejectUploads = false;
+
+    w = CoreNetWriterBegin(payload, sizeof payload);
+    CoreNetWriteU32(&w, 21);
+    uint32_t sent = CoreNetSessionCommand(&client, 8, 100, payload, w.size);
+    Check(sent && !CoreNetSessionCommandDone(&client, sent),
+          "a joiner's command is not done before the server has answered");
+    Check(SessionPump(&host, &client, SessionCommandHandled) && hostGame.commands == 2 &&
+              hostGame.lastCommandActor == 2 && hostGame.lastCommandOp == 8 &&
+              hostGame.lastCommandValue == 21,
+          "a joiner's command runs on the server as actor 2 and the next snapshot says so");
+
+    w = CoreNetWriterBegin(payload, sizeof payload);
+    CoreNetWriteU32(&w, 5);
+    Check(CoreNetSessionEvent(&host, 2, 3, 0, payload, w.size) && hostGame.events == 0,
+          "an event for actor 2 alone does not reach the host's own player");
+    Check(SessionPump(&host, &client, SessionEventHeard) && clientGame.lastEventOp == 3 &&
+              clientGame.lastEventValue == 5,
+          "an event for actor 2 reaches that joiner");
+    Check(CoreNetSessionEvent(&host, CORE_NET_EVERYONE, 4, 0, payload, w.size) &&
+              hostGame.events == 1 && hostGame.lastEventOp == 4,
+          "an event for everyone reaches the host's own player at once");
+    Check(!CoreNetSessionEvent(&client, CORE_NET_EVERYONE, 4, 0, NULL, 0),
+          "only the server sends events");
+
+    CoreNetSessionLeave(&client);
+    Check(client.status == CORE_NET_SESSION_OFF, "leaving turns the session off");
+    CoreNetSession idle = {0};
+    Check(SessionPump(&host, &idle, SessionClientGone),
+          "the server hears a leaver go, calls left, and removes what it owned");
+
+    /* A different version or game is refused at the door, with the reason. */
+    SessionTestGame otherGame = {0};
+    CoreNetSessionConfig oldVersion = SessionTestConfig(&otherGame, "session-test", 2);
+    Check(CoreNetSessionJoin(&client, &oldVersion, "127.0.0.1", port) &&
+              SessionPump(&host, &client, SessionClientFailed) &&
+              client.refusal == CORE_NET_REFUSED_VERSION,
+          "a joiner at another version is refused as such");
+    CoreNetSessionLeave(&client);
+    CoreNetSessionConfig otherName = SessionTestConfig(&otherGame, "another-game", 3);
+    Check(CoreNetSessionJoin(&client, &otherName, "127.0.0.1", port) &&
+              SessionPump(&host, &client, SessionClientFailed) &&
+              client.refusal == CORE_NET_REFUSED_GAME,
+          "a joiner running another game is refused as such");
+    Check(otherGame.seedRead == 0 && hostGame.joined[2] == 1 && hostGame.joined[3] == 0,
+          "a refused joiner is never welcomed or joined");
+    CoreNetSessionLeave(&client);
+
+    Check(CoreNetSessionCommand(&client, 1, 0, NULL, 0) == 0, "an idle session sends no command");
+    Check(!CoreNetSessionJoin(&client, &clientConfig, "127.0.0.1", 0) &&
+              client.status == CORE_NET_SESSION_FAILED,
+          "joining port zero fails at once");
+    CoreNetSessionLeave(&client);
+    CoreNetSessionLeave(&host);
+    Check(host.status == CORE_NET_SESSION_OFF, "the host leaves cleanly");
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -2662,6 +2942,7 @@ int main(int argc, char **argv)
     NetDeltaChecks();
     NetSyncChecks();
     NetOwnershipChecks();
+    NetSessionChecks();
     ObjectChecks();
     GameObjectChecks();
     AudioChecks();
