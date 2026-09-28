@@ -166,7 +166,7 @@
         "CoreNetObjectSampleAt",
         "CoreNetSyncRemember",
         "CoreNetSyncWriteDelta",
-        "CoreNetObjectIsMine",
+        "CoreNetSyncIsMine",
         "CoreNetSyncObserve",
         "CoreNetSyncSerialize",
         "CoreNetCommandWrite",

@@ -231,15 +231,15 @@
       </param>
       <description>Only objects that changed are written, and within them only the fields that changed, so a world that is mostly still costs almost nothing to send. Objects that vanished are named so the receiver can drop them. baselineTick must be a tick the receiver also remembers -- in practice the newest one it has acknowledged. If it is not in this registry's history, the snapshot is written in full instead, which is always correct and is what a receiver that has fallen too far behind needs anyway.</description>
     </method>
-    <method name="CoreNetObjectIsMine" brief="Says whether this machine is the one that decides an object's state.">
+    <method name="CoreNetSyncIsMine" brief="Says whether this machine is the one that decides an object's state.">
       <return type="bool">
-        <description>True when the object is owned here, so this machine writes it and everyone else reads. A schema declaring CORE_NET_AUTHORITY_SERVER is the server's wherever it is asked.</description>
+        <description>True when the object is owned here, so this machine writes it and everyone else reads.</description>
       </return>
-      <param name="object" type="const CoreNetObject *">
-        <description>Borrowed object; NULL answers false.</description>
+      <param name="sync" type="const CoreNetSync *">
+        <description>Registry holding this machine's localActor and localIsServer.</description>
       </param>
-      <param name="localActor" type="uint16_t">
-        <description>This machine's actor id, or CORE_NET_SERVER_ACTOR on the machine running the server.</description>
+      <param name="object" type="const CoreNetObject *">
+        <description>Borrowed object; NULL or inactive answers false.</description>
       </param>
       <description>Says whether this machine is the one that decides an object's state.</description>
     </method>
