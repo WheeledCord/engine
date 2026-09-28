@@ -21,6 +21,7 @@ typedef struct ScriptS7
     s7_scheme *scheme;
     ScriptHost *host;
     ScriptLanguage language;
+    s7_int objectTag; // the Scheme type every engine object is
 } ScriptS7;
 
 static ScriptS7 state;
@@ -34,6 +35,37 @@ enum
 };
 #undef SCRIPT_BINDING
 
+// ---- engine objects as Scheme values ----------------------------------------------------------
+/* A Scheme object holds only the handle. The engine owns the object's life; when Scheme lets go of
+   its wrapper only the wrapper is freed, and a wrapper kept past the object's end is refused. */
+typedef struct ScriptS7Object { EngineObjectId id; } ScriptS7Object;
+
+static s7_pointer MakeObject(s7_scheme *sc, EngineObjectId id)
+{
+    if (EngineObjectIdIsNull(id))
+        return s7_f(sc);
+    ScriptS7Object *wrapped = malloc(sizeof *wrapped);
+    if (!wrapped)
+        return s7_error(sc, s7_make_symbol(sc, "out-of-memory"), s7_nil(sc));
+    wrapped->id = id;
+    return s7_make_c_object(sc, state.objectTag, wrapped);
+}
+
+static bool ObjectOf(s7_pointer p, EngineObjectId *out)
+{
+    if (!s7_is_c_object(p) || s7_c_object_type(p) != state.objectTag)
+        return false;
+    *out = ((ScriptS7Object *)s7_c_object_value(p))->id;
+    return true;
+}
+
+static s7_pointer EngineError(s7_scheme *sc, const char *what, const char *why)
+{
+    char text[256];
+    snprintf(text, sizeof text, "%s: %s", what, why ? why : "failed");
+    return s7_error(sc, s7_make_symbol(sc, "engine-error"), s7_list(sc, 1, s7_make_string(sc, text)));
+}
+
 // ---- values -----------------------------------------------------------------------------------
 static s7_pointer ToScheme(s7_scheme *sc, ScriptValue value)
 {
@@ -43,10 +75,8 @@ static s7_pointer ToScheme(s7_scheme *sc, ScriptValue value)
             return s7_make_boolean(sc, value.as.boolean);
         case SCRIPT_INT:
             return s7_make_integer(sc, value.as.integer);
-        case SCRIPT_ENTITY:
-            return s7_make_integer(sc, value.as.entity);
-        case SCRIPT_RESOURCE:
-            return s7_make_integer(sc, value.as.integer);
+        case SCRIPT_OBJECT:
+            return MakeObject(sc, value.as.object);
         case SCRIPT_FLOAT:
             return s7_make_real(sc, value.as.number);
         case SCRIPT_VECTOR2:
@@ -106,16 +136,14 @@ static bool FromScheme(s7_scheme *sc, s7_pointer p, ScriptType wanted, ScriptVal
                 return false;
             *out = ScriptInt((int)numbers[0]);
             return true;
-        case SCRIPT_ENTITY:
-            if (!Number(sc, p, numbers))
+        case SCRIPT_OBJECT:
+        {
+            EngineObjectId id = ENGINE_OBJECT_NULL;
+            if (p != s7_f(sc) && !ObjectOf(p, &id))
                 return false;
-            *out = ScriptHandle((int)numbers[0]);
+            *out = ScriptObject(id);
             return true;
-        case SCRIPT_RESOURCE:
-            if (!Number(sc, p, numbers))
-                return false;
-            *out = ScriptResource((int)numbers[0]);
-            return true;
+        }
         case SCRIPT_FLOAT:
             if (!Number(sc, p, numbers))
                 return false;
@@ -204,6 +232,12 @@ static const char *prelude =
     "(define (vec-y v) (cadr v))\n"
     "(define (vec* v k) (list (* (car v) k) (* (cadr v) k)))\n"
     "(define (vec+ a b) (list (+ (car a) (car b)) (+ (cadr a) (cadr b))))\n"
+    ";; A callback is handed its entity when it takes an argument, and caught so a mistake in it is\n"
+    ";; reported rather than unwinding the engine.\n"
+    "(define (engine-invoke f self)\n"
+    "  (catch #t (lambda () (if (eqv? (cdr (arity f)) 0) (f) (f self))) engine-on-error))\n"
+    "(define (engine-invoke-with f args)\n"
+    "  (catch #t (lambda () (apply f args)) engine-on-error))\n"
     ")\n";
 
 // A script that raises is reported and carried on from, rather than taking the program with it.
@@ -217,20 +251,272 @@ static s7_pointer OnError(s7_scheme *sc, s7_pointer args)
     return s7_nil(sc);
 }
 
-static bool CallFunction(void *user, const char *function)
+static bool CallFunction(void *user, const char *function, EngineObjectId self)
 {
     ScriptS7 *s7 = user;
-    s7_pointer fn = s7_name_to_value(s7->scheme, function);
+    s7_scheme *sc = s7->scheme;
+    s7_pointer fn = s7_name_to_value(sc, function);
     if (!s7_is_procedure(fn))
     {
         TraceLog(LOG_ERROR, "Script: %s is not defined", function);
         return false;
     }
     raised = false;
-    // A callback takes no arguments, so it is already the thunk catch wants.
-    s7_call_with_catch(s7->scheme, s7_t(s7->scheme), fn,
-                       s7_name_to_value(s7->scheme, "engine-on-error"));
+    s7_call(sc, s7_name_to_value(sc, "engine-invoke"), s7_list(sc, 2, fn, MakeObject(sc, self)));
     return !raised;
+}
+
+// ---- the object protocol ----------------------------------------------------------------------
+static const EngineType *LiveType(EngineObjectId id)
+{
+    return state.host ? EngineObjectTypeOf(&state.host->objects, id) : NULL;
+}
+
+// Scheme arguments to engine values, checked against the types the engine declared for them.
+static s7_pointer ConvertArguments(s7_scheme *sc, const char *what, s7_pointer list,
+                                   const EngineValueType *wanted, int declared, EngineValue *out,
+                                   int *count)
+{
+    int given = (int)s7_list_length(sc, list);
+    if (given > declared)
+        return EngineError(sc, what, "too many arguments");
+    for (int i = 0; i < given; i++, list = s7_cdr(list))
+        if (!FromScheme(sc, s7_car(list), wanted[i], &out[i]))
+            return s7_wrong_type_arg_error(sc, what, i + 1, s7_car(list), ScriptTypeName(wanted[i]));
+    *count = given;
+    return NULL;
+}
+
+static const char *NameOf(s7_pointer p)
+{
+    if (s7_is_symbol(p))
+        return s7_symbol_name(p);
+    return s7_is_string(p) ? s7_string(p) : NULL;
+}
+
+// (obj 'property) reads it; (obj 'method args...) calls it.
+static s7_pointer ObjectRef(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    ObjectOf(s7_car(args), &id);
+    const EngineType *type = LiveType(id);
+    if (!type)
+        return EngineError(sc, "object", "that object no longer exists");
+    if (s7_is_null(sc, s7_cdr(args)))
+        return EngineError(sc, type->name, "say which property or method");
+    const char *name = NameOf(s7_cadr(args));
+    if (!name)
+        return s7_wrong_type_arg_error(sc, type->name, 2, s7_cadr(args), "a symbol");
+    s7_pointer rest = s7_cddr(args);
+    const char *error = NULL;
+    if (s7_is_null(sc, rest) && EngineTypeProperty(type, name))
+    {
+        EngineValue value;
+        if (!EngineObjectGet(&state.host->objects, id, name, &value, &error))
+            return EngineError(sc, name, error);
+        return ToScheme(sc, value);
+    }
+    const EngineMethod *method = EngineTypeMethod(type, name);
+    if (!method)
+        return EngineError(sc, name, "that object has no property or method of that name");
+    EngineValue values[ENGINE_METHOD_ARGUMENTS];
+    int count = 0;
+    s7_pointer failed = ConvertArguments(sc, name, rest, method->arguments, method->argumentCount,
+                                         values, &count);
+    if (failed)
+        return failed;
+    EngineValue result = EngineNone();
+    if (!EngineObjectCall(&state.host->objects, id, name, values, count, &result, &error))
+        return EngineError(sc, name, error);
+    return ToScheme(sc, result);
+}
+
+// (set! (obj 'property) value)
+static s7_pointer ObjectSet(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    ObjectOf(s7_car(args), &id);
+    const EngineType *type = LiveType(id);
+    if (!type)
+        return EngineError(sc, "object", "that object no longer exists");
+    if (s7_list_length(sc, args) != 3)
+        return EngineError(sc, type->name, "set! takes one property and one value");
+    const char *name = NameOf(s7_cadr(args));
+    const EngineProperty *property = name ? EngineTypeProperty(type, name) : NULL;
+    if (!property)
+        return EngineError(sc, name ? name : type->name, "that object has no property of that name");
+    EngineValue value;
+    s7_pointer given = s7_caddr(args);
+    if (!FromScheme(sc, given, property->type, &value))
+        return s7_wrong_type_arg_error(sc, name, 3, given, ScriptTypeName(property->type));
+    const char *error = NULL;
+    if (!EngineObjectSet(&state.host->objects, id, name, &value, &error))
+        return EngineError(sc, name, error);
+    return given;
+}
+
+static s7_pointer ObjectToString(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    ObjectOf(s7_car(args), &id);
+    const EngineType *type = LiveType(id);
+    char text[96];
+    snprintf(text, sizeof text, "#<%s %u>", type ? type->name : "ended-object", (unsigned)id.index);
+    return s7_make_string(sc, text);
+}
+
+static s7_pointer ObjectIsEqual(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId a, b;
+    return s7_make_boolean(sc, ObjectOf(s7_car(args), &a) && ObjectOf(s7_cadr(args), &b) &&
+                                   a.index == b.index && a.generation == b.generation);
+}
+
+static s7_pointer ObjectFree(s7_scheme *sc, s7_pointer obj)
+{
+    (void)sc;
+    free(s7_c_object_value(obj));
+    return NULL;
+}
+
+// (make 'type args...)
+static s7_pointer SchemeMake(s7_scheme *sc, s7_pointer args)
+{
+    const char *name = NameOf(s7_car(args));
+    const EngineType *type = name && state.host ? EngineObjectsTypeNamed(&state.host->objects, name) : NULL;
+    if (!type)
+        return EngineError(sc, "make", "there is no object type of that name");
+    EngineValue values[ENGINE_METHOD_ARGUMENTS];
+    int count = 0;
+    s7_pointer failed = ConvertArguments(sc, type->name, s7_cdr(args), type->createArguments,
+                                         type->createArgumentCount, values, &count);
+    if (failed)
+        return failed;
+    const char *error = NULL;
+    EngineObjectId id = EngineObjectCreate(&state.host->objects, type, values, count, &error);
+    if (EngineObjectIdIsNull(id))
+        return EngineError(sc, type->name, error);
+    return MakeObject(sc, id);
+}
+
+// (free! obj): an entity leaves the world, anything else ends. #f when it had already gone.
+static s7_pointer SchemeFree(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    if (!ObjectOf(s7_car(args), &id))
+        return s7_wrong_type_arg_error(sc, "free!", 1, s7_car(args), "an engine object");
+    ScriptEntity *entity = EngineObjectData(&state.host->objects, id, &ScriptEntityType);
+    if (entity)
+        return s7_make_boolean(sc, EntityDestroy(state.host->world, entity->entity));
+    return s7_make_boolean(sc, EngineObjectDestroy(&state.host->objects, id));
+}
+
+static s7_pointer SchemeAlive(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    return s7_make_boolean(sc, ObjectOf(s7_car(args), &id) && LiveType(id) != NULL);
+}
+
+static s7_pointer SchemeIsObject(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    return s7_make_boolean(sc, ObjectOf(s7_car(args), &id));
+}
+
+static s7_pointer SchemeObjectType(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    const EngineType *type = ObjectOf(s7_car(args), &id) ? LiveType(id) : NULL;
+    return type ? s7_make_symbol(sc, type->name) : s7_f(sc);
+}
+
+// What a type can do, gathered up its parents, for looking around at the REPL.
+static s7_pointer SchemeMembers(s7_scheme *sc, s7_pointer args, bool methods)
+{
+    EngineObjectId id;
+    const EngineType *type = ObjectOf(s7_car(args), &id) ? LiveType(id) : NULL;
+    if (!type)
+        return s7_wrong_type_arg_error(sc, methods ? "methods" : "properties", 1, s7_car(args),
+                                       "a live engine object");
+    s7_pointer list = s7_nil(sc);
+    for (; type; type = type->parent)
+    {
+        int count = methods ? type->methodCount : type->propertyCount;
+        for (int i = count - 1; i >= 0; i--)
+            list = s7_cons(sc, s7_make_symbol(sc, methods ? type->methods[i].name : type->properties[i].name), list);
+    }
+    return list;
+}
+static s7_pointer SchemeProperties(s7_scheme *sc, s7_pointer args) { return SchemeMembers(sc, args, false); }
+static s7_pointer SchemeMethods(s7_scheme *sc, s7_pointer args) { return SchemeMembers(sc, args, true); }
+
+// ---- signals ----------------------------------------------------------------------------------
+typedef struct ScriptS7Handler
+{
+    s7_scheme *scheme; // the interpreter the procedure lives in, which may have closed since
+    s7_int protection;
+    s7_pointer procedure;
+} ScriptS7Handler;
+
+static void SchemeSignal(void *user, EngineObjects *objects, EngineObjectId sender,
+                         const EngineValue *arguments, int count)
+{
+    (void)objects; (void)sender;
+    ScriptS7Handler *handler = user;
+    s7_scheme *sc = handler->scheme;
+    if (sc != state.scheme)
+        return;
+    s7_pointer list = s7_nil(sc);
+    for (int i = count - 1; i >= 0; i--)
+        list = s7_cons(sc, ToScheme(sc, arguments[i]), list);
+    s7_call(sc, s7_name_to_value(sc, "engine-invoke-with"), s7_list(sc, 2, handler->procedure, list));
+}
+
+static void SchemeRelease(void *user)
+{
+    ScriptS7Handler *handler = user;
+    if (handler->scheme && handler->scheme == state.scheme)
+        s7_gc_unprotect_at(handler->scheme, handler->protection);
+    free(handler);
+}
+
+// (connect! obj 'signal procedure): a positive id to disconnect! with.
+static s7_pointer SchemeConnect(s7_scheme *sc, s7_pointer args)
+{
+    EngineObjectId id;
+    if (!ObjectOf(s7_car(args), &id))
+        return s7_wrong_type_arg_error(sc, "connect!", 1, s7_car(args), "an engine object");
+    const char *signal = NameOf(s7_cadr(args));
+    s7_pointer procedure = s7_caddr(args);
+    if (!signal)
+        return s7_wrong_type_arg_error(sc, "connect!", 2, s7_cadr(args), "a symbol");
+    if (!s7_is_procedure(procedure))
+        return s7_wrong_type_arg_error(sc, "connect!", 3, procedure, "a procedure");
+    ScriptS7Handler *handler = malloc(sizeof *handler);
+    if (!handler)
+        return s7_error(sc, s7_make_symbol(sc, "out-of-memory"), s7_nil(sc));
+    *handler = (ScriptS7Handler){sc, s7_gc_protect(sc, procedure), procedure};
+    int connection = EngineObjectConnect(&state.host->objects, id, signal, SchemeSignal, handler,
+                                         SchemeRelease);
+    if (!connection)
+        return EngineError(sc, signal, LiveType(id) ? "that object has no signal of that name"
+                                                   : "that object no longer exists");
+    return s7_make_integer(sc, connection);
+}
+
+static s7_pointer SchemeDisconnect(s7_scheme *sc, s7_pointer args)
+{
+    if (!s7_is_integer(s7_car(args)))
+        return s7_wrong_type_arg_error(sc, "disconnect!", 1, s7_car(args), "a connection id");
+    return s7_make_boolean(sc, EngineObjectDisconnect(&state.host->objects, (int)s7_integer(s7_car(args))));
+}
+
+bool ScriptS7DefineObject(const char *name, EngineObjectId object)
+{
+    if (!state.scheme || !name || !state.host || !EngineObjectTypeOf(&state.host->objects, object))
+        return false;
+    s7_define_variable(state.scheme, name, MakeObject(state.scheme, object));
+    return true;
 }
 
 bool ScriptS7Open(ScriptHost *host)
@@ -264,6 +550,31 @@ bool ScriptS7Open(ScriptHost *host)
     }
     s7_define_function(state.scheme, "engine-on-error", OnError, 0, 0, true,
                        "reports a script error and lets the engine carry on");
+    // Every engine object is one Scheme type, applicable and settable.
+    state.objectTag = s7_make_c_type(state.scheme, "engine-object");
+    s7_c_type_set_gc_free(state.scheme, state.objectTag, ObjectFree);
+    s7_c_type_set_ref(state.scheme, state.objectTag, ObjectRef);
+    s7_c_type_set_set(state.scheme, state.objectTag, ObjectSet);
+    s7_c_type_set_to_string(state.scheme, state.objectTag, ObjectToString);
+    s7_c_type_set_is_equal(state.scheme, state.objectTag, ObjectIsEqual);
+    s7_define_function(state.scheme, "make", SchemeMake, 1, 0, true,
+                       "(make 'type args...) makes an engine object: camera2d, timer, mover...");
+    s7_define_function(state.scheme, "free!", SchemeFree, 1, 0, false,
+                       "(free! obj) ends an object; an entity leaves the world");
+    s7_define_function(state.scheme, "alive?", SchemeAlive, 1, 0, false,
+                       "(alive? obj) whether an object still exists");
+    s7_define_function(state.scheme, "object?", SchemeIsObject, 1, 0, false,
+                       "(object? x) whether x is an engine object, alive or not");
+    s7_define_function(state.scheme, "object-type", SchemeObjectType, 1, 0, false,
+                       "(object-type obj) the type's name as a symbol, #f once it has ended");
+    s7_define_function(state.scheme, "properties", SchemeProperties, 1, 0, false,
+                       "(properties obj) every property it has, its parents' included");
+    s7_define_function(state.scheme, "methods", SchemeMethods, 1, 0, false,
+                       "(methods obj) every method it has, its parents' included");
+    s7_define_function(state.scheme, "connect!", SchemeConnect, 3, 0, false,
+                       "(connect! obj 'signal procedure) call procedure with the signal's values");
+    s7_define_function(state.scheme, "disconnect!", SchemeDisconnect, 1, 0, false,
+                       "(disconnect! id) stop a connection connect! made");
     s7_eval_c_string(state.scheme, prelude);
     ScriptHostUseLanguage(host, &state.language);
     return true;

@@ -65,7 +65,10 @@ $(BUILD)/script-api.md: gameplay/script/script_api.def tools/write_script_api.py
 	python3 tools/write_script_api.py --input $< --format markdown --out $@
 $(BUILD)/script-api.json: gameplay/script/script_api.def tools/write_script_api.py
 	python3 tools/write_script_api.py --input $< --format json --out $@
-script-api: $(BUILD)/script-api.md $(BUILD)/script-api.json
+# The object reference comes from the type tables themselves, by running them.
+$(BUILD)/script-objects.md: $(BUILD)/describe_types
+	./$(BUILD)/describe_types $@
+script-api: $(BUILD)/script-api.md $(BUILD)/script-api.json $(BUILD)/script-objects.md
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(GAMEPLAY_OBJ)
@@ -86,6 +89,7 @@ endef
 $(eval $(call core_project,core_integration,tests/integration/core))
 $(eval $(call core_project,gameplay_integration,tests/integration/gameplay))
 $(eval $(call core_project,regression_test,tests/regression))
+$(eval $(call core_project,describe_types,tools/describe_types))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
@@ -105,7 +109,7 @@ sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) scr
 	cp $(RLSRC)/raylib.h $(RLSRC)/raymath.h $(RLSRC)/rlgl.h $(SDK)/include/
 	cp $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(SDK)/lib/
 	cp -r core/fonts core/shaders $(SDK)/share/engine/
-	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(SDK)/share/engine/docs/
+	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(BUILD)/script-objects.md $(SDK)/share/engine/docs/
 	cp tools/engine_build.py $(SDK)/bin/engine-build
 	cp tools/engine_new.py $(SDK)/bin/engine-new
 	chmod +x $(SDK)/bin/engine-build $(SDK)/bin/engine-new

@@ -3,6 +3,11 @@
 Modules are ordinary C translation units, built into `build/core/libcore.a`. Public headers expose raylib-native types. Core includes only its own files, raylib and system headers.
 
 - `engine`: window lifetime, accumulator loop, project callback signatures and input buffering.
+- `object`: engine types described once — properties, methods and signals in a table beside the
+  type — and a caller-owned pool of objects named by generational handles, with signal connections.
+  Camera, audio, collision world, network clocks, texture and timer each declare their type in
+  their own file.
+- `timer`: a countdown object that emits `timeout`, then starts again unless it is one-shot.
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
   A project that declares nothing boots with no probe and no shader compiled; declaring
   `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.
