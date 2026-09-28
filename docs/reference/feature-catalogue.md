@@ -7,7 +7,7 @@ linked guide explains authoring where one exists.
 | --- | --- | --- |
 | Runtime | Window, fixed/variable loop, callback lifecycle, UI input routing | `core/engine.h`; [application loop](../user/application-loop.md) |
 | Runtime | Timing snapshot and opt-in debug overlay, text and transient primitives | `core/diagnostics.h` |
-| Audio | Owned sound/music cache, data-root paths and named volume groups | `core/audio.h` |
+| Audio | Owned sound/music cache, data-root paths, named volume groups, positional sound with a listener, falloff and pan, overlapping voices, and held voices that move, loop and stop | `core/audio.h`; [audio](../user/diagnostics-audio-sprites.md) |
 | Runtime | GPU capability contract | `core/capabilities.h` |
 | Input | Raw input, actions, axes, vectors, and focus-safe relative pointer capture | `core/input.h`; [mouse capture](../user/mouse-capture.md) |
 | Files | Data-root resolution, checked reads, atomic writes | `core/file.h` |
