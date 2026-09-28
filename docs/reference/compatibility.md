@@ -8,9 +8,11 @@ Audio buses are volume/mute groups for engine-owned cached sounds and music, not
 Debug primitives visualize geometry a game supplies; they are not collision or query facilities.
 Sprite presentation remains immediate drawing and does not batch sprites.
 
-The networking package provides ENet transport plus an optional full-snapshot replicated-object
-registry. Projects still choose schemas, spawn policy, simulation authority, input validation,
-prediction, reconciliation, matchmaking, authentication, encryption, and NAT traversal. Replication
-does not implement delta compression, RPCs, interest management, lag compensation, or persistence.
+Networking provides the ENet transport, a replicated-object registry with delta snapshots, and a
+session that hosts (the host is the server) and joins with an engine protocol, game and version
+check, numbered commands from players to the server and events back. Projects still choose schemas,
+what they spawn, input validation, and any prediction. There is no reconciliation, interest
+management, lag compensation, matchmaking, authentication, encryption, NAT traversal or
+persistence.
 The current documented platform remains Linux; the vendored ENet transport is portable, but the
 engine build has not yet enabled or verified its Windows backend.
