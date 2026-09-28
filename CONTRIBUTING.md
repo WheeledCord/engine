@@ -20,15 +20,18 @@ Do not describe an unfinished feature as supported. Record deliberate limits in 
 ## Engine standards
 
 - `core/` may depend only on core, raylib, and system headers. It must not depend on `gameplay/` or a project.
-- The engine supplies reusable mechanisms; games own policy such as controls, collision rules, map size, content, and game-specific state.
+- The engine provides the systems a game needs (rendering, animation, collision, audio, input,
+  saving, networking) and games provide their rules and content. Something belongs in the engine
+  when a different kind of game could use it; stats, costs, turn structure and genre conventions
+  stay in the game.
 - Public APIs must state ownership, lifetime, failure behaviour, and cleanup responsibility.
 - Do not add hidden process-wide game state. Pass project state through the documented context.
 - Preserve the OpenGL 2.1 contract unless a deliberate, documented compatibility change is accepted.
 - Treat every game-usable public engine capability as script-facing by default. Add its binding in
   the same change as the C API; do not wait for a scripted project to discover the omission.
-- Define engine bindings once in `gameplay/script/script_api.def`, so Scheme and Pawn receive the
-  same API. Extend the generic script value/resource-handle machinery when a useful engine resource
-  needs representation rather than requiring each game to write C plumbing.
+- Define engine bindings once in `gameplay/script/script_api.def`. Extend the generic script
+  value/resource-handle machinery when a useful engine resource needs representation rather than
+  requiring each game to write C plumbing.
 - Rendering, networking, input, audio, UI, animation, collision, and other normal game facilities
   are not exempt merely because their C APIs use owned state. Expose safe lifecycle operations and
   opaque handles where scripts can use them meaningfully; never expose raw pointers or platform
@@ -38,6 +41,6 @@ Do not describe an unfinished feature as supported. Record deliberate limits in 
   exception and its concrete reason in `gameplay/script/README.md`. Binding inconvenience or lack of
   an immediate scripted caller is not a reason to omit it.
 - Exercise new bindings through `ScriptInvoke`, including success and expected-failure cases, and
-  regenerate/check the Scheme/Pawn API outputs with `make smoke`.
+  regenerate/check the script API outputs with `make smoke`.
 
 Read the [developer documentation](docs/developer/index.md) before changing engine internals.

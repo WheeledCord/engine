@@ -1,21 +1,30 @@
-# engine
+# Trench Engine
 
-A C engine built on raylib, targeting OpenGL 2.1.
+Trench Engine is a general-purpose engine for 2D and 3D games, written in C on top of raylib and
+targeting modest hardware (OpenGL 2.1, GLSL 120). The engine does the heavy lifting in C —
+rendering, animation, audio, input, collision, saving and networking — and games decide what
+happens. It is developed alongside real games: when one of them needs something an engine would
+normally provide, it goes into the engine for every game to use, but game rules never do.
 
-This is the engine. The games and the editor built with it live beside it in the workspace, each a
+Games are meant to be written in Scheme, with scripting as easy as Godot's and powerful enough to
+build new features without writing C. C remains the engine's own language, and a game drops into it
+only when it truly needs to. The aim is an engine that is simple, readable and easy to use, and small
+enough for one person to understand.
+
+This repository is the engine. Games and tools built with it live beside it in the workspace, each a
 project of its own:
 
     trenchengine/
       engine/        this repository
-      references/    other engines, kept to read
-      Games/         dodge, collector, scripted-mover, authoring-demo, isometric
-      Tools/         ui-editor, sprite-baker
+      references/    other engines' source, kept to read
+      Games/         trenchfoot, isometric, skyrift, authoring-demo
+      Tools/         ui-editor, sprite-baker, texture-baker
 
 `core/` is the engine: window and main loop, input, shaders, render targets, mesh building,
-skeletons and animation, sprite sheets, isometric grids, an FPS camera, and an immediate-mode UI. A project declares the GPU
-capabilities it needs and core checks those and nothing else. `gameplay/` is an optional entity
-and scene layer above core. `tests/` holds engine-owned verification fixtures; game projects and
-authoring tools live beside the repository in the workspace.
+skeletons and animation, sprite sheets, isometric grids, an FPS camera, audio, networking, saving
+and an immediate-mode UI. A project declares the GPU capabilities it needs and core checks those
+and nothing else. `gameplay/` holds entities, scenes and Scheme scripting on top of core. `tests/`
+holds the engine's own checks.
 
 ## Building
 
@@ -71,8 +80,8 @@ See the complete authoring example in the sibling workspace at `../Games/authori
 
 ## Building a game with it
 
-The engine builds an SDK: headers, static libraries, its runtime data, the Pawn toolchain, and a
-pkg-config file describing them.
+The engine builds an SDK: headers, static libraries, its runtime data, and a pkg-config file
+describing them.
 
     make sdk                  # build/core/sdk
     make install PREFIX=~/.local
@@ -115,11 +124,10 @@ would be.
 
 ## Scripting
 
-Scheme and Pawn, over one binding table. The script-facing API is described once as data, and each
-language is a loop over that table rather than a set of hand-written bindings, so a call is bound
-once however many languages read it. `gameplay/script/README.md` explains the arrangement;
-`Games/scripted-mover` is the same entity written in each language, with no C left that knows what a
-mover is.
+Scheme, through s7. The script-facing API is described once as data in
+`gameplay/script/script_api.def`, and the Scheme frontend is a loop over that table rather than a
+set of hand-written bindings. `gameplay/script/README.md` explains the arrangement; `../Games/skyrift`
+and `../Games/isometric` are scripted games.
 
 ## UI
 
