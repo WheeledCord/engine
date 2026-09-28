@@ -16,6 +16,7 @@
 #include "core/particles.h"
 #include "core/texture.h"
 #include "core/timer.h"
+#include "core/waypoints.h"
 #include "script_api.h"
 
 /* What the frontends share: the world, the classes scripts declared, and which entity's callback is
