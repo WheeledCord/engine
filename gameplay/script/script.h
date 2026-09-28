@@ -13,6 +13,7 @@
 #include "gameplay/iso_move.h"
 #include "gameplay/runtime.h"
 #include "core/net_clock.h"
+#include "core/particles.h"
 #include "core/texture.h"
 #include "core/timer.h"
 #include "script_api.h"
