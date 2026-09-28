@@ -48,6 +48,9 @@ FpsCameraConfig FpsCameraDefaults(void);
 void FpsCameraInit(FpsCamera *state, Vector3 eyePosition, float yaw, float pitch, float fov);
 /* Keys and gameplay speed restrictions are resolved by the caller. Returns footfall count. */
 int FpsCameraUpdate(FpsCamera *s, const FpsCameraConfig *c, FpsInput input, FpsWorld world, float dt);
+/* Turns the view while time stands still -- a paused or frozen game that still lets the player look
+   around. Nothing moves and the gait holds; the view is rebuilt as the last step left it. */
+void FpsCameraLook(FpsCamera *s, const FpsCameraConfig *c, Vector2 lookDelta);
 Camera FpsCameraInterpolated(const FpsCamera *s, float alpha);
 void FpsViewmodelInterpolated(const FpsCamera *s, float alpha, Vector3 *offset, Quaternion *rotation);
 #endif
