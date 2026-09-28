@@ -15,6 +15,7 @@
 #include "core/net_sync.h"
 #include "core/object.h"
 #include "core/audio.h"
+#include "core/particles.h"
 #include "core/sprite_sheet.h"
 #include "core/texture.h"
 #include "core/playback.h"
@@ -2624,6 +2625,91 @@ static void NetOwnershipChecks(void)
     CoreNetSyncFree(&sync);
 }
 
+// Keeps every particle whose kind is not 99, so the removed one exercises the same swap-with-last
+// path as expiry.
+static bool ParticlesStepKeepExceptKind99(CoreParticle *p, Vector3 previous, float dt, void *user)
+{
+    (void)previous;
+    (void)dt;
+    (*(int *)user)++;
+    return p->kind != 99;
+}
+
+static void ParticlesChecks(void)
+{
+    CoreParticles pool;
+    Check(CoreParticlesInit(&pool, 3), "a particle pool allocates its storage");
+    CoreParticle base = {0};
+    base.life = 10.0f;
+    bool filled = true;
+    for (int i = 0; i < 3; i++)
+        filled = filled && CoreParticleEmit(&pool, &base) != NULL;
+    Check(filled && CoreParticleEmit(&pool, &base) == NULL && pool.count == 3,
+          "emitting up to capacity succeeds, and one more returns NULL and leaves the pool as it was");
+    CoreParticlesFree(&pool);
+
+    Check(CoreParticlesInit(&pool, 4), "a second particle pool allocates for the expiry check");
+    CoreParticle soon = {0}, later = {0};
+    soon.life = 0.5f;
+    later.life = 5.0f;
+    CoreParticleEmit(&pool, &soon);
+    CoreParticleEmit(&pool, &later);
+    CoreParticlesUpdate(&pool, 0.6f, NULL, NULL);
+    Check(pool.count == 1 && pool.items[0].life == 5.0f,
+          "an expired particle is removed, swapping the last live particle into its place");
+    CoreParticlesFree(&pool);
+
+    Check(CoreParticlesInit(&pool, 1), "a third particle pool allocates for the gravity/drag check");
+    CoreParticle falling = {0};
+    falling.life = 100.0f;
+    falling.gravity = 10.0f;
+    falling.drag = 0.5f;
+    CoreParticleEmit(&pool, &falling);
+    for (int i = 0; i < 3; i++)
+        CoreParticlesUpdate(&pool, 0.1f, NULL, NULL);
+    // vel.y -= grav*dt; vel *= 1/(1+drag*dt); pos.y += vel.y*dt, three times over: worked out in
+    // float32 ahead of time so this check catches a changed formula, not just a changed rounding.
+    Check(fabsf(pool.items[0].velocity.y - (-2.7232485f)) < 0.001f &&
+              fabsf(pool.items[0].position.y - (-0.55350405f)) < 0.001f,
+          "gravity and drag integrate exactly as specified over a few fixed steps");
+    CoreParticlesFree(&pool);
+
+    Check(CoreParticlesInit(&pool, 3), "a fourth particle pool allocates for the step-hook check");
+    CoreParticle keep = {0}, drop = {0};
+    keep.life = 10.0f;
+    keep.kind = 1;
+    drop.life = 10.0f;
+    drop.kind = 99;
+    CoreParticleEmit(&pool, &keep);
+    CoreParticleEmit(&pool, &drop);
+    CoreParticleEmit(&pool, &keep);
+    int stepCalls = 0;
+    CoreParticlesUpdate(&pool, 0.01f, ParticlesStepKeepExceptKind99, &stepCalls);
+    bool anyDropped = false;
+    for (int i = 0; i < pool.count; i++)
+        anyDropped = anyDropped || pool.items[i].kind == 99;
+    Check(stepCalls == 3 && pool.count == 2 && !anyDropped,
+          "the step hook's false removes a particle the same way expiry does");
+    CoreParticlesFree(&pool);
+
+    // The Scheme type: made by name, its template set, emitted from, counted and cleared.
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    Check(ScriptS7Open(&host), "the Scheme frontend opens for the particles check");
+    Check(ScriptS7Eval("(define pp (make 'particles))", NULL) &&
+              ScriptS7Eval("(set! (pp 'life) 2.0)", NULL) && EvalIs("(pp 'count)", "0") &&
+              EvalIs("(pp 'emit! (list 0 0 0) (list 0 1 0))", "#t") && EvalIs("(pp 'count)", "1") &&
+              EvalIs("(properties pp)", "(count life size-start size-end gravity drag)"),
+          "a particle pool is made by name, takes a template property, emits, and counts what lives");
+    Check(ScriptS7Eval("(pp 'clear!)", NULL) && EvalIs("(pp 'count)", "0"),
+          "clear! empties a particle pool immediately");
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -2662,6 +2748,7 @@ int main(int argc, char **argv)
     NetDeltaChecks();
     NetSyncChecks();
     NetOwnershipChecks();
+    ParticlesChecks();
     ObjectChecks();
     GameObjectChecks();
     AudioChecks();
