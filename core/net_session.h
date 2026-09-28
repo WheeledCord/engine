@@ -80,6 +80,14 @@ typedef struct CoreNetSessionConfig
     void (*command)(void *user, uint16_t actor, const CoreNetCommand *command, CoreNetReader *reader);
     /* A player (including the host's own): the server says something happened. */
     void (*event)(void *user, uint8_t op, uint32_t object, CoreNetReader *reader);
+    /* Joiner only: a snapshot just applied brought an object that was not there before. Fired once
+       per object, after the snapshot has replaced the registry's storage, so object is already
+       reachable by CoreNetSyncFind. The server never calls this -- it creates its own objects. */
+    void (*appeared)(void *user, CoreNetSync *sync, CoreNetObject *object);
+    /* Joiner only: a snapshot just applied removed an object that was there before. Fired once per
+       object, named by the identity it had; it is already gone from the registry by the time this
+       is called. The server never calls this either. */
+    void (*vanished)(void *user, uint32_t id);
 } CoreNetSessionConfig;
 
 typedef struct CoreNetSessionActor

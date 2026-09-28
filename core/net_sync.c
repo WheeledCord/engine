@@ -788,6 +788,47 @@ bool CoreNetSyncWriteDelta(const CoreNetSync *sync, uint32_t tick, uint32_t base
     return !writer->failed;
 }
 
+size_t CoreNetFieldsFromType(const EngineType *type, CoreNetField *out, size_t capacity)
+{
+    if (!type || !out)
+        return 0;
+    size_t count = 0;
+    for (const EngineType *t = type; t; t = t->parent)
+        for (int i = 0; i < t->propertyCount; i++)
+        {
+            const EngineProperty *property = &t->properties[i];
+            if (!(property->flags & ENGINE_PROPERTY_SHARED))
+                continue;
+            // A computed property has no offset into storage: nothing here to copy to or from.
+            if (property->get || property->set)
+                return 0;
+            CoreNetFieldType kind;
+            size_t size;
+            unsigned int flags = 0;
+            switch (property->type)
+            {
+                case ENGINE_BOOL: kind = CORE_NET_BOOL; size = sizeof(bool); break;
+                case ENGINE_INT: kind = CORE_NET_I32; size = sizeof(int32_t); break;
+                case ENGINE_FLOAT:
+                    kind = CORE_NET_F32; size = sizeof(float); flags = CORE_NET_FIELD_INTERPOLATED;
+                    break;
+                case ENGINE_VECTOR2:
+                    kind = CORE_NET_VECTOR2; size = sizeof(Vector2); flags = CORE_NET_FIELD_INTERPOLATED;
+                    break;
+                case ENGINE_VECTOR3:
+                    kind = CORE_NET_VECTOR3; size = sizeof(Vector3); flags = CORE_NET_FIELD_INTERPOLATED;
+                    break;
+                default: return 0; // a string, an object, or nothing: not a wire type
+            }
+            if (count >= capacity)
+                return 0;
+            out[count++] = (CoreNetField){
+                .name = property->name, .type = kind, .offset = property->offset, .size = size,
+                .flags = flags};
+        }
+    return count;
+}
+
 bool CoreNetSyncIsMine(const CoreNetSync *sync, const CoreNetObject *object)
 {
     return LocallyOwned(sync, object);

@@ -184,10 +184,57 @@ Each receiver is sent its own snapshot, against its own acknowledgement. Two pla
 different packets cannot share a baseline, which is why id Tech 3 keeps its backup ring per client.
 `CoreNetSyncWrite` is simply a delta against no baseline.
 
+## Sharing an engine object from Scheme
+
+A property marked `ENGINE_PROPERTY_SHARED` (`core/object.h`) on an engine type is sent to the other
+machines in a networked game. A script hosts, joins and shares objects of such a type through the
+built-in `"network"` engine type, on top of everything above -- one `CoreNetSession` per `network`
+object:
+
+```scheme
+;; the game's own type, with two properties marked shared, registered before any network object
+;; is made -- see ScriptHostRegisterType for a game's own engine type in C.
+
+(define net (make 'network "my-game" 1))     ; game name and version, like CoreNetSessionConfig
+(net 'host! 7431)                             ; or (net 'join! "10.0.0.2" 7431)
+(net 'ready!)                                 ; a joiner only, once its status is "welcomed"
+
+(connect! net 'appeared (lambda (obj) (set! remote obj)))  ; a joiner: told about each new object
+(connect! net 'joined (lambda (actor) (display actor)))    ; the server: an actor is in
+
+(define mine (make 'unit))
+(net 'share! mine)                            ; server only: mine's own storage becomes replicated
+(net 'mine? mine)                             ; #t here, #f on every machine that only received it
+```
+
+At creation, `network` registers one net schema for every engine type already registered in the
+same script host that has at least one shared property (`CoreNetFieldsFromType`), in registration
+order -- schema id is that position plus one, name is the type's name. Every machine runs the same
+script and so registers the same types in the same order, and the ids agree without a word being
+said over the wire.
+
+`status`, `actor`, `server`, `refusal` and `port` are read-only properties, the last for reading back
+the UDP port `host!` bound when given zero. `host!`, `join!`, `ready!` and `leave!` wrap
+`CoreNetSessionHost`, `CoreNetSessionJoin`, `CoreNetSessionReady` and `CoreNetSessionLeave`.
+`share!` is server only: it spawns a replicated object whose state *is* the given object's own
+storage (`CoreNetSyncBindState` with `EngineObjectData`) and remembers the pairing; `mine?` says
+whether this machine decides a shared or appeared object, the way `CoreNetSessionIsMine` does.
+
+On a joiner, an object a snapshot brings becomes an engine object of the matching type (its schema's
+name, looked up in the same host), bound the same way, with the signal `appeared` carrying it; one a
+snapshot takes away destroys the engine object it was paired with, silently. Destroying the network
+object, or `leave!`, destroys every object it created this way; an object `share!` was given is the
+caller's and is never destroyed here. Signals: `joined` and `left` (actor) on the server, `welcomed`
+and `appeared` (object) on a joiner.
+
+Commands and events (`CoreNetSessionCommand`/`CoreNetSessionEvent`) are not reachable from Scheme
+yet -- a script can host, join and share replicated state, but a one-off request or notification is
+still C only.
+
 ## What is still missing
 
 There is no client-side prediction of a player's own movement against the server and no
 reconciliation: the server accepts the state a player publishes about his own body, checked by the
 game's `accept` callback. There is no lag compensation, no interest management (every player is sent
-every object), no encryption and no authentication. Scripts cannot host or join yet; networking is
-C only.
+every object), no encryption and no authentication. Scripts can host, join and share replicated
+objects (above); commands and events from Scheme are not implemented yet.
