@@ -45,6 +45,10 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
 - `viewmodel`: one scoped projection/depth function and camera-space transform helper.
 - `transform`: local/world movement, rotation, conversion and bounded turning. Forward is +Z, up
   +Y, right -X, matching FpsCamera, ActorLookAt and glTF models. [Usage](TRANSFORMS.md).
+- `collision3d`: a fixed-capacity set of Models with layers and a caller tag, and a closest-hit ray
+  query over their meshes -- the 3D counterpart to `collision2d`'s shape queries. It stores each
+  Model pointer, so a query always sees that model's current transform and meshes. Not a Scheme
+  engine type yet: scripts cannot add models to it.
 - `ui`: integer-pixel bevel primitives, immediate widgets, single-line text editing with caret,
   selection and system clipboard, nested clipped indent regions
   and an externally loaded bitmap font. Widgets only answer to the pointer where they are visible:

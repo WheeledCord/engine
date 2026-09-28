@@ -6,6 +6,7 @@
 // asserts on a value read back: a pixel, a rectangle, a return code. Run with no arguments for the
 // checks that share one window, and with --runner for the ones that need the engine's own loop.
 #define _DEFAULT_SOURCE
+#include "core/collision3d.h"
 #include "core/engine.h"
 #include "core/fps_camera.h"
 #include "core/frame_uniforms.h"
@@ -2975,6 +2976,58 @@ static void NetOwnershipChecks(void)
     CoreNetSyncFree(&sync);
 }
 
+// ---- a ray query over a fixed set of Models ------------------------------------------------------
+static void Collision3DChecks(void)
+{
+    // A unit cube at the origin (faces at +-1) and a second one translated to +-1 around z=3, both
+    // in front of a ray fired from (0,0,5) toward -Z -- the same setup Trenchfoot's PropWorldRay
+    // family raycasts against, just with two boxes standing in for its four models.
+    Model nearModel = LoadModelFromMesh(GenMeshCube(2, 2, 2));
+    Model farModel = LoadModelFromMesh(GenMeshCube(2, 2, 2));
+    farModel.transform = MatrixTranslate(0, 0, 3);
+    Ray ray = {{0, 0, 5}, {0, 0, -1}};
+
+    CoreCollision3D world = {0};
+    Check(CoreCollision3DAdd(&world, &nearModel, 1, 11) && CoreCollision3DAdd(&world, &farModel, 2, 22),
+          "two models register with distinct layers and tags");
+    Check(!CoreCollision3DAdd(&world, NULL, 1, 0), "adding a NULL model is rejected");
+
+    CoreRayHit hit = CoreCollision3DRay(&world, ray, 100.0f, 1 | 2);
+    Check(hit.hit && fabsf(hit.distance - 1.0f) < 1e-4f && Vector3Distance(hit.point, (Vector3){0, 0, 4}) < 1e-4f,
+          "the closer of two entries wins, at the near face of the translated cube");
+    Check(Vector3Distance(hit.normal, (Vector3){0, 0, 1}) < 1e-4f && Vector3DotProduct(hit.normal, ray.direction) < 0,
+          "the hit normal is unit length and faces back against the ray");
+    Check(hit.tag == 22, "the hit reports the winning entry's tag");
+
+    Check(!CoreCollision3DRay(&world, ray, 100.0f, 4).hit, "a mask that meets no entry's layers hits nothing");
+    CoreRayHit onlyNear = CoreCollision3DRay(&world, ray, 100.0f, 1);
+    Check(onlyNear.hit && onlyNear.tag == 11 && fabsf(onlyNear.distance - 4.0f) < 1e-4f,
+          "excluding the closer entry's layer from the mask lets the farther one be found instead");
+    Check(!CoreCollision3DRay(&world, ray, 0.5f, 1 | 2).hit, "maxDistance shorter than every hit finds nothing");
+    Check(!CoreCollision3DRay(&world, ray, 2.0f, 1).hit,
+          "maxDistance between the two distances cuts off an entry that would otherwise be hit");
+
+    farModel.transform = MatrixTranslate(0, 0, -3);
+    CoreRayHit moved = CoreCollision3DRay(&world, ray, 100.0f, 2);
+    Check(moved.hit && fabsf(moved.distance - 7.0f) < 1e-4f && Vector3Distance(moved.point, (Vector3){0, 0, -2}) < 1e-4f,
+          "changing a model's transform in place moves where its entry hits");
+
+    CoreCollision3D full = {0};
+    Model fill = LoadModelFromMesh(GenMeshCube(1, 1, 1));
+    bool filled = true;
+    for (int i = 0; i < CORE_COLLISION3D_MAX; i++)
+        filled = filled && CoreCollision3DAdd(&full, &fill, 1, i);
+    Check(filled, "the set accepts exactly its capacity");
+    Check(!CoreCollision3DAdd(&full, &fill, 1, 99), "adding past capacity is rejected");
+
+    CoreCollision3DClear(&world);
+    Check(!CoreCollision3DRay(&world, ray, 100.0f, 1 | 2).hit, "a cleared set has nothing left to hit");
+
+    UnloadModel(nearModel);
+    UnloadModel(farModel);
+    UnloadModel(fill);
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -3013,6 +3066,7 @@ int main(int argc, char **argv)
     NetDeltaChecks();
     NetSyncChecks();
     NetOwnershipChecks();
+    Collision3DChecks();
     ObjectChecks();
     GameObjectChecks();
     NodeChecks();
