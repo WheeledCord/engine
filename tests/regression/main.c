@@ -2434,6 +2434,143 @@ static void AudioChecks(void)
     CoreAudioFree(&audio);
 }
 
+// ---- the first-person controller, against the hand-written one Trenchfoot carried ----------
+/* A line-for-line transcription of the movement Trenchfoot wrote inline in its main loop
+   (main_trench.c, look + sway + walk + slide + eye follow + gait + bob), with the game's own
+   modifiers -- wading, wounds, the limp, the ladder, the mortar shake -- left out, because those
+   stay the game's. The engine controller must reproduce it step for step. */
+typedef struct FpsReference
+{
+    float yaw, pitch, prevYaw, prevPitch, lagYaw, lagPitch, camY, phase, blend;
+    Vector3 body, vel;
+    double time;
+} FpsReference;
+
+static bool FpsTestCanWalk(float x, float z) { (void)z; return x < 5.0f; } // a wall at x = 5
+static float FpsTestGround(void *context, float x, float z)
+{
+    (void)context;
+    return 0.2f * sinf(x) + 0.1f * z;
+}
+static Vector3 FpsTestSlide(void *context, Vector3 p, Vector3 desired)
+{
+    (void)context;
+    if (FpsTestCanWalk(desired.x, desired.z))
+        return desired;
+    if (FpsTestCanWalk(desired.x, p.z))
+        return (Vector3){desired.x, desired.y, p.z};
+    if (FpsTestCanWalk(p.x, desired.z))
+        return (Vector3){p.x, desired.y, desired.z};
+    return p;
+}
+
+static int FpsReferenceStep(FpsReference *r, const FpsCameraConfig *g, Vector2 md, float ix, float iz,
+                            float speed, bool crouch, float dt, Camera *cam)
+{
+    r->yaw -= md.x * g->sensitivity;
+    r->pitch -= md.y * g->sensitivity;
+    r->pitch = Clamp(r->pitch, -g->pitchLimit, g->pitchLimit);
+    const ViewmodelMotion *vm = &g->viewmodel;
+    float yawDelta = r->yaw - r->prevYaw;
+    if (yawDelta > PI) yawDelta -= 2.0f * PI;
+    if (yawDelta < -PI) yawDelta += 2.0f * PI;
+    float swayResponse = fmaxf(vm->swayResponse, 0.01f), swayMax = fmaxf(vm->swayMax, 0.0001f);
+    float invFrame = 1.0f / fmaxf(dt, 0.001f);
+    float yawTarget = -yawDelta * invFrame / swayResponse;
+    float pitchTarget = -(r->pitch - r->prevPitch) * invFrame / swayResponse;
+    yawTarget = swayMax * tanhf(yawTarget / swayMax);
+    pitchTarget = swayMax * tanhf(pitchTarget / swayMax);
+    float swayFollow = 1.0f - expf(-swayResponse * dt);
+    r->lagYaw += (yawTarget - r->lagYaw) * swayFollow;
+    r->lagPitch += (pitchTarget - r->lagPitch) * swayFollow;
+    r->prevYaw = r->yaw;
+    r->prevPitch = r->pitch;
+    Vector3 fwd = {cosf(r->pitch) * sinf(r->yaw), sinf(r->pitch), cosf(r->pitch) * cosf(r->yaw)};
+    Vector3 flat = Vector3Normalize((Vector3){fwd.x, 0, fwd.z});
+    Vector3 right = {-flat.z, 0, flat.x};
+    Vector3 old = r->body;
+    float il = sqrtf(ix * ix + iz * iz);
+    if (il > 1.0f) { ix /= il; iz /= il; }
+    Vector3 wish = Vector3Scale(Vector3Add(Vector3Scale(right, ix), Vector3Scale(flat, iz)), speed);
+    float va = 1.0f - expf(-((il > 0) ? g->acceleration : g->deceleration) * dt);
+    r->vel.x += (wish.x - r->vel.x) * va;
+    r->vel.z += (wish.z - r->vel.z) * va;
+    Vector3 p = r->body, mv = Vector3Scale(r->vel, dt);
+    p = FpsTestSlide(NULL, p, (Vector3){p.x + mv.x, p.y, p.z + mv.z});
+    if (fabsf(p.x - old.x) < fabsf(mv.x) * 0.5f) r->vel.x = 0;
+    if (fabsf(p.z - old.z) < fabsf(mv.z) * 0.5f) r->vel.z = 0;
+    float target = FpsTestGround(NULL, p.x, p.z) + (crouch ? g->crouchEye : g->eyeHeight);
+    r->camY += (target - r->camY) * (1.0f - expf(-g->eyeFollow * dt));
+    p.y = r->camY;
+    r->body = p;
+    float travelled = sqrtf((p.x - old.x) * (p.x - old.x) + (p.z - old.z) * (p.z - old.z));
+    float actualSpeed = travelled / fmaxf(dt, 0.0001f);
+    float runMix = Clamp((actualSpeed - g->walkSpeed) / fmaxf(g->runSpeed - g->walkSpeed, 0.01f), 0, 1);
+    r->blend += (Clamp(actualSpeed / g->walkSpeed, 0, 1) - r->blend) * (1.0f - expf(-g->bobResponse * dt));
+    float stepLen = g->stepWalk + (g->stepRun - g->stepWalk) * runMix;
+    float next = r->phase + travelled * PI / stepLen;
+    int footfall = (int)(next / PI) > (int)(r->phase / PI);
+    r->phase = fmodf(next, 2.0f * PI);
+    r->time += dt;
+    float amp = r->blend * (1.0f + (g->bobRunScale - 1.0f) * runMix);
+    float doubleWave = sinf(2.0f * r->phase);
+    float bobY = g->bobVertical * amp * (-0.5f * cosf(2.0f * r->phase) + 0.1f * sinf(4.0f * r->phase));
+    float roll = g->bobRoll * amp * cosf(r->phase), nod = g->bobPitch * amp * doubleWave;
+    float breath = sinf((float)r->time * 2.0f * PI * g->breathRate) * g->breathAmount * (1.0f - r->blend);
+    Vector3 viewPos = Vector3Add(p, Vector3Add(Vector3Scale(right, g->bobSide * amp * cosf(r->phase)),
+                                               Vector3Scale(flat, g->bobForward * amp * doubleWave)));
+    viewPos.y += bobY + breath;
+    fwd = Vector3Normalize(Vector3RotateByAxisAngle(fwd, right, nod));
+    Vector3 viewUp = Vector3Normalize(Vector3CrossProduct(right, fwd));
+    *cam = (Camera){viewPos, Vector3Add(viewPos, fwd), Vector3Normalize(Vector3RotateByAxisAngle(viewUp, fwd, roll)),
+                    g->fov, CAMERA_PERSPECTIVE};
+    return footfall;
+}
+
+static float FpsTestGap(Vector3 a, Vector3 b) { return Vector3Distance(a, b); }
+
+static void FpsControllerChecks(void)
+{
+    FpsCameraConfig config = FpsCameraDefaults();
+    FpsCamera engine;
+    Vector3 start = {0, FpsTestGround(NULL, 0, 0) + config.eyeHeight, 0};
+    FpsCameraInit(&engine, start, 0.3f, 0.0f, config.fov);
+    FpsReference ref = {.yaw = 0.3f, .prevYaw = 0.3f, .body = start, .camY = start.y};
+    FpsWorld world = {NULL, FpsTestSlide, FpsTestGround};
+    float worst = 0, worstLag = 0, worstPhase = 0;
+    int engineSteps = 0, referenceSteps = 0;
+    for (int i = 0; i < 600; i++)
+    {
+        float dt = (i % 7 == 0) ? 1.0f / 30.0f : 1.0f / 60.0f;      // an uneven frame rate
+        Vector2 look = {(i % 90 < 30) ? 6.0f : ((i % 90 < 45) ? -14.0f : 0.0f), (i % 50 < 10) ? 3.0f : -1.0f};
+        float ix = (i % 200 < 100) ? 1.0f : 0.0f, iz = (i % 240 < 200) ? 1.0f : 0.0f;
+        bool crouch = i % 300 > 260;
+        float speed = (i % 150 < 75 ? config.runSpeed : config.walkSpeed) * (i % 100 < 20 ? 0.45f : 1.0f);
+        FpsInput input = {.move = {ix, 0, iz}, .lookDelta = look, .crouch = crouch, .useSpeed = true, .speed = speed};
+        engineSteps += FpsCameraUpdate(&engine, &config, input, world, dt);
+        Camera reference;
+        referenceSteps += FpsReferenceStep(&ref, &config, look, ix, iz, speed, crouch, dt, &reference);
+        worst = fmaxf(worst, FpsTestGap(engine.current.position, reference.position));
+        worst = fmaxf(worst, FpsTestGap(Vector3Subtract(engine.current.target, engine.current.position),
+                                        Vector3Subtract(reference.target, reference.position)));
+        worst = fmaxf(worst, FpsTestGap(engine.current.up, reference.up));
+        worstLag = fmaxf(worstLag, fmaxf(fabsf(engine.lagYaw - ref.lagYaw), fabsf(engine.lagPitch - ref.lagPitch)));
+        worstPhase = fmaxf(worstPhase, fabsf(engine.phase - ref.phase));
+    }
+    // Float rounding only: measured at 8.6e-6 m and 1.4e-5 rad over these 600 steps.
+    Check(worst < 1e-4f && worstLag < 1e-6f && worstPhase < 1e-4f && engineSteps == referenceSteps &&
+              engineSteps > 10,
+          "the engine's FPS controller reproduces the hand-written game controller step for step");
+    Check(engine.position.x < 5.0f, "the controller slides along what the world says blocks it");
+    FpsInput rooted = {.move = {0, 0, 1}, .useSpeed = true, .speed = 0};
+    Vector3 before = engine.position;
+    for (int i = 0; i < 30; i++)
+        FpsCameraUpdate(&engine, &config, rooted, world, 1.0f / 60.0f);
+    Check(fabsf(engine.position.x - before.x) < 0.2f && fabsf(engine.position.z - before.z) < 0.2f &&
+              engine.bobAmp >= 0.0f,
+          "a speed the game sets holds even at zero, rather than falling back to walking");
+}
+
 static void NetOwnershipChecks(void)
 {
     /* A listen server's client registry has localIsServer true and localActor its own player id
@@ -2521,6 +2658,7 @@ int main(int argc, char **argv)
     ObjectChecks();
     GameObjectChecks();
     AudioChecks();
+    FpsControllerChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();
