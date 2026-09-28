@@ -86,19 +86,18 @@ describing them.
     make sdk                  # build/core/sdk
     make install PREFIX=~/.local
 
-A project lives anywhere and says only what it is, in an `engine.project` manifest — no build rules
-and no path into the engine:
+A project lives anywhere and says only what it is, in an `engine.project` manifest — no build rules,
+no path into the engine, and no list of engine parts. Every project gets the whole engine; the linker
+keeps only what the game calls, and a game that defines no `main` of its own gets the standard one:
 
     name authoring_demo
-
-    module entry
-    module gameplay
 
     source src/*.c
     scenes scenes
 
 `engine-build` reads it, finds the SDK (named with `--sdk`, in `ENGINE_SDK`, vendored at `./sdk`, or
-installed and found through pkg-config), links one static binary, synchronizes the project's declared
+installed and found through pkg-config), compiles in parallel only the sources that changed since the
+last build, links one static binary, synchronizes the project's declared
 content trees (including removing stale packaged files), and puts the
 engine's runtime data beside it so it runs from anywhere, and checks that nothing has reached past
 the SDK into the engine's own files.

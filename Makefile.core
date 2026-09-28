@@ -7,7 +7,9 @@ AR ?= ar
 BUILD := build/core
 RLSRC := $(BUILD)/raylib/src
 RLLIB := $(RLSRC)/libraylib.a
-CORE_SRC := $(filter-out core/entry.c,$(wildcard core/*.c))
+# entry.c is the standard main. It sits in libcore like everything else: the linker takes it only
+# when a program has no main of its own.
+CORE_SRC := $(wildcard core/*.c)
 CORE_OBJ := $(patsubst core/%.c,$(BUILD)/%.o,$(CORE_SRC))
 ENET_SRC := vendor/enet/callbacks.c vendor/enet/compress.c vendor/enet/host.c vendor/enet/list.c \
 	vendor/enet/packet.c vendor/enet/peer.c vendor/enet/protocol.c vendor/enet/unix.c
@@ -70,19 +72,20 @@ $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 $(BUILD)/libscript.a: $(SCRIPT_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(SCRIPT_OBJ)
-# One declaration per executable test or build helper: target name, core|gameplay, optional entry,
-# source root. Test sources deliberately live outside the engine's project-facing API.
+# One declaration per executable test: target name, source root. Every program links the whole
+# engine, as a game does; the linker keeps only what it calls. Test sources deliberately live
+# outside the engine's project-facing API.
 define core_project
-$(BUILD)/$(4)/%.o: $(4)/%.c $(RLSRC)/.exported | boundary
+$(BUILD)/$(2)/%.o: $(2)/%.c $(RLSRC)/.exported | boundary
 	mkdir -p $$(@D)
 	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $$< -o $$@
-$(BUILD)/$(1): $(patsubst $(4)/%.c,$(BUILD)/$(4)/%.o,$(wildcard $(4)/*.c)) $(if $(filter entry,$(3)),$(BUILD)/entry.o) $(if $(filter gameplay,$(2)),$(BUILD)/libscript.a $(BUILD)/libgameplay.a) $(BUILD)/libcore.a $(RLLIB) | boundary
+$(BUILD)/$(1): $(patsubst $(2)/%.c,$(BUILD)/$(2)/%.o,$(wildcard $(2)/*.c)) $(BUILD)/libscript.a $(BUILD)/libgameplay.a $(BUILD)/libcore.a $(RLLIB) | boundary
 	$(CC) $$^ $(LDLIBS) -o $$@
 endef
 
-$(eval $(call core_project,core_integration,core,,tests/integration/core))
-$(eval $(call core_project,gameplay_integration,gameplay,,tests/integration/gameplay))
-$(eval $(call core_project,regression_test,gameplay,,tests/regression))
+$(eval $(call core_project,core_integration,tests/integration/core))
+$(eval $(call core_project,gameplay_integration,tests/integration/gameplay))
+$(eval $(call core_project,regression_test,tests/regression))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
@@ -95,14 +98,12 @@ SDK_HEADERS := $(filter-out core/ui_internal.h,$(wildcard core/*.h)) $(wildcard 
 sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) script-api
 	rm -rf $(SDK)
 	mkdir -p $(SDK)/include/core $(SDK)/include/gameplay/script $(SDK)/lib/pkgconfig $(SDK)/bin \
-		$(SDK)/share/engine/src $(SDK)/share/engine/docs
+		$(SDK)/share/engine/docs
 	cp $(filter core/%,$(SDK_HEADERS)) $(SDK)/include/core/
 	cp $(filter gameplay/%.h,$(SDK_HEADERS)) $(SDK)/include/gameplay/ 2>/dev/null || true
 	cp gameplay/script/*.h gameplay/script/script_api.def $(SDK)/include/gameplay/script/
 	cp $(RLSRC)/raylib.h $(RLSRC)/raymath.h $(RLSRC)/rlgl.h $(SDK)/include/
 	cp $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(SDK)/lib/
-	# In the tree this file sits beside engine.h; in an SDK it is included the way a project does.
-	sed 's|#include "engine.h"|#include "core/engine.h"|' core/entry.c > $(SDK)/share/engine/src/entry.c
 	cp -r core/fonts core/shaders $(SDK)/share/engine/
 	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(SDK)/share/engine/docs/
 	cp tools/engine_build.py $(SDK)/bin/engine-build
