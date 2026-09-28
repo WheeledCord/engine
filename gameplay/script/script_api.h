@@ -74,8 +74,8 @@ typedef struct ScriptBinding
 const ScriptBinding *ScriptBindings(int *count);
 
 /* A game adds calls of its own at runtime: they are checked, spelled and registered exactly like
-   the engine's, in every language and in the generated Pawn declarations. Add them before opening a
-   frontend, because Pawn resolves every native a script names when the script is loaded.
+   the engine's, in every language. Add them before opening a frontend, because a frontend resolves
+   every native a script names when the script is loaded.
 
    SCRIPT_CALL writes the C function and the row it is described by together, so the two cannot
    drift, and leaves a ScriptBinding named <id>_binding to hand to ScriptAddBinding:
