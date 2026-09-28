@@ -22,6 +22,10 @@ typedef struct FpsInput
     Vector3 move;
     Vector2 lookDelta;
     bool sprint, crouch, noclip;
+    /* A speed the game decided for this step -- wading, a wound, a limp, standing still to heal --
+       used instead of the walk, run or crouch speed. Honoured even when it is zero. */
+    bool useSpeed;
+    float speed;
 } FpsInput;
 typedef struct FpsWorld
 {
@@ -33,6 +37,7 @@ typedef struct FpsCamera
 {
     Vector3 position, velocity;
     float yaw, pitch, phase, bobBlend, lagYaw, lagPitch;
+    float bobAmp, runMix; /* this step's bob amplitude and how far from walking toward running */
     double elapsed;
     Camera previous, current;
     Vector3 previousVmOffset, vmOffset;
