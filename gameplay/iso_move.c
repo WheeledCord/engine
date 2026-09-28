@@ -271,3 +271,226 @@ Vector2 IsoMoverScreen(const IsoMover *mover)
     float t = mover->progress;
     return (Vector2){here.x + (next.x - here.x) * t, here.y + (next.y - here.y) * t};
 }
+
+// ---- as engine types -----------------------------------------------------------------------------
+#define ISO_ROUTE_STEP_CAP 4096 // the longest route a pathfinder object keeps
+
+static IsoHex HexOf(Vector2 v) { return (IsoHex){(int)v.x, (int)v.y}; }
+static Vector2 VectorOf(IsoHex h) { return (Vector2){(float)h.x, (float)h.y}; }
+
+static bool RouterBlocked(void *user, IsoHex hex)
+{
+    const IsoRouter *router = user;
+    if (hex.x < 0 || hex.x >= router->width || hex.y < 0 || hex.y >= router->height)
+        return true;
+    return router->blocked[hex.y * router->width + hex.x];
+}
+
+static bool RouterCreate(EngineCall *call)
+{
+    IsoRouter *router = call->data;
+    int width = call->arguments[0].as.integer, height = call->arguments[1].as.integer;
+    if (width <= 0 || height <= 0)
+    {
+        call->error = "a pathfinder needs a width and height above zero";
+        return false;
+    }
+    int steps = width * height < ISO_ROUTE_STEP_CAP ? width * height : ISO_ROUTE_STEP_CAP;
+    router->blocked = calloc((size_t)width * (size_t)height, sizeof *router->blocked);
+    if (!router->blocked || !IsoPathfinderInit(&router->finder, width, height))
+    {
+        free(router->blocked);
+        call->error = "out of memory";
+        return false;
+    }
+    if (!IsoPathInit(&router->route, steps))
+    {
+        IsoPathfinderFree(&router->finder);
+        free(router->blocked);
+        call->error = "out of memory";
+        return false;
+    }
+    router->width = width;
+    router->height = height;
+    return true;
+}
+
+static void RouterDestroy(void *data)
+{
+    IsoRouter *router = data;
+    IsoPathfinderFree(&router->finder);
+    IsoPathFree(&router->route);
+    free(router->blocked);
+}
+
+static bool *RouterCell(IsoRouter *router, IsoHex hex)
+{
+    if (hex.x < 0 || hex.x >= router->width || hex.y < 0 || hex.y >= router->height)
+        return NULL;
+    return &router->blocked[hex.y * router->width + hex.x];
+}
+
+static bool RouterMark(EngineCall *call, bool blocked)
+{
+    bool *cell = RouterCell(call->data, HexOf(call->arguments[0].as.vector2));
+    if (cell)
+        *cell = blocked;
+    call->result = EngineBool(cell != NULL);
+    return true;
+}
+static bool RouterBlock(EngineCall *call) { return RouterMark(call, true); }
+static bool RouterUnblock(EngineCall *call) { return RouterMark(call, false); }
+static bool RouterIsBlocked(EngineCall *call)
+{
+    call->result = EngineBool(RouterBlocked(call->data, HexOf(call->arguments[0].as.vector2)));
+    return true;
+}
+static bool RouterSolve(EngineCall *call)
+{
+    IsoRouter *router = call->data;
+    IsoPathClear(&router->route);
+    bool found = IsoPathfinderSolve(&router->finder, &router->route,
+                                    HexOf(call->arguments[0].as.vector2),
+                                    HexOf(call->arguments[1].as.vector2), RouterBlocked, router);
+    if (!found)
+        IsoPathClear(&router->route);
+    call->result = EngineInt(router->route.count);
+    return true;
+}
+static bool RouterHex(EngineCall *call)
+{
+    IsoRouter *router = call->data;
+    int at = call->arguments[0].as.integer;
+    if (at < 0 || at >= router->route.count)
+    {
+        call->error = "that step is not on the route";
+        return false;
+    }
+    call->result = EngineVector2(VectorOf(router->route.hexes[at]));
+    return true;
+}
+static bool RouterLength(const void *object, EngineValue *out)
+{
+    *out = EngineInt(((const IsoRouter *)object)->route.count);
+    return true;
+}
+static const EngineProperty routerProperties[] = {
+    ENGINE_COMPUTED("route-length", ENGINE_INT, ENGINE_PROPERTY_READ_ONLY, RouterLength, NULL,
+                    "hexes in the route the last solve! found, zero for none"),
+};
+static const EngineMethod routerMethods[] = {
+    {"block!", ENGINE_BOOL, {ENGINE_VECTOR2}, 1, RouterBlock, "mark a hex impassable; false off the grid"},
+    {"unblock!", ENGINE_BOOL, {ENGINE_VECTOR2}, 1, RouterUnblock, "mark a hex passable; false off the grid"},
+    {"blocked?", ENGINE_BOOL, {ENGINE_VECTOR2}, 1, RouterIsBlocked, "whether a hex is impassable"},
+    {"solve!", ENGINE_INT, {ENGINE_VECTOR2, ENGINE_VECTOR2}, 2, RouterSolve,
+     "route from one hex to another; answers the route's length, zero for none"},
+    {"route-hex", ENGINE_VECTOR2, {ENGINE_INT}, 1, RouterHex, "one hex of the last route, 0 first"},
+};
+const EngineType IsoRouterType = {
+    .name = "pathfinder",
+    .size = sizeof(IsoRouter),
+    .properties = routerProperties,
+    .propertyCount = 1,
+    .methods = routerMethods,
+    .methodCount = sizeof routerMethods / sizeof routerMethods[0],
+    .createArguments = {ENGINE_INT, ENGINE_INT},
+    .createArgumentCount = 2,
+    .createRequired = 2,
+    .create = RouterCreate,
+    .destroy = RouterDestroy,
+    .help = "A* over a hex grid with its own map of blocked hexes",
+};
+
+static bool MoverCreate(EngineCall *call)
+{
+    int capacity = call->count > 1 && call->arguments[1].as.integer > 0 ? call->arguments[1].as.integer
+                                                                       : ISO_ROUTE_STEP_CAP;
+    return IsoMoverInit(call->data, HexOf(call->arguments[0].as.vector2), capacity);
+}
+static void MoverDestroy(void *data) { IsoMoverFree(data); }
+static void MoverStep(EngineObjects *objects, EngineObjectId self, void *data, float dt)
+{
+    IsoMover *mover = data;
+    if (!IsoMoverMoving(mover))
+        return;
+    IsoMoverUpdate(mover, dt);
+    if (!IsoMoverMoving(mover))
+        EngineObjectEmit(objects, self, "arrived", (EngineValue[]){EngineVector2(VectorOf(mover->hex))}, 1);
+}
+static bool MoverGoTo(EngineCall *call)
+{
+    IsoRouter *router = EngineCallObject(call, 0, &IsoRouterType);
+    if (!router)
+    {
+        call->error = "go-to! needs a pathfinder";
+        return false;
+    }
+    call->result = EngineBool(IsoMoverGoTo(call->data, &router->finder,
+                                           HexOf(call->arguments[1].as.vector2), RouterBlocked, router));
+    return true;
+}
+static bool MoverTruncate(EngineCall *call)
+{
+    IsoMoverTruncate(call->data, call->arguments[0].as.integer);
+    return true;
+}
+static bool MoverStop(EngineCall *call)
+{
+    IsoMoverStop(call->data);
+    return true;
+}
+static bool MoverHex(const void *object, EngineValue *out)
+{
+    *out = EngineVector2(VectorOf(((const IsoMover *)object)->hex));
+    return true;
+}
+static bool MoverScreen(const void *object, EngineValue *out)
+{
+    *out = EngineVector2(IsoMoverScreen(object));
+    return true;
+}
+static bool MoverMoving(const void *object, EngineValue *out)
+{
+    *out = EngineBool(IsoMoverMoving(object));
+    return true;
+}
+static bool MoverRemaining(const void *object, EngineValue *out)
+{
+    *out = EngineInt(IsoMoverRemainingSteps(object));
+    return true;
+}
+static const EngineProperty moverProperties[] = {
+    ENGINE_COMPUTED("hex", ENGINE_VECTOR2, ENGINE_PROPERTY_READ_ONLY, MoverHex, NULL,
+                    "the hex it occupies"),
+    ENGINE_COMPUTED("screen", ENGINE_VECTOR2, ENGINE_PROPERTY_READ_ONLY, MoverScreen, NULL,
+                    "where to draw it, between the hex left and the hex being entered"),
+    ENGINE_COMPUTED("moving?", ENGINE_BOOL, ENGINE_PROPERTY_READ_ONLY, MoverMoving, NULL,
+                    "whether a walk is underway"),
+    ENGINE_COMPUTED("remaining", ENGINE_INT, ENGINE_PROPERTY_READ_ONLY, MoverRemaining, NULL,
+                    "hexes still to be entered"),
+    ENGINE_FIELD("speed", IsoMover, hexesPerSecond, ENGINE_FLOAT, 0, "hexes walked per second"),
+};
+static const EngineMethod moverMethods[] = {
+    {"go-to!", ENGINE_BOOL, {ENGINE_OBJECT, ENGINE_VECTOR2}, 2, MoverGoTo,
+     "plan a walk to a hex through a pathfinder and set off"},
+    {"truncate!", ENGINE_NONE, {ENGINE_INT}, 1, MoverTruncate, "cut the walk to at most so many hexes"},
+    {"stop!", ENGINE_NONE, {ENGINE_NONE}, 0, MoverStop, "stop where it stands"},
+};
+static const char *const moverSignals[] = {"arrived"};
+const EngineType IsoMoverType = {
+    .name = "mover",
+    .size = sizeof(IsoMover),
+    .properties = moverProperties,
+    .propertyCount = sizeof moverProperties / sizeof moverProperties[0],
+    .methods = moverMethods,
+    .methodCount = sizeof moverMethods / sizeof moverMethods[0],
+    .signals = moverSignals,
+    .signalCount = 1,
+    .createArguments = {ENGINE_VECTOR2, ENGINE_INT},
+    .createArgumentCount = 2,
+    .createRequired = 1,
+    .create = MoverCreate,
+    .destroy = MoverDestroy,
+    .step = MoverStep,
+    .help = "walks a planned route across the hex grid a hex at a time",
+};

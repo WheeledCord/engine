@@ -86,3 +86,70 @@ bool CoreAudioPlayMusic(CoreAudio *a, const char *path, const char *busName)
 }
 void CoreAudioUpdate(CoreAudio *a) { if (a) for (size_t i = 0; i < a->musicCount; i++) if (a->music[i].playing) UpdateMusicStream(a->music[i].music); }
 bool CoreAudioStopMusic(CoreAudio *a, const char *path) { if (!a || !path) return false; for (size_t i=0;i<a->musicCount;i++) if (!strcmp(a->music[i].path,path)) { StopMusicStream(a->music[i].music); a->music[i].playing=false; return true; } return false; }
+
+// ---- as an engine type ---------------------------------------------------------------------------
+static bool AudioCreate(EngineCall *call) { return CoreAudioInit(call->data); }
+static void AudioDestroy(void *data) { CoreAudioFree(data); }
+static void AudioStep(EngineObjects *objects, EngineObjectId self, void *data, float dt)
+{
+    (void)objects; (void)self; (void)dt;
+    CoreAudioUpdate(data);
+}
+static bool AudioAddBus(EngineCall *call)
+{
+    call->result = EngineBool(CoreAudioAddBus(call->data, call->arguments[0].as.string,
+                                              call->arguments[1].as.number));
+    return true;
+}
+static bool AudioBusVolume(EngineCall *call)
+{
+    call->result = EngineBool(CoreAudioSetBusVolume(call->data, call->arguments[0].as.string,
+                                                    call->arguments[1].as.number));
+    return true;
+}
+static bool AudioBusMuted(EngineCall *call)
+{
+    call->result = EngineBool(CoreAudioSetBusMuted(call->data, call->arguments[0].as.string,
+                                                   call->arguments[1].as.boolean));
+    return true;
+}
+static bool AudioPlaySound(EngineCall *call)
+{
+    call->result = EngineBool(CoreAudioPlaySound(call->data, call->arguments[0].as.string,
+                                                 call->arguments[1].as.string));
+    return true;
+}
+static bool AudioPlayMusic(EngineCall *call)
+{
+    call->result = EngineBool(CoreAudioPlayMusic(call->data, call->arguments[0].as.string,
+                                                 call->arguments[1].as.string));
+    return true;
+}
+static bool AudioStopMusic(EngineCall *call)
+{
+    call->result = EngineBool(CoreAudioStopMusic(call->data, call->arguments[0].as.string));
+    return true;
+}
+static const EngineMethod audioMethods[] = {
+    {"add-bus!", ENGINE_BOOL, {ENGINE_STRING, ENGINE_FLOAT}, 2, AudioAddBus,
+     "add a named volume group at a volume"},
+    {"set-bus-volume!", ENGINE_BOOL, {ENGINE_STRING, ENGINE_FLOAT}, 2, AudioBusVolume,
+     "set a named group's volume"},
+    {"set-bus-muted!", ENGINE_BOOL, {ENGINE_STRING, ENGINE_BOOL}, 2, AudioBusMuted,
+     "mute or unmute a named group"},
+    {"play-sound!", ENGINE_BOOL, {ENGINE_STRING, ENGINE_STRING}, 2, AudioPlaySound,
+     "play a sound file once on a named group"},
+    {"play-music!", ENGINE_BOOL, {ENGINE_STRING, ENGINE_STRING}, 2, AudioPlayMusic,
+     "stream a music file on a named group"},
+    {"stop-music!", ENGINE_BOOL, {ENGINE_STRING}, 1, AudioStopMusic, "stop a music stream by path"},
+};
+const EngineType CoreAudioType = {
+    .name = "audio",
+    .size = sizeof(CoreAudio),
+    .methods = audioMethods,
+    .methodCount = sizeof audioMethods / sizeof audioMethods[0],
+    .create = AudioCreate,
+    .destroy = AudioDestroy,
+    .step = AudioStep,
+    .help = "cached sounds and music with named volume groups: master, sfx and music to begin with",
+};

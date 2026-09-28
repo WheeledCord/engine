@@ -29,9 +29,10 @@ Do not describe an unfinished feature as supported. Record deliberate limits in 
 - Preserve the OpenGL 2.1 contract unless a deliberate, documented compatibility change is accepted.
 - Treat every game-usable public engine capability as script-facing by default. Add its binding in
   the same change as the C API; do not wait for a scripted project to discover the omission.
-- Define engine bindings once in `gameplay/script/script_api.def`. Extend the generic script
-  value/resource-handle machinery when a useful engine resource needs representation rather than
-  requiring each game to write C plumbing.
+- Something a script makes, holds and changes is an engine type (`core/object.h`): declare its
+  properties, methods and signals in a table beside the type and register it in `ScriptHostInit`,
+  rather than adding a call per operation. A free-standing call is one row in
+  `gameplay/script/script_api.def`.
 - Rendering, networking, input, audio, UI, animation, collision, and other normal game facilities
   are not exempt merely because their C APIs use owned state. Expose safe lifecycle operations and
   opaque handles where scripts can use them meaningfully; never expose raw pointers or platform
@@ -40,7 +41,7 @@ Do not describe an unfinished feature as supported. Record deliberate limits in 
   meaningful scripted use, or cannot be exposed without an unsafe/broken contract. Document that
   exception and its concrete reason in `gameplay/script/README.md`. Binding inconvenience or lack of
   an immediate scripted caller is not a reason to omit it.
-- Exercise new bindings through `ScriptInvoke`, including success and expected-failure cases, and
-  regenerate/check the script API outputs with `make smoke`.
+- Exercise new types and rows from the regression checks, including success and expected-failure
+  cases, and check the script API outputs with `make smoke`.
 
 Read the [developer documentation](docs/developer/index.md) before changing engine internals.

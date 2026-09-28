@@ -13,6 +13,7 @@
 #include "core/network.h"
 #include "core/net_clock.h"
 #include "core/net_sync.h"
+#include "core/object.h"
 #include "core/sprite_sheet.h"
 #include "core/texture.h"
 #include "core/playback.h"
@@ -587,6 +588,18 @@ static void DeferredChecks(void)
 }
 
 // ---- scripting: one table, and a language on top of it -----------------------------------------
+// Evaluates Scheme and compares the printed answer, so a script check reads as what it expects.
+static bool EvalIs(const char *expression, const char *expected)
+{
+    char *answer = NULL;
+    bool ok = ScriptS7Eval(expression, &answer);
+    bool same = ok && answer && !strcmp(answer, expected);
+    if (!same)
+        printf("  %s => %s (wanted %s)\n", expression, answer ? answer : "(error)", expected);
+    free(answer);
+    return same;
+}
+
 static void ScriptChecks(void)
 {
     GameplayWorld world = {0};
@@ -596,8 +609,8 @@ static void ScriptChecks(void)
     Check(ScriptS7Open(&host), "the Scheme frontend registers the binding table");
     bool declared = ScriptS7Eval(
         "(begin"
-        " (define (t-spawn) (think-next))"
-        " (define (t-think) (move-world! (vec (* (get \"speed\") (dt)) 0)) (think-next))"
+        " (define (t-spawn self) (self 'think-next!))"
+        " (define (t-think self) (self 'move-world! (vec (* (self 'speed) (dt)) 0)) (self 'think-next!))"
         " (define-entity \"tester\" '((\"speed\" \"float\") (\"target\" \"vector2\"))"
         "   '((\"spawn\" \"t-spawn\") (\"think\" \"t-think\"))))",
         NULL);
@@ -607,51 +620,37 @@ static void ScriptChecks(void)
     bool placed = body && body->transform.translation.x == 10 && body->slots[0].as.number == 100;
     GameplayWorldStep(&world); // one tick of 0.1s at 100 a second
     Check(declared && placed && body && fabsf(body->transform.translation.x - 20) < 0.001f,
-          "a scripted class takes its fields from a scene and runs its own think");
+          "a scripted class takes its fields from a scene, and its callbacks are handed their entity");
 
-    char *answer = NULL;
-    bool refused = !ScriptS7Eval("(rotate! \"sideways\")", &answer);
-    free(answer);
-    answer = NULL;
-    bool arity = !ScriptS7Eval("(move-world!)", &answer);
-    free(answer);
-    Check(refused && arity, "the table checks a script's arguments instead of trusting them");
+    Check(ScriptS7DefineObject("tester-1", ScriptHostObjectOf(&host, entity)) &&
+              !ScriptS7Eval("(tester-1 'rotate! \"sideways\")", NULL) &&
+              !ScriptS7Eval("(tester-1 'move-world!)", NULL) && !ScriptS7Eval("(vec-length \"x\")", NULL),
+          "arguments are checked against what the type or the table declared, instead of trusted");
 
     EntityHandle second = EntitySpawnWith(&world, "tester", properties, 2);
-    ScriptValue classArgument[] = {ScriptString("tester")};
-    ScriptValue first = ScriptNone(), next = ScriptNone();
-    const char *message = NULL;
-    bool found = ScriptInvoke(&host, ScriptBindingNamed("find-first"), classArgument, 1, &first,
-                              &message) &&
-                 ScriptInvoke(&host, ScriptBindingNamed("find-next"),
-                              (ScriptValue[]){first, ScriptString("tester")}, 2, &next, &message);
-    ScriptValue setSpeed[] = {first, ScriptString("speed"), ScriptFloat(55)};
-    ScriptValue setTarget[] = {next, ScriptString("target"), ScriptVector2((Vector2){7, 8})};
-    ScriptValue speed = ScriptNone(), target = ScriptNone();
-    bool coordinated = found && first.as.entity && next.as.entity && first.as.entity != next.as.entity &&
-                       ScriptInvoke(&host, ScriptBindingNamed("entity-set-number!"), setSpeed, 3,
-                                    NULL, &message) &&
-                       ScriptInvoke(&host, ScriptBindingNamed("entity-set-vector!"), setTarget, 3,
-                                    NULL, &message) &&
-                       ScriptInvoke(&host, ScriptBindingNamed("entity-get"),
-                                    (ScriptValue[]){first, ScriptString("speed")}, 2, &speed,
-                                    &message) &&
-                       ScriptInvoke(&host, ScriptBindingNamed("entity-get-vector"),
-                                    (ScriptValue[]){next, ScriptString("target")}, 2, &target,
-                                    &message) &&
-                       speed.as.number == 55 && target.as.vector2.x == 7 && target.as.vector2.y == 8;
-    Check(coordinated, "scripts can find scripted entities and read or write their declared fields");
+    ScriptEntity *secondBody = EntityData(&world, second);
+    bool coordinated = ScriptS7Eval("(define a (find-first \"tester\"))", NULL) &&
+                       ScriptS7Eval("(define b (find-next a \"tester\"))", NULL) &&
+                       ScriptS7Eval("(set! (a 'speed) 55)", NULL) &&
+                       ScriptS7Eval("(set! (b 'target) (vec 7 8))", NULL) && EvalIs("(a 'speed)", "55.0") &&
+                       EvalIs("(b 'target)", "(7.0 8.0)") && EvalIs("(eq? (a 'classname) (b 'classname))", "#f") &&
+                       EvalIs("(equal? (a 'classname) \"tester\")", "#t") && body->slots[0].as.number == 55 &&
+                       secondBody && secondBody->slots[1].as.vector2.x == 7;
+    Check(coordinated, "scripts find scripted entities and read or write their declared fields as properties");
+    Check(!ScriptS7Eval("(a 'colour)", NULL) && !ScriptS7Eval("(set! (a 'classname) \"x\")", NULL) &&
+              !ScriptS7Eval("(set! (a 'speed) \"fast\")", NULL) && EvalIs("(a 'speed)", "55.0"),
+          "an unknown name, a read-only property or a value of the wrong type is an error, not a zero");
+    Check(ScriptS7Eval("(class-new \"clash\")", NULL) && EvalIs("(class-field \"clash\" \"position\" \"float\")", "#f") &&
+              EvalIs("(class-field \"clash\" \"hp\" \"float\")", "#t") &&
+              EvalIs("(class-field \"clash\" \"hp\" \"int\")", "#f"),
+          "a class cannot declare a field that hides what every entity has, or the same field twice");
 
     EntityDestroy(&world, second);
-    ScriptValue stale = ScriptNone();
-    bool safe = ScriptInvoke(&host, ScriptBindingNamed("entity-get"),
-                             (ScriptValue[]){next, ScriptString("speed")}, 2, &stale, &message) &&
-                stale.as.number == 0;
-    Check(safe, "cross-entity script access rejects stale handles without reaching replacement data");
-
-    Check(safe, "cross-entity script access rejects stale handles without reaching replacement data");
+    Check(!ScriptS7Eval("(b 'speed)", NULL) && EvalIs("(alive? b)", "#f") && EvalIs("(alive? a)", "#t"),
+          "an entity that has gone is refused by name instead of reaching whatever replaced it");
 
     // The small math and query rows: answers checked against raymath, and types still checked.
+    const char *message = NULL;
     ScriptValue length = ScriptNone(), distance = ScriptNone(), normalized = ScriptNone();
     bool math = ScriptInvoke(&host, ScriptBindingNamed("vec-length"),
                              (ScriptValue[]){ScriptVector2((Vector2){3, 4})}, 1, &length, &message) &&
@@ -695,274 +694,92 @@ static void ScriptChecks(void)
                    size.as.vector2.x == 0 && size.as.vector2.y == 0;
     Check(unknown, "sprite-size answers a zero size for a sheet nobody loaded");
 
-    // Resource handle system: create, use, destroy, stale rejection, kind mismatch.
-    ScriptValue camHandle = ScriptNone();
+    // Engine types, made by name: one way to create, read, write, call and end any of them.
+    Check(EvalIs("(let ((c (make 'camera2d))) (set! (c 'zoom) 2) (c 'zoom))", "2.0") &&
+              EvalIs("(let ((c (make 'camera2d))) (set! (c 'viewport) (vec 800 600))"
+                     " (set! (c 'position) (vec 100 50)) (c 'world->screen (vec 100 50)))",
+                     "(400.0 300.0)") &&
+              EvalIs("(object-type (make 'camera2d))", "camera2d"),
+          "an engine type is made by name and reached through its properties and methods");
+    Check(!ScriptS7Eval("(make 'spaceship)", NULL) &&
+              !ScriptS7Eval("(let ((c (make 'camera2d))) (c 'follow! 3 4))", NULL) &&
+              !ScriptS7Eval("(let ((c (make 'camera2d))) (c 'fly!))", NULL),
+          "an unknown type, a wrong argument or an unknown method is an error");
+    Check(ScriptS7Eval("(define cam (make 'camera2d))", NULL) && EvalIs("(free! cam)", "#t") &&
+              EvalIs("(alive? cam)", "#f") && !ScriptS7Eval("(cam 'zoom)", NULL) &&
+              EvalIs("(free! cam)", "#f"),
+          "an ended object is refused, and ending it twice answers #f");
+    Check(EvalIs("(properties (make 'timer))", "(wait one-shot time-left running)") &&
+              EvalIs("(if (memq 'destroy! (methods a)) #t #f)", "#t"),
+          "a script can ask what an object has, its parents' members included");
+
     /* Networking is script-facing like everything else: a script must be able to run a server's
        fixed tick and a client's view of it without writing C. */
-    ScriptValue netClock = ScriptNone();
-    bool clockMade = ScriptInvoke(&host, ScriptBindingNamed("net-clock-create"),
-                                  (ScriptValue[]){ScriptInt(60), ScriptInt(20)}, 2, &netClock,
-                                  &message) &&
-                     netClock.type == SCRIPT_RESOURCE && netClock.as.integer != 0;
-    Check(clockMade, "net-clock-create returns a live resource handle");
+    Check(ScriptS7Eval("(define nc (make 'net-clock 60 20))", NULL) &&
+              EvalIs("(nc 'advance! (/ 2.0 60) 8)", "2") && EvalIs("(nc 'ticked!)", "1") &&
+              EvalIs("(nc 'tick)", "1") && !ScriptS7Eval("(set! (nc 'tick) 5)", NULL) &&
+              !ScriptS7Eval("(make 'net-clock 60 0)", NULL),
+          "a net clock runs every step a long frame owes, keeps its tick, and refuses a zero rate");
+    Check(ScriptS7Eval("(define ni (make 'net-interpolator 60 20))", NULL) &&
+              ScriptS7Eval("(ni 'snapshot! 60)", NULL) && ScriptS7Eval("(ni 'advance! 0.1)", NULL) &&
+              EvalIs("(real? (ni 'render-tick))", "#t") && !ScriptS7Eval("(ni 'snapshot! -1)", NULL),
+          "a net interpolator records snapshots and says which tick to draw, refusing a negative one");
+    Check(!ScriptS7Eval("(make 'texture \"no-such-texture.png\")", NULL),
+          "a texture that cannot be loaded is an error, not a zero handle");
 
-    ScriptValue bad = ScriptNone();
-    Check(!ScriptInvoke(&host, ScriptBindingNamed("net-clock-create"),
-                        (ScriptValue[]){ScriptInt(60), ScriptInt(0)}, 2, &bad, &message) ||
-              bad.as.integer == 0,
-          "net-clock-create refuses a zero send rate");
+    Check(ScriptS7Eval("(define w (make 'collision-world 64 32.0))", NULL) &&
+              ScriptS7Eval("(define s (w 'add-circle! (vec 10 10) 5.0 1 1))", NULL) &&
+              EvalIs("(> s 0)", "#t") && EvalIs("(w 'query-circle (vec 12 10) 3.0 1)", "1") &&
+              EvalIs("(w 'query-circle (vec 100 100) 3.0 1)", "0") &&
+              ScriptS7Eval("(define box (w 'add-aabb! (vec 50 50) (vec 4 4) 2 2))", NULL) &&
+              EvalIs("(w 'query-aabb (vec 52 50) (vec 1 1) 2)", "1") &&
+              EvalIs("(< (w 'sweep-circle (vec 30 10) 1.0 (vec -40 0) 1) 1.0)", "#t") &&
+              EvalIs("(w 'remove! s)", "#t") && EvalIs("(w 'query-circle (vec 12 10) 3.0 1)", "0"),
+          "a collision world adds, queries, sweeps and removes shapes");
 
-    ScriptValue due = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-advance"),
-                       (ScriptValue[]){netClock, ScriptFloat(2.0f / 60.0f), ScriptInt(8)}, 3,
-                       &due, &message) && due.as.integer == 2,
-          "net-clock-advance runs every step a long frame owes");
+    Check(ScriptS7Eval("(define pf (make 'pathfinder 8 8))", NULL) &&
+              ScriptS7Eval("(for-each (lambda (y) (pf 'block! (vec 3 y))) '(0 1 2 3 4 5 6))", NULL) &&
+              EvalIs("(pf 'blocked? (vec 3 2))", "#t") && EvalIs("(pf 'blocked? (vec 20 2))", "#t") &&
+              EvalIs("(> (pf 'solve! (vec 0 0) (vec 6 0)) 0)", "#t") &&
+              EvalIs("(pf 'route-hex 0)", "(0.0 0.0)") &&
+              EvalIs("(pf 'route-hex (- (pf 'route-length) 1))", "(6.0 0.0)") &&
+              EvalIs("(pf 'solve! (vec 0 0) (vec 3 3))", "0") && !ScriptS7Eval("(pf 'route-hex 0)", NULL),
+          "a pathfinder routes around its own blocked hexes, and refuses a route onto one");
 
-    ScriptValue ticked = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-ticked"),
-                       (ScriptValue[]){netClock}, 1, &ticked, &message) &&
-              ticked.as.integer == 1,
-          "net-clock-ticked counts a simulated step");
+    Check(ScriptS7Eval("(define mv (make 'mover (vec 0 0)))", NULL) &&
+              ScriptS7Eval("(define arrived-at #f)", NULL) &&
+              ScriptS7Eval("(connect! mv 'arrived (lambda (hex) (set! arrived-at hex)))", NULL) &&
+              EvalIs("(mv 'go-to! pf (vec 2 0))", "#t") && EvalIs("(mv 'moving?)", "#t") &&
+              !ScriptS7Eval("(mv 'go-to! (make 'timer) (vec 1 1))", NULL),
+          "a mover sets off through a pathfinder, and refuses anything else as one");
+    for (int i = 0; i < 100; i++)
+        ScriptHostStep(&host, 0.1f);
+    Check(EvalIs("arrived-at", "(2.0 0.0)") && EvalIs("(mv 'hex)", "(2.0 0.0)") &&
+              EvalIs("(mv 'moving?)", "#f"),
+          "a mover walks as the host steps, and says so with arrived when it gets there");
 
-    ScriptValue send = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-should-send?"),
-                       (ScriptValue[]){netClock}, 1, &send, &message) && !send.as.boolean,
-          "net-clock-should-send? is false before a send interval has passed");
+    Check(ScriptS7Eval("(define fired 0)", NULL) && ScriptS7Eval("(define tm (make 'timer 0.5))", NULL) &&
+              ScriptS7Eval("(define heard (connect! tm 'timeout (lambda () (set! fired (+ fired 1)))))", NULL) &&
+              ScriptS7Eval("(connect! tm 'timeout (lambda () (error 'oops \"a broken handler\")))", NULL) &&
+              ScriptS7Eval("(define once 0)", NULL) &&
+              ScriptS7Eval("(connect! (make 'timer 0.1 #t) 'timeout (lambda () (set! once (+ once 1))))", NULL) &&
+              !ScriptS7Eval("(connect! tm 'exploded (lambda () #f))", NULL),
+          "handlers connect to signals a type declares, and not to others");
+    for (int i = 0; i < 4; i++)
+        ScriptHostStep(&host, 0.3f);
+    Check(EvalIs("fired", "2") && EvalIs("once", "1") && EvalIs("(tm 'running)", "#t"),
+          "a timer times out on time and again, a one-shot once, and a failing handler stops no one");
+    Check(EvalIs("(disconnect! heard)", "#t") && EvalIs("(disconnect! heard)", "#f"),
+          "a connection ends once");
+    ScriptHostStep(&host, 0.5f);
+    Check(EvalIs("fired", "2"), "a disconnected handler is not called again");
 
-    ScriptValue when = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-now"),
-                       (ScriptValue[]){ScriptNone()}, 0, &when, &message) &&
-              when.type == SCRIPT_FLOAT,
-          "net-clock-now reads a monotonic clock");
+    Check(ScriptS7Eval("(define au (make 'audio))", NULL) && EvalIs("(au 'add-bus! \"voice\" 0.5)", "#t") &&
+              EvalIs("(au 'add-bus! \"voice\" 0.5)", "#f") && EvalIs("(au 'set-bus-muted! \"voice\" #t)", "#t"),
+          "an audio service adds and mutes its own volume groups");
 
-    ScriptValue interp = ScriptNone();
-    bool interpMade = ScriptInvoke(&host, ScriptBindingNamed("net-interp-create"),
-                                   (ScriptValue[]){ScriptInt(60), ScriptInt(20)}, 2, &interp,
-                                   &message) &&
-                      interp.type == SCRIPT_RESOURCE && interp.as.integer != 0;
-    Check(interpMade, "net-interp-create returns a live resource handle");
-
-    ScriptValue ok = ScriptNone(), render = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-interp-snapshot"),
-                       (ScriptValue[]){interp, ScriptInt(600)}, 2, &ok, &message) &&
-              ok.as.boolean,
-          "net-interp-snapshot records an arriving snapshot");
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-interp-render-tick"),
-                       (ScriptValue[]){interp}, 1, &render, &message) &&
-              render.as.number < 600.0f && render.as.number > 590.0f,
-          "net-interp-render-tick draws behind the newest snapshot");
-
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-destroy"),
-                       (ScriptValue[]){netClock}, 1, &ok, &message) && ok.as.boolean,
-          "net-clock-destroy releases the handle");
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-clock-tick"),
-                       (ScriptValue[]){netClock}, 1, &ticked, &message) &&
-              ticked.as.integer == 0,
-          "a destroyed clock handle no longer resolves");
-    Check(ScriptInvoke(&host, ScriptBindingNamed("net-interp-destroy"),
-                       (ScriptValue[]){interp}, 1, &ok, &message) && ok.as.boolean,
-          "net-interp-destroy releases the handle");
-
-    /* Textures are a normal game facility and so are script-facing like the rest. */
-    ScriptValue tex = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("texture-load"),
-                       (ScriptValue[]){ScriptString("no-such-image.png")}, 1, &tex, &message) &&
-              tex.as.integer == 0,
-          "texture-load refuses an image that is not there");
-    ScriptValue texSize = ScriptNone();
-    Check(ScriptInvoke(&host, ScriptBindingNamed("texture-width"),
-                       (ScriptValue[]){tex}, 1, &texSize, &message) && texSize.as.integer == 0,
-          "a texture that never loaded has no width");
-    Check(ScriptInvoke(&host, ScriptBindingNamed("texture-destroy"),
-                       (ScriptValue[]){tex}, 1, &texSize, &message) && !texSize.as.boolean,
-          "and releasing it reports that there was nothing to release");
-
-    bool camMade = ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
-                                (ScriptValue[]){ScriptNone()}, 0, &camHandle, &message) &&
-                   camHandle.type == SCRIPT_RESOURCE && camHandle.as.integer != 0;
-    Check(camMade, "camera-create returns a live resource handle");
-
-    ScriptValue camPos = ScriptNone();
-    bool camRead = ScriptInvoke(&host, ScriptBindingNamed("camera-position"),
-                                (ScriptValue[]){camHandle}, 1, &camPos, &message) &&
-                   camPos.type == SCRIPT_VECTOR2;
-    Check(camRead, "camera-position reads from a valid handle");
-
-    ScriptValue camGone = ScriptBool(true);
-    bool camFreed = ScriptInvoke(&host, ScriptBindingNamed("camera-destroy"),
-                                 (ScriptValue[]){camHandle}, 1, &camGone, &message) &&
-                    camGone.as.boolean;
-    Check(camFreed, "camera-destroy releases a live handle");
-
-    ScriptValue stalePos = ScriptNone();
-    bool staleRefused = ScriptInvoke(&host, ScriptBindingNamed("camera-position"),
-                                     (ScriptValue[]){camHandle}, 1, &stalePos, &message) &&
-                        stalePos.type == SCRIPT_VECTOR2 && stalePos.as.vector2.x == 0 &&
-                        stalePos.as.vector2.y == 0;
-    Check(staleRefused, "a destroyed camera handle gives a zero position");
-
-    // Generational reuse: the next camera reuses the slot but gets a new generation.
-    ScriptValue cam2Handle = ScriptNone();
-    bool cam2Made = ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
-                                 (ScriptValue[]){ScriptNone()}, 0, &cam2Handle, &message) &&
-                    cam2Handle.type == SCRIPT_RESOURCE && cam2Handle.as.integer != 0 &&
-                    cam2Handle.as.integer != camHandle.as.integer;
-    Check(cam2Made, "a recreated camera has a different handle than the destroyed one");
-
-    // Camera follow and coordinate round-trip.
-    ScriptValue cam3Handle = ScriptNone();
-    ScriptInvoke(&host, ScriptBindingNamed("camera-create"),
-                 (ScriptValue[]){ScriptNone()}, 0, &cam3Handle, &message);
-    ScriptInvoke(&host, ScriptBindingNamed("camera-set-viewport!"),
-                 (ScriptValue[]){cam3Handle, ScriptVector2((Vector2){960, 540})}, 2, NULL, &message);
-    ScriptInvoke(&host, ScriptBindingNamed("camera-set-position!"),
-                 (ScriptValue[]){cam3Handle, ScriptVector2((Vector2){100, 200})}, 2, NULL, &message);
-    ScriptValue w2s = ScriptNone();
-    bool roundTrip = ScriptInvoke(&host, ScriptBindingNamed("camera-world-to-screen"),
-                                  (ScriptValue[]){cam3Handle, ScriptVector2((Vector2){100, 200})}, 2, &w2s, &message) &&
-                     w2s.type == SCRIPT_VECTOR2;
-    Check(roundTrip, "camera-world-to-screen converts a world point at the camera centre");
-    ScriptInvoke(&host, ScriptBindingNamed("camera-destroy"),
-                 (ScriptValue[]){cam3Handle}, 1, NULL, &message);
-
-    bool kindMismatch = !ScriptInvoke(&host, ScriptBindingNamed("camera-position"),
-                                      (ScriptValue[]){ScriptInt(42)}, 1, NULL, &message);
-    Check(kindMismatch, "camera-position refuses an int where a resource is expected");
-
-    // Collision world: create, add, query, destroy.
-    ScriptValue colHandle = ScriptNone();
-    bool colMade = ScriptInvoke(&host, ScriptBindingNamed("collision-create"),
-                                (ScriptValue[]){ScriptInt(32), ScriptFloat(64.0f)}, 2, &colHandle, &message) &&
-                   colHandle.type == SCRIPT_RESOURCE && colHandle.as.integer != 0;
-    Check(colMade, "collision-create makes a query world");
-
-    ScriptValue proxyId = ScriptNone();
-    bool circleAdded = ScriptInvoke(&host, ScriptBindingNamed("collision-add-circle"),
-                                    (ScriptValue[]){colHandle, ScriptVector2((Vector2){100, 100}),
-                                                    ScriptFloat(10), ScriptInt(1), ScriptInt(1)},
-                                    5, &proxyId, &message) && proxyId.as.integer != 0;
-    Check(circleAdded, "collision-add-circle registers a proxy");
-
-    ScriptValue overlap = ScriptNone();
-    bool queryOk = ScriptInvoke(&host, ScriptBindingNamed("collision-query-circle"),
-                                (ScriptValue[]){colHandle, ScriptVector2((Vector2){100, 100}),
-                                                ScriptFloat(15), ScriptInt(1)},
-                                4, &overlap, &message) && overlap.as.integer == 1;
-    Check(queryOk, "collision-query-circle finds the registered circle");
-
-    // AABB proxy: add and query
-    ScriptValue aabbProxyId = ScriptNone();
-    bool aabbAdded = ScriptInvoke(&host, ScriptBindingNamed("collision-add-aabb"),
-                                  (ScriptValue[]){colHandle, ScriptVector2((Vector2){200, 200}),
-                                                  ScriptVector2((Vector2){20, 20}), ScriptInt(2), ScriptInt(2)},
-                                  5, &aabbProxyId, &message) && aabbProxyId.as.integer != 0;
-    Check(aabbAdded, "collision-add-aabb registers an AABB proxy");
-
-    ScriptValue aabbOverlap = ScriptNone();
-    bool aabbQueryOk = ScriptInvoke(&host, ScriptBindingNamed("collision-query-aabb"),
-                                    (ScriptValue[]){colHandle, ScriptVector2((Vector2){205, 205}),
-                                                    ScriptVector2((Vector2){10, 10}), ScriptInt(2)},
-                                    4, &aabbOverlap, &message) && aabbOverlap.as.integer == 1;
-    Check(aabbQueryOk, "collision-query-aabb finds the registered box");
-
-    ScriptValue colFreed = ScriptBool(false);
-    bool colDestroyed = ScriptInvoke(&host, ScriptBindingNamed("collision-destroy"),
-                                     (ScriptValue[]){colHandle}, 1, &colFreed, &message) &&
-                        colFreed.as.boolean;
-    Check(colDestroyed, "collision-destroy releases the world");
-
-    // Pathfinder: create, block, query, destroy.
-    ScriptValue pfHandle = ScriptNone();
-    bool pfMade = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-create"),
-                               (ScriptValue[]){ScriptInt(10), ScriptInt(10)}, 2, &pfHandle, &message) &&
-                  pfHandle.type == SCRIPT_RESOURCE && pfHandle.as.integer != 0;
-    Check(pfMade, "pathfinder-create makes an A* workspace");
-
-    ScriptValue blocked = ScriptNone();
-    bool blockOk = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-block!"),
-                                (ScriptValue[]){pfHandle, ScriptVector2((Vector2){3, 3})}, 2, &blocked, &message) &&
-                   blocked.as.boolean;
-    ScriptValue isBlocked = ScriptNone();
-    bool checkBlocked = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-blocked?"),
-                                     (ScriptValue[]){pfHandle, ScriptVector2((Vector2){3, 3})}, 2, &isBlocked, &message) &&
-                        isBlocked.as.boolean;
-    Check(blockOk && checkBlocked, "pathfinder-block! marks a hex and pathfinder-blocked? sees it");
-
-    ScriptValue pfFreed = ScriptBool(false);
-    bool pfDestroyed = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-destroy"),
-                                    (ScriptValue[]){pfHandle}, 1, &pfFreed, &message) && pfFreed.as.boolean;
-    Check(pfDestroyed, "pathfinder-destroy releases the workspace");
-
-    // Pathfinder solve: a route around a wall, and the same hexes read back in order.
-    ScriptValue pf2Handle = ScriptNone();
-    ScriptInvoke(&host, ScriptBindingNamed("pathfinder-create"),
-                 (ScriptValue[]){ScriptInt(10), ScriptInt(10)}, 2, &pf2Handle, &message);
-    for (int x = 0; x < 9; x++)
-        ScriptInvoke(&host, ScriptBindingNamed("pathfinder-block!"),
-                     (ScriptValue[]){pf2Handle, ScriptVector2((Vector2){x, 5})}, 2, NULL, &message);
-    ScriptValue route = ScriptNone();
-    bool solved = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-solve"),
-                               (ScriptValue[]){pf2Handle, ScriptVector2((Vector2){4, 4}),
-                                               ScriptVector2((Vector2){4, 6})},
-                               3, &route, &message) && route.as.integer > 4;
-    Check(solved, "pathfinder-solve routes around a wall of blocked hexes");
-
-    ScriptValue routeFirst = ScriptNone(), routeLast = ScriptNone();
-    bool endsRead = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-path-get"),
-                                 (ScriptValue[]){pf2Handle, ScriptInt(0)}, 2, &routeFirst, &message) &&
-                    ScriptInvoke(&host, ScriptBindingNamed("pathfinder-path-get"),
-                                 (ScriptValue[]){pf2Handle, ScriptInt(route.as.integer - 1)}, 2,
-                                 &routeLast, &message) &&
-                    routeFirst.as.vector2.x == 4 && routeFirst.as.vector2.y == 4 &&
-                    routeLast.as.vector2.x == 4 && routeLast.as.vector2.y == 6;
-    Check(endsRead, "the solved route starts and ends where it was asked to");
-
-    ScriptValue noRoute = ScriptNone();
-    bool walled = ScriptInvoke(&host, ScriptBindingNamed("pathfinder-solve"),
-                               (ScriptValue[]){pf2Handle, ScriptVector2((Vector2){4, 4}),
-                                               ScriptVector2((Vector2){4, 5})},
-                               3, &noRoute, &message) && noRoute.as.integer == 0;
-    Check(walled, "a route onto a blocked hex answers zero");
-
-    // Mover: plan a walk through the same pathfinder and advance it.
-    ScriptValue mvHandle = ScriptNone();
-    bool mvMade = ScriptInvoke(&host, ScriptBindingNamed("mover-create"),
-                              (ScriptValue[]){ScriptVector2((Vector2){4, 4}), ScriptInt(64)}, 2,
-                              &mvHandle, &message) &&
-                  mvHandle.type == SCRIPT_RESOURCE && mvHandle.as.integer != 0;
-    Check(mvMade, "mover-create starts a walker on a hex");
-
-    ScriptValue walking = ScriptNone();
-    bool went = ScriptInvoke(&host, ScriptBindingNamed("mover-go-to"),
-                             (ScriptValue[]){mvHandle, pf2Handle, ScriptVector2((Vector2){4, 6})}, 3,
-                             &walking, &message) && walking.as.boolean;
-    ScriptValue moving = ScriptNone();
-    bool isMoving = ScriptInvoke(&host, ScriptBindingNamed("mover-moving?"),
-                                 (ScriptValue[]){mvHandle}, 1, &moving, &message) && moving.as.boolean;
-    Check(went && isMoving, "mover-go-to plans a walk and mover-moving? sees it");
-
-    ScriptValue remain = ScriptNone();
-    bool stepsLeft = ScriptInvoke(&host, ScriptBindingNamed("mover-remaining"),
-                                  (ScriptValue[]){mvHandle}, 1, &remain, &message) &&
-                                  remain.as.integer > 0;
-    Check(stepsLeft, "mover-remaining counts the hexes still to enter");
-
-    for (int i = 0; i < 200; i++)
-        ScriptInvoke(&host, ScriptBindingNamed("mover-update!"),
-                     (ScriptValue[]){mvHandle, ScriptFloat(0.1f)}, 2, NULL, &message);
-    ScriptValue done = ScriptNone();
-    bool arrived = ScriptInvoke(&host, ScriptBindingNamed("mover-moving?"),
-                                (ScriptValue[]){mvHandle}, 1, &done, &message) && !done.as.boolean;
-    ScriptValue mvHex = ScriptNone();
-    bool atHex = ScriptInvoke(&host, ScriptBindingNamed("mover-hex"),
-                              (ScriptValue[]){mvHandle}, 1, &mvHex, &message) &&
-                 mvHex.as.vector2.x == 4 && mvHex.as.vector2.y == 6;
-    Check(arrived && atHex, "after enough updates a mover arrives at its target hex");
-
-    ScriptValue mvFreed = ScriptBool(false);
-    bool mvDestroyed = ScriptInvoke(&host, ScriptBindingNamed("mover-destroy"),
-                                    (ScriptValue[]){mvHandle}, 1, &mvFreed, &message) && mvFreed.as.boolean;
-    Check(mvDestroyed, "mover-destroy releases the walker");
+    Check(EvalIs("(free! a)", "#t") && !EntityAlive(&world, entity),
+          "freeing an entity takes it out of the world");
 
     // Saved key/values: set, read, and round-trip through a file.
     bool setOk = ScriptInvoke(&host, ScriptBindingNamed("save-set-number!"),
@@ -1013,6 +830,30 @@ static void ScriptChecks(void)
         described = table[i].name && table[i].call && table[i].help &&
                     table[i].argumentCount >= 0 && table[i].argumentCount <= 8;
     Check(described, "every row of the table is complete enough for a frontend to register");
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
+}
+
+// A class that thinks less often than every step times its work by what really passed.
+static void ElapsedChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    ScriptS7Open(&host);
+    Check(ScriptS7Eval("(begin (define waited #f)"
+                       " (define (slow-spawn self) (self 'think-after! 0.3))"
+                       " (define (slow-think self) (set! waited (elapsed)))"
+                       " (define-entity \"slow\" '() '((\"spawn\" \"slow-spawn\") (\"think\" \"slow-think\"))))",
+                       NULL) &&
+              !EngineObjectIdIsNull(ScriptHostObjectOf(&host, EntitySpawn(&world, "slow"))),
+          "a class that thinks less than every step can be declared");
+    for (int i = 0; i < 4; i++)
+        GameplayWorldStep(&world);
+    Check(EvalIs("(< (abs (- waited 0.3)) 0.001)", "#t"),
+          "elapsed tells a slow thinker how long it has really been, not one step");
     ScriptS7Close();
     ScriptHostFree(&host);
     GameplayWorldFree(&world);
@@ -1104,17 +945,10 @@ static void StorageChecks(void)
           "a class far larger than its neighbours keeps every field, and touches nobody else's");
 
     // Spawning from C and from the REPL are the same path, so both agree about handles.
-    char expression[64];
-    snprintf(expression, sizeof expression, "(alive? %d)", ScriptHostIdOf(big));
-    char *answer = NULL;
-    ScriptS7Eval(expression, &answer);
-    bool sees = answer && !strcmp(answer, "#t");
-    free(answer);
-    answer = NULL;
+    bool named = ScriptS7DefineObject("big-one", ScriptHostObjectOf(&host, big));
+    bool sees = named && EvalIs("(alive? big-one)", "#t");
     EntityDestroy(&world, big);
-    ScriptS7Eval(expression, &answer);
-    bool gone = answer && !strcmp(answer, "#f");
-    free(answer);
+    bool gone = EvalIs("(alive? big-one)", "#f");
     Check(sees && gone && !EntityAlive(&world, big),
           "a handle means the same thing to C and to a script, before and after the entity goes");
 
@@ -2297,6 +2131,235 @@ static void NetOwnerRecordCall(void *user, void *state, bool writing)
     (void)state;
 }
 
+// ---- the type registry and object pool --------------------------------------------------------
+typedef struct TestBody
+{
+    Vector2 position;
+    float speed;
+    int hits;
+    bool ready;
+} TestBody;
+
+static int testCreated, testDestroyed, testStepped;
+static bool TestBodyCreate(EngineCall *call)
+{
+    TestBody *body = call->data;
+    body->speed = call->count > 0 ? call->arguments[0].as.number : 1.0f;
+    body->ready = true;
+    testCreated++;
+    return true;
+}
+static void TestBodyDestroy(void *data) { (void)data; testDestroyed++; }
+static void TestBodyStep(EngineObjects *objects, EngineObjectId self, void *data, float dt)
+{
+    TestBody *body = data;
+    body->position.x += body->speed * dt;
+    testStepped++;
+    if (body->position.x >= 10.0f)
+        EngineObjectEmit(objects, self, "arrived", (EngineValue[]){EngineFloat(body->position.x)}, 1);
+}
+static bool TestBodyHit(EngineCall *call)
+{
+    TestBody *body = call->data;
+    body->hits += call->arguments[0].as.integer;
+    call->result = EngineInt(body->hits);
+    return true;
+}
+static bool TestBodyDistance(EngineCall *call)
+{
+    TestBody *self = call->data;
+    TestBody *other = EngineCallObject(call, 0, NULL);
+    if (!other)
+    {
+        call->error = "needs another body";
+        return false;
+    }
+    call->result = EngineFloat(Vector2Distance(self->position, other->position));
+    return true;
+}
+static bool TestDoubleSpeed(const void *object, EngineValue *out)
+{
+    *out = EngineFloat(((const TestBody *)object)->speed * 2.0f);
+    return true;
+}
+static const EngineProperty testThingProperties[] = {
+    ENGINE_FIELD("ready", TestBody, ready, ENGINE_BOOL, ENGINE_PROPERTY_READ_ONLY, "set up"),
+};
+static const EngineType testThing = {.name = "thing", .size = sizeof(TestBody),
+                                     .properties = testThingProperties, .propertyCount = 1};
+static const EngineProperty testBodyProperties[] = {
+    ENGINE_FIELD("position", TestBody, position, ENGINE_VECTOR2, 0, "where"),
+    ENGINE_FIELD("speed", TestBody, speed, ENGINE_FLOAT, ENGINE_PROPERTY_SAVE, "how fast"),
+    ENGINE_COMPUTED("double-speed", ENGINE_FLOAT, ENGINE_PROPERTY_READ_ONLY, TestDoubleSpeed, NULL,
+                    "twice as fast"),
+};
+static const EngineMethod testBodyMethods[] = {
+    {"hit!", ENGINE_INT, {ENGINE_INT}, 1, TestBodyHit, "take hits, answer the total"},
+    {"distance-to", ENGINE_FLOAT, {ENGINE_OBJECT}, 1, TestBodyDistance, "how far to another"},
+};
+static const char *const testBodySignals[] = {"arrived"};
+static const EngineType testBody = {
+    .name = "body", .parent = &testThing, .size = sizeof(TestBody),
+    .properties = testBodyProperties, .propertyCount = 3,
+    .methods = testBodyMethods, .methodCount = 2,
+    .signals = testBodySignals, .signalCount = 1,
+    .createArguments = {ENGINE_FLOAT}, .createArgumentCount = 1, .createRequired = 0,
+    .create = TestBodyCreate, .destroy = TestBodyDestroy, .step = TestBodyStep};
+
+typedef struct TestHeard { int calls; float last; int released; EngineObjectId destroyOnCall; } TestHeard;
+static void TestListen(void *user, EngineObjects *objects, EngineObjectId sender,
+                       const EngineValue *arguments, int count)
+{
+    (void)sender;
+    TestHeard *heard = user;
+    heard->calls++;
+    heard->last = count > 0 ? arguments[0].as.number : -1.0f;
+    if (!EngineObjectIdIsNull(heard->destroyOnCall))
+        EngineObjectDestroy(objects, heard->destroyOnCall);
+}
+static void TestRelease(void *user) { ((TestHeard *)user)->released++; }
+
+static void ObjectChecks(void)
+{
+    Check(EngineTypeProperty(&testBody, "ready") == &testThingProperties[0] &&
+              EngineTypeProperty(&testBody, "speed") == &testBodyProperties[1] &&
+              EngineTypeProperty(&testThing, "speed") == NULL &&
+              EngineTypeMethod(&testBody, "hit!") == &testBodyMethods[0] &&
+              EngineTypeSignal(&testBody, "arrived") == testBodySignals[0] &&
+              EngineTypeSignal(&testBody, "left") == NULL,
+          "a type finds its own and its parent's properties, methods and signals by name");
+    Check(EngineTypeIs(&testBody, &testThing) && !EngineTypeIs(&testThing, &testBody),
+          "a type is its parent, and a parent is not its child");
+
+    EngineObjects objects;
+    Check(EngineObjectsInit(&objects), "an object pool starts empty");
+    Check(EngineObjectsRegisterType(&objects, &testBody) &&
+              EngineObjectsRegisterType(&objects, &testBody) &&
+              EngineObjectsTypeNamed(&objects, "body") == &testBody &&
+              EngineObjectsTypeNamed(&objects, "nothing") == NULL,
+          "types are found by name once registered, and registering twice is harmless");
+
+    const char *error = NULL;
+    testCreated = testDestroyed = 0;
+    EngineObjectId a = EngineObjectCreate(&objects, &testBody, (EngineValue[]){EngineInt(3)}, 1, &error);
+    EngineObjectId b = EngineObjectCreate(&objects, &testBody, NULL, 0, &error);
+    TestBody *bodyA = EngineObjectData(&objects, a, &testBody);
+    TestBody *bodyB = EngineObjectData(&objects, b, &testThing);
+    Check(bodyA && bodyB && bodyA != bodyB && bodyA->speed == 3.0f && bodyB->speed == 1.0f &&
+              bodyA->ready && testCreated == 2,
+          "objects are created with their arguments, an integer accepted where a float is wanted");
+    Check(EngineObjectIdIsNull(EngineObjectCreate(&objects, &testBody,
+                                                  (EngineValue[]){EngineString("fast")}, 1, &error)) &&
+              error != NULL,
+          "a creation argument of the wrong type is refused with a reason");
+
+    EngineValue value = EngineNone();
+    bool read = EngineObjectGet(&objects, a, "speed", &value, &error) && value.type == ENGINE_FLOAT &&
+                value.as.number == 3.0f;
+    bool computed = EngineObjectGet(&objects, a, "double-speed", &value, &error) &&
+                    value.as.number == 6.0f;
+    bool written = EngineObjectSet(&objects, a, "position", &(EngineValue){ENGINE_VECTOR2, {.vector2 = {4, 5}}},
+                                   &error) &&
+                   bodyA->position.x == 4 && bodyA->position.y == 5;
+    Check(read && computed && written, "properties read and write by name, stored or computed");
+    error = NULL;
+    Check(!EngineObjectSet(&objects, a, "ready", &(EngineValue){ENGINE_BOOL, {.boolean = false}}, &error) &&
+              error && bodyA->ready,
+          "a read-only property refuses a write and says so");
+    error = NULL;
+    Check(!EngineObjectSet(&objects, a, "speed", &(EngineValue){ENGINE_STRING, {.string = "x"}}, &error) &&
+              error && bodyA->speed == 3.0f,
+          "a property refuses a value of the wrong type and keeps its old one");
+    error = NULL;
+    Check(!EngineObjectGet(&objects, a, "colour", &value, &error) && error,
+          "an unknown property is an error, not a zero");
+
+    EngineValue total = EngineNone();
+    Check(EngineObjectCall(&objects, a, "hit!", (EngineValue[]){EngineInt(2)}, 1, &total, &error) &&
+              EngineObjectCall(&objects, a, "hit!", (EngineValue[]){EngineFloat(3)}, 1, &total, &error) &&
+              total.as.integer == 5,
+          "methods run with converted arguments and answer");
+    error = NULL;
+    Check(!EngineObjectCall(&objects, a, "hit!", NULL, 0, &total, &error) && error &&
+              !EngineObjectCall(&objects, a, "fly!", NULL, 0, &total, &error),
+          "a method called with the wrong arity, or one that does not exist, is refused");
+    bodyB->position = (Vector2){7, 9};
+    EngineValue distance = EngineNone();
+    Check(EngineObjectCall(&objects, a, "distance-to", (EngineValue[]){EngineObject(b)}, 1, &distance,
+                           &error) &&
+              fabsf(distance.as.number - 5.0f) < 0.001f,
+          "an object passed to a method resolves to its storage");
+
+    TestHeard heard = {0, 0, 0, ENGINE_OBJECT_NULL};
+    int connection = EngineObjectConnect(&objects, a, "arrived", TestListen, &heard, TestRelease);
+    Check(connection > 0 && EngineObjectConnect(&objects, a, "left", TestListen, &heard, TestRelease) == 0 &&
+              heard.released == 1,
+          "connecting to a signal the type does not have fails and releases what it was given");
+    heard.released = 0;
+    testStepped = 0;
+    bodyA->position.x = 0;
+    bodyA->speed = 5.0f;
+    EngineObjectsStep(&objects, 1.0f);
+    EngineObjectsStep(&objects, 1.0f);
+    Check(testStepped == 4 && heard.calls == 1 && heard.last == 10.0f,
+          "stepping advances every object, and a step can emit a signal with values");
+    Check(EngineObjectDisconnect(&objects, connection) && heard.released == 1 &&
+              EngineObjectEmit(&objects, a, "arrived", NULL, 0) == 0 && heard.calls == 1,
+          "a disconnected handler is released and no longer called");
+
+    TestHeard fatal = {0, 0, 0, a};
+    EngineObjectConnect(&objects, a, "arrived", TestListen, &fatal, TestRelease);
+    EngineObjectConnect(&objects, a, "arrived", TestListen, &fatal, TestRelease);
+    int delivered = EngineObjectEmit(&objects, a, "arrived", NULL, 0);
+    Check(delivered == 1 && fatal.calls == 1 && fatal.released == 2 && !EngineObjectAlive(&objects, a) &&
+              testDestroyed == 1,
+          "a handler that destroys the sender stops the emission and releases its connections");
+    error = NULL;
+    Check(!EngineObjectGet(&objects, a, "speed", &value, &error) && error &&
+              EngineObjectData(&objects, a, NULL) == NULL && EngineObjectTypeOf(&objects, a) == NULL,
+          "a destroyed object's handle is refused");
+    EngineObjectId reused = EngineObjectCreate(&objects, &testBody, NULL, 0, &error);
+    Check(reused.index == a.index && reused.generation != a.generation && !EngineObjectAlive(&objects, a),
+          "a reused slot gets a new generation, so the old handle stays refused");
+
+    TestBody mine = {.speed = 8};
+    int destroyedBefore = testDestroyed;
+    EngineObjectId adopted = EngineObjectAdopt(&objects, &testBody, &mine);
+    EngineValue adoptedSpeed = EngineNone();
+    Check(EngineObjectGet(&objects, adopted, "speed", &adoptedSpeed, &error) && adoptedSpeed.as.number == 8 &&
+              EngineObjectDestroy(&objects, adopted) && testDestroyed == destroyedBefore && mine.speed == 8,
+          "adopted storage is reachable by handle, and ending the handle leaves the storage alone");
+
+    int destroyedBeforeFree = testDestroyed;
+    EngineObjectsFree(&objects);
+    Check(testDestroyed == destroyedBeforeFree + 2, "freeing the pool destroys every object it owns");
+}
+
+// A game's own type reaches scripts the same way the engine's do.
+static void GameObjectChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    ScriptS7Open(&host);
+    TestBody hero = {.position = {1, 2}, .speed = 4};
+    EngineObjectId id = EngineObjectAdopt(&host.objects, &testBody, &hero);
+    Check(ScriptHostRegisterType(&host, &testBody) && ScriptS7DefineObject("hero", id) &&
+              EvalIs("(hero 'speed)", "4.0") && EvalIs("(hero 'ready)", "#f") &&
+              ScriptS7Eval("(set! (hero 'speed) 9)", NULL) && hero.speed == 9 &&
+              EvalIs("(hero 'hit! 3)", "3") && hero.hits == 3,
+          "a game adopts its own storage and scripts read, write and call it by name");
+    Check(EvalIs("(let ((b (make 'body 2.5))) (b 'double-speed))", "5.0") &&
+              EvalIs("(< (abs (- (hero 'distance-to (make 'body)) 2.236068)) 0.0001)", "#t") &&
+              !ScriptS7Eval("(make 'body \"quickly\")", NULL),
+          "a game's registered type is made from Scheme like the engine's, with checked arguments");
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    Check(hero.speed == 9, "freeing the host leaves adopted storage alone");
+    GameplayWorldFree(&world);
+}
+
 static void NetOwnershipChecks(void)
 {
     /* A listen server's client registry has localIsServer true and localActor its own player id
@@ -2363,6 +2426,7 @@ int main(int argc, char **argv)
     ConventionChecks();
     DeferredChecks();
     ScriptChecks();
+    ElapsedChecks();
     StorageChecks();
     SaveAndInputMapChecks();
     GameCallChecks();
@@ -2380,6 +2444,8 @@ int main(int argc, char **argv)
     NetDeltaChecks();
     NetSyncChecks();
     NetOwnershipChecks();
+    ObjectChecks();
+    GameObjectChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

@@ -6,6 +6,7 @@
 #define GAMEPLAY_ISO_MOVE_H
 
 #include "core/iso_grid.h"
+#include "core/object.h"
 
 /* Routing and walking over the hex grid in core/iso_grid.h.
 
@@ -70,4 +71,21 @@ bool IsoMoverMoving(const IsoMover *mover);
 void IsoMoverUpdate(IsoMover *mover, float dt);
 /* Interpolated position for drawing, between the hex left and the hex being entered. */
 Vector2 IsoMoverScreen(const IsoMover *mover);
+
+/* A pathfinder that keeps its own map of blocked hexes and the route it last solved, so a script
+   can route without writing an IsoBlockedFn. The "pathfinder" engine type, created with a grid
+   width and height: block!, unblock!, blocked?, solve!, route-length and route-hex. */
+typedef struct IsoRouter
+{
+    IsoPathfinder finder;
+    IsoPath route;
+    bool *blocked; /* width * height, row-major; off the grid counts as blocked */
+    int width, height;
+} IsoRouter;
+
+/* The engine types. "mover" is created on a starting hex, optionally with a route capacity: go-to!
+   through a pathfinder, truncate! and stop!; hex, screen, moving? and remaining. A mover walks as
+   its pool steps and emits "arrived" with the hex it stopped on when a walk ends. */
+extern const EngineType IsoRouterType;
+extern const EngineType IsoMoverType;
 #endif

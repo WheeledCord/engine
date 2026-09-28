@@ -3,9 +3,10 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 /* The binding table: one row per call a script can make. Included several times, each time with
-   SCRIPT_BINDING defined to emit something different — the C prototypes, the table itself, and each
-   frontend's registration. Adding a call here gives it to every language and, later, to the node
-   editor; nothing else has to be touched.
+   SCRIPT_BINDING defined to emit something different — the C prototypes, the table itself, and the
+   Scheme frontend's registration. These are free-standing calls; engine objects -- entities,
+   cameras, timers and the rest -- are reached through their own properties and methods, which
+   their types declare (core/object.h).
 
    SCRIPT_BINDING(identifier, script name, result type, help, (SCRIPT_NONE, argument types...))
 
@@ -31,64 +32,14 @@ SCRIPT_BINDING(class_done, "class-done", SCRIPT_BOOL, "register the finished cla
                (SCRIPT_NONE, SCRIPT_STRING))
 
 // ---- entities
-SCRIPT_BINDING(self, "self", SCRIPT_ENTITY, "the entity whose callback is running", (SCRIPT_NONE))
-SCRIPT_BINDING(spawn, "spawn", SCRIPT_ENTITY, "spawn a class at a position",
+SCRIPT_BINDING(self, "self", SCRIPT_OBJECT, "the entity whose callback is running", (SCRIPT_NONE))
+SCRIPT_BINDING(spawn, "spawn", SCRIPT_OBJECT, "spawn a class at a position; #f when it cannot",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2))
-SCRIPT_BINDING(destroy, "destroy", SCRIPT_BOOL, "destroy an entity", (SCRIPT_NONE, SCRIPT_ENTITY))
-SCRIPT_BINDING(alive, "alive?", SCRIPT_BOOL, "is this handle still an entity",
-               (SCRIPT_NONE, SCRIPT_ENTITY))
-SCRIPT_BINDING(classname, "classname", SCRIPT_STRING, "the class an entity was spawned from",
-               (SCRIPT_NONE, SCRIPT_ENTITY))
-SCRIPT_BINDING(find_first, "find-first", SCRIPT_ENTITY, "the first living entity of a class",
+SCRIPT_BINDING(find_first, "find-first", SCRIPT_OBJECT, "the first living entity of a class, or #f",
                (SCRIPT_NONE, SCRIPT_STRING))
-SCRIPT_BINDING(find_next, "find-next", SCRIPT_ENTITY,
-               "the next living entity of a class after an entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING))
-SCRIPT_BINDING(entity_position, "entity-position", SCRIPT_VECTOR2,
-               "the position of a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY))
-SCRIPT_BINDING(set_entity_position, "set-entity-position!", SCRIPT_NONE,
-               "put a scripted entity at a position", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_VECTOR2))
-SCRIPT_BINDING(think_next, "think-next", SCRIPT_NONE, "run think again on the next step",
-               (SCRIPT_NONE))
-SCRIPT_BINDING(think_after, "think-after", SCRIPT_NONE, "run think again after so many seconds",
-               (SCRIPT_NONE, SCRIPT_FLOAT))
-
-// ---- an entity's own fields
-SCRIPT_BINDING(get_number, "get", SCRIPT_FLOAT, "read a number field of this entity",
-               (SCRIPT_NONE, SCRIPT_STRING))
-SCRIPT_BINDING(set_number, "set-number!", SCRIPT_NONE, "write a number field of this entity",
-               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_FLOAT))
-SCRIPT_BINDING(get_vector, "get-vector", SCRIPT_VECTOR2, "read a vector field of this entity",
-               (SCRIPT_NONE, SCRIPT_STRING))
-SCRIPT_BINDING(set_vector, "set-vector!", SCRIPT_NONE, "write a vector field of this entity",
-               (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2))
-SCRIPT_BINDING(entity_get_number, "entity-get", SCRIPT_FLOAT,
-               "read a number field from a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING))
-SCRIPT_BINDING(entity_set_number, "entity-set-number!", SCRIPT_NONE,
-               "write a number field on a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING, SCRIPT_FLOAT))
-SCRIPT_BINDING(entity_get_vector, "entity-get-vector", SCRIPT_VECTOR2,
-               "read a vector field from a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING))
-SCRIPT_BINDING(entity_set_vector, "entity-set-vector!", SCRIPT_NONE,
-               "write a vector field on a scripted entity", (SCRIPT_NONE, SCRIPT_ENTITY, SCRIPT_STRING, SCRIPT_VECTOR2))
-
-// ---- the transform every scripted entity carries
-SCRIPT_BINDING(position, "position", SCRIPT_VECTOR2, "where this entity is", (SCRIPT_NONE))
-SCRIPT_BINDING(set_position, "set-position!", SCRIPT_NONE, "put this entity somewhere",
-               (SCRIPT_NONE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(rotation, "rotation", SCRIPT_FLOAT, "which way this entity faces, in radians",
-               (SCRIPT_NONE))
-SCRIPT_BINDING(rotate, "rotate!", SCRIPT_NONE, "turn by this many radians",
-               (SCRIPT_NONE, SCRIPT_FLOAT))
-SCRIPT_BINDING(move_world, "move-world!", SCRIPT_NONE, "move along the world axes",
-               (SCRIPT_NONE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(move_local, "move-local!", SCRIPT_NONE, "move along this entity's own axes",
-               (SCRIPT_NONE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(look_at, "look-at!", SCRIPT_BOOL, "face a point", (SCRIPT_NONE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(interpolated, "interpolated", SCRIPT_VECTOR2,
-               "where to draw this entity between steps", (SCRIPT_NONE))
-SCRIPT_BINDING(to_local, "to-local", SCRIPT_VECTOR2, "a point in this entity's own space",
-               (SCRIPT_NONE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(interpolated_rotation, "interpolated-rotation", SCRIPT_FLOAT,
-               "which way to draw this entity between steps", (SCRIPT_NONE))
+SCRIPT_BINDING(find_next, "find-next", SCRIPT_OBJECT,
+               "the next living entity of a class after an entity, or #f",
+               (SCRIPT_NONE, SCRIPT_OBJECT, SCRIPT_STRING))
 
 // ---- input
 SCRIPT_BINDING(input_vector, "input-vector", SCRIPT_VECTOR2,
@@ -115,6 +66,9 @@ SCRIPT_BINDING(text_width, "text-width", SCRIPT_INT, "how wide drawn text would 
 // ---- time
 SCRIPT_BINDING(step, "dt", SCRIPT_FLOAT, "how long one simulation step is", (SCRIPT_NONE))
 SCRIPT_BINDING(now, "now", SCRIPT_FLOAT, "gameplay time in seconds", (SCRIPT_NONE))
+SCRIPT_BINDING(elapsed, "elapsed", SCRIPT_FLOAT,
+               "seconds since this entity last thought, or spawned; for timing work done less than every step",
+               (SCRIPT_NONE))
 SCRIPT_BINDING(alpha, "alpha", SCRIPT_FLOAT, "how far between steps this frame is drawing",
                (SCRIPT_NONE))
 
@@ -171,123 +125,6 @@ SCRIPT_BINDING(load_scene, "load-scene", SCRIPT_BOOL,
                "replace the world with a scene, once this callback has finished",
                (SCRIPT_NONE, SCRIPT_STRING))
 
-// ---- camera resources
-SCRIPT_BINDING(camera_create, "camera-create", SCRIPT_RESOURCE, "a default 2D camera",
-               (SCRIPT_NONE))
-SCRIPT_BINDING(camera_destroy, "camera-destroy", SCRIPT_BOOL, "release a camera",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(camera_position, "camera-position", SCRIPT_VECTOR2, "where the camera is looking",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(camera_set_position, "camera-set-position!", SCRIPT_NONE, "put the camera somewhere",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(camera_zoom, "camera-zoom", SCRIPT_FLOAT, "the camera's magnification",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(camera_set_zoom, "camera-set-zoom!", SCRIPT_NONE, "set the camera's magnification",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT))
-SCRIPT_BINDING(camera_follow, "camera-follow!", SCRIPT_NONE,
-               "move a camera toward a target over dt seconds",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT))
-SCRIPT_BINDING(camera_world_to_screen, "camera-world-to-screen", SCRIPT_VECTOR2,
-               "a world point in screen pixels", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(camera_screen_to_world, "camera-screen-to-world", SCRIPT_VECTOR2,
-               "screen pixels in world coordinates", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(camera_interpolated, "camera-interpolated", SCRIPT_VECTOR2,
-               "where to draw the camera between steps", (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(camera_set_viewport, "camera-set-viewport!", SCRIPT_NONE,
-               "the screen size for world/screen conversion",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-
-// ---- audio resources
-SCRIPT_BINDING(audio_create, "audio-create", SCRIPT_RESOURCE, "an empty audio service",
-               (SCRIPT_NONE))
-SCRIPT_BINDING(audio_destroy, "audio-destroy", SCRIPT_BOOL, "release an audio service",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(audio_add_bus, "audio-add-bus", SCRIPT_BOOL, "add a named volume group",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_FLOAT))
-SCRIPT_BINDING(audio_bus_volume, "audio-bus-volume!", SCRIPT_BOOL, "set a named group's volume",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_FLOAT))
-SCRIPT_BINDING(audio_bus_muted, "audio-bus-muted!", SCRIPT_BOOL, "mute or unmute a named group",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_BOOL))
-SCRIPT_BINDING(audio_play_sound, "audio-play-sound", SCRIPT_BOOL,
-               "play a sound on a named bus", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_STRING))
-SCRIPT_BINDING(audio_play_music, "audio-play-music", SCRIPT_BOOL,
-               "stream music on a named bus", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING, SCRIPT_STRING))
-SCRIPT_BINDING(audio_stop_music, "audio-stop-music", SCRIPT_BOOL, "stop a music stream by path",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_STRING))
-
-// ---- collision resources
-SCRIPT_BINDING(collision_create, "collision-create", SCRIPT_RESOURCE,
-               "a spatial-hash query world: max shapes, cell size",
-               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_FLOAT))
-SCRIPT_BINDING(collision_destroy, "collision-destroy", SCRIPT_BOOL, "release a collision world",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(collision_add_circle, "collision-add-circle", SCRIPT_INT,
-               "register a circle proxy: centre, radius, layer, mask",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT, SCRIPT_INT))
-SCRIPT_BINDING(collision_remove, "collision-remove", SCRIPT_BOOL, "remove a proxy by its handle",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
-SCRIPT_BINDING(collision_move_circle, "collision-move-circle", SCRIPT_BOOL,
-               "move a circle proxy to a new centre and radius",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT, SCRIPT_VECTOR2, SCRIPT_FLOAT))
-SCRIPT_BINDING(collision_query_circle, "collision-query-circle", SCRIPT_INT,
-               "count shapes overlapping a circle: centre, radius, mask",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_INT))
-SCRIPT_BINDING(collision_query_aabb, "collision-query-aabb", SCRIPT_INT,
-               "count shapes overlapping a box: centre, half-extents, mask",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT))
-SCRIPT_BINDING(collision_add_aabb, "collision-add-aabb", SCRIPT_INT,
-               "register an AABB proxy: centre, half-extents, layer, mask",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_INT))
-SCRIPT_BINDING(collision_move_aabb, "collision-move-aabb", SCRIPT_BOOL,
-               "move an AABB proxy to a new centre and half-extents",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
-SCRIPT_BINDING(collision_sweep_circle, "collision-sweep-circle", SCRIPT_FLOAT,
-               "sweep a circle: fraction 0-1 to first hit, 1 for none",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_FLOAT, SCRIPT_VECTOR2, SCRIPT_INT))
-
-// ---- pathfinder resources
-SCRIPT_BINDING(pathfinder_create, "pathfinder-create", SCRIPT_RESOURCE,
-               "an A* workspace for a hex grid of width and height",
-               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
-SCRIPT_BINDING(pathfinder_destroy, "pathfinder-destroy", SCRIPT_BOOL, "release a pathfinder",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(pathfinder_block, "pathfinder-block!", SCRIPT_BOOL, "mark a hex as impassable",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(pathfinder_unblock, "pathfinder-unblock!", SCRIPT_BOOL, "mark a hex as passable",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(pathfinder_blocked, "pathfinder-blocked?", SCRIPT_BOOL, "is a hex impassable",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(pathfinder_solve, "pathfinder-solve", SCRIPT_INT,
-               "route from one hex to another: length, or 0 for none",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_VECTOR2, SCRIPT_VECTOR2))
-SCRIPT_BINDING(pathfinder_path_length, "pathfinder-path-length", SCRIPT_INT,
-               "hexes in the route the last solve found", (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(pathfinder_path_get, "pathfinder-path-get", SCRIPT_VECTOR2,
-               "one hex of the last solved route, 0 first", (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
-
-// ---- mover resources
-SCRIPT_BINDING(mover_create, "mover-create", SCRIPT_RESOURCE,
-               "a walker on the hex grid, starting on a hex, holding so many steps of route",
-               (SCRIPT_NONE, SCRIPT_VECTOR2, SCRIPT_INT))
-SCRIPT_BINDING(mover_destroy, "mover-destroy", SCRIPT_BOOL, "release a mover",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(mover_goto, "mover-go-to", SCRIPT_BOOL, "plan a walk through a pathfinder to a hex",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_RESOURCE, SCRIPT_VECTOR2))
-SCRIPT_BINDING(mover_truncate, "mover-truncate!", SCRIPT_NONE, "cut the walk to at most so many hexes",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
-SCRIPT_BINDING(mover_remaining, "mover-remaining", SCRIPT_INT, "hexes still to be entered",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(mover_stop, "mover-stop!", SCRIPT_NONE, "stop where it stands",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(mover_moving, "mover-moving?", SCRIPT_BOOL, "is a walk underway",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(mover_update, "mover-update!", SCRIPT_NONE, "advance a walk over dt seconds",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT))
-SCRIPT_BINDING(mover_screen, "mover-screen", SCRIPT_VECTOR2,
-               "where to draw a mover between hexes", (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(mover_hex, "mover-hex", SCRIPT_VECTOR2, "the hex a mover occupies",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-
 // ---- saved key/values
 SCRIPT_BINDING(save_set_number, "save-set-number!", SCRIPT_BOOL, "remember a number under a key",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_FLOAT))
@@ -312,50 +149,7 @@ SCRIPT_BINDING(debug_rect, "debug-rect", SCRIPT_BOOL, "show a rectangle for so m
 SCRIPT_BINDING(debug_text, "debug-text", SCRIPT_BOOL, "show text for so many seconds",
                (SCRIPT_NONE, SCRIPT_STRING, SCRIPT_VECTOR2, SCRIPT_INT, SCRIPT_FLOAT))
 
-// ---- networking: a server's fixed tick, and a client's view of where the server is
-SCRIPT_BINDING(net_clock_create, "net-clock-create", SCRIPT_RESOURCE,
-               "a server clock ticking at a rate, sending snapshots at a lower one",
-               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
-SCRIPT_BINDING(net_clock_destroy, "net-clock-destroy", SCRIPT_BOOL, "release a server clock",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(net_clock_advance, "net-clock-advance", SCRIPT_INT,
-               "add elapsed seconds; how many fixed steps are now due, at most the ceiling given",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT, SCRIPT_INT))
-SCRIPT_BINDING(net_clock_ticked, "net-clock-ticked", SCRIPT_INT,
-               "count one simulated step; the tick just run",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(net_clock_should_send, "net-clock-should-send?", SCRIPT_BOOL,
-               "is a snapshot due; true at most once per send interval",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(net_clock_tick, "net-clock-tick", SCRIPT_INT, "the current tick number",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
+// ---- networking
 SCRIPT_BINDING(net_clock_now, "net-clock-now", SCRIPT_FLOAT,
                "monotonic seconds, usable with no window open", (SCRIPT_NONE))
-SCRIPT_BINDING(net_interp_create, "net-interp-create", SCRIPT_RESOURCE,
-               "a client clock that draws the world far enough in the past to interpolate",
-               (SCRIPT_NONE, SCRIPT_INT, SCRIPT_INT))
-SCRIPT_BINDING(net_interp_destroy, "net-interp-destroy", SCRIPT_BOOL, "release a client clock",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(net_interp_snapshot, "net-interp-snapshot", SCRIPT_BOOL,
-               "record the server tick of a snapshot as it arrives",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_INT))
-SCRIPT_BINDING(net_interp_advance, "net-interp-advance", SCRIPT_BOOL,
-               "move the drawn moment forward by elapsed seconds",
-               (SCRIPT_NONE, SCRIPT_RESOURCE, SCRIPT_FLOAT))
-SCRIPT_BINDING(net_interp_render_tick, "net-interp-render-tick", SCRIPT_FLOAT,
-               "the server tick to sample replicated objects at, fractional",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
 
-// ---- textures: loading one, and letting go of it
-SCRIPT_BINDING(texture_load, "texture-load", SCRIPT_RESOURCE,
-               "load an image as a texture; mipmaps, filter and wrap follow the defaults",
-               (SCRIPT_NONE, SCRIPT_STRING))
-SCRIPT_BINDING(texture_load_smooth, "texture-load-smooth", SCRIPT_RESOURCE,
-               "the same, with bilinear filtering and generated mipmaps",
-               (SCRIPT_NONE, SCRIPT_STRING))
-SCRIPT_BINDING(texture_destroy, "texture-destroy", SCRIPT_BOOL, "release a texture",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(texture_width, "texture-width", SCRIPT_INT, "its width in pixels",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
-SCRIPT_BINDING(texture_height, "texture-height", SCRIPT_INT, "its height in pixels",
-               (SCRIPT_NONE, SCRIPT_RESOURCE))
