@@ -7,8 +7,8 @@ Every public symbol in `core/*.h`, `gameplay/*.h`, or `gameplay/script/*.h` is a
 - ownership and lifetime of every pointer, handle, or resource;
 - required cleanup and whether partial initialization is safe;
 - thread, rendering-context, and capability requirements; and
-- important limitations or project-owned policy.
+- important limitations, and what the calling game decides rather than the engine.
 
 Use explicit `Init`/`Free` pairs where appropriate. Do not return storage that can be invalidated by a routine the caller is expected to invoke without documenting that invalidation. Public documentation belongs in the matching XML reference and in a user guide when the API changes an authoring workflow.
 
-Optional packages follow the same rule. `core/collision2d.h` owns only its caller-created query world and borrows the `user` pointers it returns; it cannot depend on `gameplay/` or decide collision response. `core/camera2d.h` owns no window, scene, or entity. Keep their policies in project code and document their coordinate convention in the user guide.
+Every package follows the same rule. `core/collision2d.h` owns only its caller-created query world and borrows the `user` pointers it returns; it cannot depend on `gameplay/`. `core/camera2d.h` owns no window, scene, or entity. Document each package's coordinate convention in its user guide.

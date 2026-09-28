@@ -1,7 +1,7 @@
 # Gameplay
 
 Gameplay depends on core. Core never includes gameplay or a project. Entities are fixed flat slots
-with generational handles and ordinary C payloads. There is no mandatory transform or base class.
+with generational handles and ordinary C payloads. Entities have no transform hierarchy or base class yet.
 
 Each class keeps its own entities' payloads, in storage shaped by the size that class declared: a
 sparse map from an entity's slot to its place in that class's array. Nothing is shared between
@@ -41,7 +41,7 @@ Think is still opt-in and scheduled. `EntityThinkNext(e)` requests the next simu
 
 ## Properties and lifetime
 
-Spawn order is now **allocate → copy defaults → apply properties → Spawn**. Spawn returns bool.
+Spawn order is **allocate → copy defaults → apply properties → Spawn**. Spawn returns bool.
 `EntitySpawnWith` accepts a list of string keyvalues; scene loading uses this same path. Spawn therefore
 sees the final configured values. Invalid properties abort before Spawn; a failed Spawn calls Destroy
 to clean any resources it partially created. Normal deletion, world clear and shutdown also call
@@ -109,9 +109,9 @@ Handles rather than pointers, so a walk that destroys as it goes cannot walk int
 the walk carries on from where it was rather than from a handle that has just died. Entities spawned
 during a walk may or may not be reached by it: collect first and spawn afterwards.
 
-`GameplayWorld` has no built-in spatial index, deliberately: entities have no mandatory transform.
-Projects that use circles/AABBs can opt into `core/collision2d.h` and keep its proxies synchronized
-with their own positions; grids, terrain policy, and collision response remain project policy.
+`GameplayWorld` has no built-in spatial index yet, because entities have no transform of their own.
+Projects that use circles/AABBs can use `core/collision2d.h` and keep its proxies synchronized with
+their own positions.
 
 ## Routing and walking a hex grid
 
@@ -124,10 +124,3 @@ caller answers what is blocked through `IsoBlockedFn`, so walls, scenery, other 
 doors are all the same question asked of the project. A game that rations movement plans a walk and
 then cuts it with `IsoMoverTruncate`; what the allowance is, and what it is called, stays with the
 game.
-
-## Migration from the earlier callbacks
-
-Change callbacks to accept EntityContext; replace EntityData lookups with `e->data` and project globals
-with `e->app`. Move default-value assignments out of Spawn into the class defaults value. Spawn now
-returns true on success. Field declarations replace ordinary KeyValue parsing. Existing scene grammar,
-handles and scheduling semantics remain the same. The gameplay integration test exercises the migration.
