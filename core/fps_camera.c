@@ -73,7 +73,8 @@ int FpsCameraUpdate(FpsCamera *s, const FpsCameraConfig *c, FpsInput input, FpsW
     Vector3 movement = input.move;
     if (Vector3LengthSqr(movement) > 1)
         movement = Vector3Normalize(movement);
-    float speed = input.crouch ? c->crouchSpeed : (input.sprint ? c->runSpeed : c->walkSpeed);
+    float speed = input.useSpeed ? fmaxf(input.speed, 0)
+                                 : input.crouch ? c->crouchSpeed : (input.sprint ? c->runSpeed : c->walkSpeed);
     Vector3 wish = Vector3Scale(
         Vector3Add(Vector3Scale(right, movement.x), Vector3Scale(input.noclip ? f : flat, movement.z)),
         speed);
@@ -111,6 +112,8 @@ int FpsCameraUpdate(FpsCamera *s, const FpsCameraConfig *c, FpsInput input, FpsW
     s->phase = fmodf(next, 2 * PI);
     s->elapsed += dt;
     float amp = s->bobBlend * Lerp(1, c->bobRunScale, run), wave = sinf(2 * s->phase);
+    s->bobAmp = amp;
+    s->runMix = run;
     float y = c->bobVertical * amp * (-0.5f * cosf(2 * s->phase) + 0.1f * sinf(4 * s->phase));
     float roll = c->bobRoll * amp * cosf(s->phase), nod = c->bobPitch * amp * wave;
     Vector3 view = Vector3Add(s->position, Vector3Add(Vector3Scale(right, c->bobSide * amp * cosf(s->phase)),
