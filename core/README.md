@@ -1,6 +1,6 @@
-# Core, stage one
+# Core
 
-Modules are ordinary C translation units, built into `build/core/libcore.a`. Public headers expose raylib-native types. Core includes only its own files, raylib and system headers; projects provide policy and content.
+Modules are ordinary C translation units, built into `build/core/libcore.a`. Public headers expose raylib-native types. Core includes only its own files, raylib and system headers.
 
 - `engine`: window lifetime, accumulator loop, project callback signatures and input buffering.
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
@@ -94,7 +94,7 @@ that is null, walking up until the engine's own `core/` data is in reach — an 
 directory sits several levels below it. Shader, font and layout loads resolve through it; writes
 never redirect, since the caller is naming where the file should go.
 
-Ownership: shader tables own loaded shaders; the uniform registry copies names but borrows shaders. MB transfers buffers to raylib when uploaded. Actor borrows its model, clips and aim-joint list, and owns its pose state. Call `ActorUploadPose` immediately before drawing each instance when models are shared. Model loading remains raylib's responsibility; no custom formats or asset conversion are introduced.
+Ownership: shader tables own loaded shaders; the uniform registry copies names but borrows shaders. MB transfers buffers to raylib when uploaded. Actor borrows its model, clips and aim-joint list, and owns its pose state. Call `ActorUploadPose` immediately before drawing each instance when models are shared. Models load through raylib's loaders; the engine's own formats are the sprite-sheet sidecar, UI documents, scenes, saves and input maps.
 
 `make` always runs `tools/check_core_dependencies.py` on compiler-produced dependency lists for core sources and headers before compilation/linking. Relative, absolute and transitive includes escaping the allowed roots fail the build. The executable project includes only core headers and system C headers. This is build enforcement, not a sandbox against deliberately disabling the build rules.
 
@@ -112,8 +112,7 @@ application clear colour. Invalid configuration logs a reason before returning f
 `EngineRunApplication`, or define `EngineApplicationMain(argc, argv)` and opt into `core/entry.c`.
 That entry file is separate from libcore; custom main functions remain supported. Returning a descriptor
 does not extend the lifetime of its pointers: use static state or otherwise retain it for the run.
-The reusable Makefile declaration is `$(eval $(call core_project,name,core,entry))`; omit entry when
-supplying main, and use gameplay in the second argument only when linking that optional layer.
+Games are built with `engine-build` from an `engine.project` manifest; see the root README.
 
 A complete core-only moving rectangle needs no entity registration or initialization callback:
 

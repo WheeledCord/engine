@@ -8,8 +8,8 @@ cd engine
 make smoke
 ```
 
-`smoke` builds the core, gameplay, scripting, and regression projects, then runs their checks. A working X display is required for the graphical checks.
+`smoke` builds the engine and runs its gameplay, regression and documentation checks without a display. `make integration` runs the graphical checks and needs a working X display.
 
-To build a game outside this repository, create an SDK and use `engine-new` and `engine-build` as described in the root README. Start from a generated core-only project unless you need scenes and entities, in which case enable the gameplay module.
+To build a game outside this repository, create an SDK and use `engine-new` and `engine-build` as described in the root README. `engine-new` writes a project you can build straight away.
 
 Next: [create an application](application-loop.md).
