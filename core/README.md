@@ -8,6 +8,8 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   Camera, audio, collision world, network clocks, texture and timer each declare their type in
   their own file.
 - `timer`: a countdown object that emits `timeout`, then starts again unless it is one-shot.
+- `node`: a `node3d` object with a local position, rotation and scale and an optional parent, whose
+  world transform is its parent's world transform times its own, as in Godot's Node3D.
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
   A project that declares nothing boots with no probe and no shader compiled; declaring
   `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.

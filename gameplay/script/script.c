@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #include "core/file.h"
+#include "core/node.h"
 #include "script.h"
 #include "raymath.h"
 
@@ -24,7 +25,7 @@ bool ScriptHostInit(ScriptHost *host, GameplayWorld *world)
     // The engine's own types, which a script makes by name.
     static const EngineType *const engineTypes[] = {
         &CoreCamera2DType, &CoreAudioType, &CoreAudioVoiceType, &Collision2DWorldType, &CoreNetClockType,
-        &CoreNetInterpolatorType, &CoreTextureType, &CoreTimerType, &IsoRouterType, &IsoMoverType,
+        &CoreNetInterpolatorType, &CoreNodeType, &CoreTextureType, &CoreTimerType, &IsoRouterType, &IsoMoverType,
     };
     for (size_t i = 0; i < sizeof engineTypes / sizeof engineTypes[0]; i++)
         if (!EngineObjectsRegisterType(&host->objects, engineTypes[i]))
