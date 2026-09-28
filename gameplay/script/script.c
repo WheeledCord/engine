@@ -5,6 +5,7 @@
 #include "core/file.h"
 #include "core/node.h"
 #include "script.h"
+#include "script_network.h"
 #include "raymath.h"
 
 #include <stdio.h>
@@ -26,6 +27,7 @@ bool ScriptHostInit(ScriptHost *host, GameplayWorld *world)
     static const EngineType *const engineTypes[] = {
         &CoreCamera2DType, &CoreAudioType, &CoreAudioVoiceType, &Collision2DWorldType, &CoreNetClockType,
         &CoreNetInterpolatorType, &CoreNodeType, &CoreTextureType, &CoreTimerType, &IsoRouterType, &IsoMoverType,
+        &ScriptNetworkType,
     };
     for (size_t i = 0; i < sizeof engineTypes / sizeof engineTypes[0]; i++)
         if (!EngineObjectsRegisterType(&host->objects, engineTypes[i]))
