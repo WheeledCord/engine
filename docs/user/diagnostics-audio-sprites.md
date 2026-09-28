@@ -10,8 +10,19 @@ step backlog. `GameplayDebugEntityCounts` adds one-frame entity count lines to t
 bridge, not a world debugger or query visualizer.
 
 `CoreAudioInit` prepares an empty service with `master`, `sfx`, and `music` volume groups. The first
-play opens raylib's device. `CoreAudioPlaySound` and `CoreAudioPlayMusic` resolve paths through the
-data root and cache each path once. Call `CoreAudioUpdate` once per rendered frame for music.
+play opens raylib's device. Sounds and music resolve paths through the data root and are cached once
+per path; `CoreAudioLoadSound` loads one ahead of its first play. A sound plays over itself on up to
+`CORE_AUDIO_POLYPHONY` voices, so repeats overlap instead of cutting each other off.
+
+For sound in a world, set the listener once a frame with `CoreAudioSetListener` (usually the camera)
+and play with `CoreAudioPlaySoundAt`: the gain falls off linearly with distance to silence at the
+range given — Godot's `max_distance` with attenuation disabled — and the sound pans toward the side
+it is on. A sound out of range is not started. For a sound that has to be held — moved while it
+plays, looped, stopped by itself — make a voice with `CoreAudioVoiceCreate` and use the
+`CoreAudioVoice*` calls; `CoreAudioUpdate`, once per rendered frame, keeps held voices placed for
+where the listener now is, restarts looping ones, and feeds music. Scripts reach the same through
+the `audio` object's `play-sound-at!`, `set-listener!` and `stop-sound!`, and the `voice` object.
+
 `CoreAudioFree` unloads everything and closes only a device the service itself opened. Buses are
 volume/mute groups, not effects sends or a mixer graph.
 
