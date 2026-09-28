@@ -81,10 +81,14 @@ int EngineRunApplication(const EngineApplication *application)
     SetTargetFPS(c->targetFps);
     if (!CoreCheckCapabilities(c->requirements)) { CloseWindow(); runningConfig = NULL; return 1; }
     bool initialised = !p->Init || p->Init(context);
+    if (!initialised)
+        TraceLog(LOG_ERROR, "Engine: the project's Init returned false; shutting down");
     bool ownsUi = false;
     if (initialised && application->BuildUi && !application->ui->state)
     {
         initialised = UiInit(application->ui, UiThemeDefault());
+        if (!initialised)
+            TraceLog(LOG_ERROR, "Engine: the UI could not be initialised; shutting down");
         ownsUi = initialised;
     }
     int result = initialised ? 0 : 1;
