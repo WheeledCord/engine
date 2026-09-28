@@ -38,9 +38,9 @@ make integration
 ./build/core/core_integration --smoke --slow-fixed
 ```
 
-Smoke mode runs the same project for 100 rendered frames, reports checks and returns nonzero on failure. It checks input consumption, animation matrices against raylib, explicit blend destinations, one-shot completion, bone pivots/collapse, changing GPU-rendered poses, unchanged CPU animated vertices, and depth sampling. Scene, depth, UI and nested-menu captures plus build products go in `build/core/`. There is no separate test suite.
+Smoke mode runs the same project for 100 rendered frames, reports checks and returns nonzero on failure. It checks input consumption, animation matrices against raylib, explicit blend destinations, one-shot completion, bone pivots/collapse, changing GPU-rendered poses, unchanged CPU animated vertices, and depth sampling. Scene, depth, UI and nested-menu captures plus build products go in `build/core/`.
 
-The build needs a C compiler, make, git, Python 3, tar and the Linux/X11 development dependencies used by raylib. A working X display is needed to run it. It exports raylib's committed source into the build directory and builds it with `GRAPHICS_API_OPENGL_21`; neither vendored files nor the existing game build are changed. This excludes the existing uncommitted game-specific `raylib/src/config.h` decoder reductions.
+The build needs a C compiler, make, git, Python 3, tar and the Linux/X11 development dependencies used by raylib. A working X display is needed to run it. It exports raylib's committed source into the build directory and builds it with `GRAPHICS_API_OPENGL_21`; vendored files are not changed.
 
 The character is `greenman.glb` by @iP, CC0; see `assets/LICENSE`. It is copied unchanged from raylib's sample assets and loaded using raylib's normal model/animation loaders. Its texture is in the native GLB asset, not embedded in the executable. The project explicitly supplies `1000/17` frames per second to match this version of raylib's glTF sampling interval. Core has no format-specific playback rate.
 

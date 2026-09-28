@@ -1,19 +1,15 @@
 # Scripting
 
-Two languages, one binding table. The script-facing API is described once, as data, in
-`script_api.def`: name, argument types, result type, and the C function behind it. A frontend is a
-loop over that table plus the conversions its language needs — it names no engine function of its
-own. Adding a call is one row, and every language gets it.
-
-That is the whole point of the arrangement. Hand-written bindings for two languages would mean
-writing and maintaining each call twice, and the node editor later would make it three times.
+Games are scripted in Scheme, through the s7 interpreter. The script-facing API is described once,
+as data, in `script_api.def`: name, argument types, result type, and the C function behind it. The
+Scheme frontend is a loop over that table plus the conversions Scheme needs — it names no engine
+function of its own. Adding a call is one row.
 
 ```
 script_api.def   every call a script can make, one row each
 script_api.c     the implementations, and the table built from the same rows
 script.c         scripted entity classes and the callbacks the world sees
 script_s7.c      Scheme: trampolines generated from the same rows, and a REPL
-script_pawn.c    Pawn: the same rows as natives, and the declarations Pawn needs
 ```
 
 ## The table
@@ -25,8 +21,8 @@ SCRIPT_BINDING(move_world, "move-world!", SCRIPT_NONE, "move along the world axe
 
 One macro emits both the C prototype and the table row, so an implementation cannot drift from what
 the table says it is. Types are `none bool int float vector2 vector3 string entity`. Every call is
-checked against its declaration — arity and types — before it runs, so no frontend has to trust what
-a script passed it. The argument list is parenthesised and starts with `SCRIPT_NONE` only because
+checked against its declaration — arity and types — before it runs, so the frontend never has to
+trust what a script passed it. The argument list is parenthesised and starts with `SCRIPT_NONE` only because
 C99 cannot pass an empty one; the sentinel is dropped when the table is built.
 
 ## Scripted entities
@@ -61,10 +57,7 @@ knows its behaviour. A running application may also evaluate expressions against
 `(spawn "mover" (vec 200 200))` can create another actor when that is part of the project's tooling.
 
 `define-entity`, `vec` and the other conveniences are Scheme written in the prelude, on top of the
-`class-*` rows. The shape of a declaration is a language's business; the engine's side of it is
-still only the table.
-
-## Pawn
+`class-*` rows; the engine's side of it is still only the table.
 
 ## Small queries
 
@@ -72,8 +65,8 @@ Beside the entity calls, the table carries the generic queries a callback keeps 
 `random-int`, the vector questions (`vec-length`, `vec-distance`, `vec-normalize`) that raymath
 answers everywhere else in the engine, `text-width` so drawn text can be centred, and `sprite-size`,
 which names a sheet the way `draw-sprite` does and reports one frame's size in pixels — a zero
-vector for a sheet nobody has loaded. All of these are ordinary rows: one declaration, every
-language, the same type checking as anything else.
+vector for a sheet nobody has loaded. All of these are ordinary rows, with the same type checking
+as anything else.
 
 ## Resource handles
 
@@ -115,25 +108,11 @@ rebind dialog needs a `UiContext`, so a script would be driving C UI through a p
 key, mouse and action bindings cover what a script asks input for; rebinding stays with the
 project's own code, where the UI already lives.
 
-## Scheme
-Pawn uses the same binding table; what its frontend adds is only what Pawn needs to be told:
-
-- Names are spelled the way a Pawn identifier can be: `move-world!` is `move_world`, `alive?` is
-  `alive`. One rule, applied to every row.
-- Pawn has no compound values, so a vector argument arrives as its components side by side, and a
-  vector answer comes back through reference parameters, since a native returns one cell.
-- `engine.inc`, the declarations a Pawn script includes, is written from the table during an SDK or
-  Pawn build. It is generated rather than kept by hand for the same reason the table exists at all.
-
-Cells are pinned to 32 bits so the VM agrees with what `pawncc` emits, which also makes a cell hold
-an IEEE float. The assembly core is 32-bit x86 only; every other target runs the portable C VM, and
-`PAWN_CORE=asm` on a machine it cannot serve stops the build rather than quietly ignoring the ask.
-
 ## A game's own calls
 
 The engine's rows are fixed when the engine is built, but a game adds its own at runtime, and they
-are indistinguishable from the engine's afterwards: checked against their declaration, spelled for
-each language, and written into the Pawn declarations.
+are indistinguishable from the engine's afterwards: checked against their declaration like any other
+row.
 
 ```c
 SCRIPT_CALL(grapple, "grapple!", SCRIPT_FLOAT, "fire a grapple at a point",
@@ -146,21 +125,16 @@ ScriptAddBinding(&host, &grapple_binding);   // before opening a frontend
 ```
 
 One macro writes the function and the row together, as in the engine's own table, so the two cannot
-drift. Add them before opening a frontend: Pawn resolves every native a script names as the script
-loads. A game that writes Pawn passes its host to `ScriptPawnWriteInclude`, so its own calls are
-declared alongside the engine's.
+drift. Add them before opening the Scheme frontend, which registers every row when it opens.
 
-Each frontend keeps a small pool of trampolines for calls that did not exist when it was compiled,
-because neither s7 nor Pawn lets a registered function carry anything of its own.
+The frontend keeps a small pool of trampolines for calls that did not exist when it was compiled,
+because an s7 function registered from C carries nothing of its own to say which row it is.
 
 ## Adding a call to the engine
 
-Add the row. Both languages have it on the next build, and so will the node editor:
-
-```
-make -f Makefile.core run-script        # Scheme, with the REPL
-make -f Makefile.core run-script-pawn   # the same entity in Pawn
-```
+Add the row to `script_api.def` and give it an implementation in `script_api.c`. Scheme has it on
+the next build, and `make script-api` writes the reference for it into `build/core/`. Exercise it
+through `ScriptInvoke` in the regression checks, with a success and an expected-failure case.
 
 ## Bindings deliberately omitted
 
