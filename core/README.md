@@ -17,6 +17,9 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   player's commands run in place; a joiner is checked for engine protocol, game and version, welcomed
   with what it needs to build the world, and sent snapshots once ready. Commands go up to the
   server, events come down to players. See `docs/user/networking.md`.
+- `waypoints`: a fixed-capacity point graph -- up to 256 points, 8 links each -- with shortest-path
+  queries by summed straight-line edge distance (A*, as Godot's AStar3D). A project builds its own
+  graph over it; `next-hop` and `path` answer the route between two of its points.
 - `capabilities`: enforces exactly what the project declared in `CoreRequirements` and nothing else.
   A project that declares nothing boots with no probe and no shader compiled; declaring
   `gpuSkinning`, `renderTargets` or `sampleableDepth` is what makes core demand and test them.
