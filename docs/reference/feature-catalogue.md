@@ -24,6 +24,7 @@ linked guide explains authoring where one exists.
 | Textures | Bake a material shader into a mesh's UV layout, with seam dilation and mip-safe background fill | `core/uv_bake.h`; [texture baking](../user/texture-baking.md) |
 | Textures | Surface maps: colour plus height in one texture, normal derived from it | `core/shaders/surface_map.glsl`; [texture baking](../user/texture-baking.md) |
 | Animation | Skeleton poses, clips, blending, aim, GPU skinning | `core/skeleton.h`, `core/animation.h`, `core/playback.h` |
+| Animation | Load a binary `.rig` file (bones, rest matrices, per-vertex weights, pose clips) into skeleton/animation data an Actor can play | `core/rig_file.h` |
 | Sprites | Grid atlases, animation, ground anchors | `core/sprite_sheet.h` |
 | Sprites | Anchored scale/tint/flip/rotation presentation and deterministic draw ordering | `core/sprite_sheet.h` |
 | Isometric | Trimetric tile/hex conversion, ordering, neighbours | `core/iso_grid.h` |

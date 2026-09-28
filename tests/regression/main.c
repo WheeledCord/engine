@@ -18,6 +18,9 @@
 #include "core/sprite_sheet.h"
 #include "core/texture.h"
 #include "core/playback.h"
+#include "core/skeleton.h"
+#include "core/animation.h"
+#include "core/rig_file.h"
 #include "core/file.h"
 #include "core/save.h"
 #include "core/input_map.h"
@@ -2578,6 +2581,211 @@ static void FpsControllerChecks(void)
           "the view turns while time stands still, and nothing else moves");
 }
 
+// ---- .rig binary loader ----------------------------------------------------------------------
+static unsigned short RigTestFloatToHalf(float f)
+{
+    unsigned int x;
+    memcpy(&x, &f, sizeof x);
+    unsigned int sign = (x >> 16) & 0x8000u;
+    int exp = (int)((x >> 23) & 0xFFu) - 127 + 15;
+    unsigned int man = x & 0x7FFFFFu;
+    if (exp <= 0)
+        return (unsigned short)sign; // flush tiny magnitudes to zero; unused by this test's values
+    if (exp >= 0x1F)
+        return (unsigned short)(sign | 0x7C00u); // inf; unused by this test's values
+    return (unsigned short)(sign | ((unsigned int)exp << 10) | (man >> 13));
+}
+// Matrix and a row-major float[16] share memory layout (see core/rig_file.c), so a plain memcpy
+// gets at the top three rows -- the 12 values the binary format stores per matrix.
+static void RigTestWriteMatrix(FILE *f, Matrix m)
+{
+    float a[16];
+    memcpy(a, &m, sizeof a);
+    for (int i = 0; i < 12; i++)
+    {
+        unsigned short h = RigTestFloatToHalf(a[i]);
+        fwrite(&h, sizeof h, 1, f);
+    }
+}
+static bool RigTestClose(float a, float b, float eps) { return fabsf(a - b) < eps; }
+static bool RigTestMatrixClose(Matrix a, Matrix b, float eps)
+{
+    const float *pa = (const float *)&a, *pb = (const float *)&b;
+    for (int i = 0; i < 16; i++)
+        if (!RigTestClose(pa[i], pb[i], eps))
+            return false;
+    return true;
+}
+
+static void RigFileChecks(void)
+{
+    // Three bones (root, child, grandchild), non-trivial rotation and translation, scale 1.
+    Matrix rest[3] = {
+        MatrixMultiply(MatrixRotateXYZ((Vector3){0.30f, 0.15f, -0.20f}), MatrixTranslate(0.50f, 1.00f, -0.30f)),
+        MatrixMultiply(MatrixRotateXYZ((Vector3){-0.40f, 0.25f, 0.10f}), MatrixTranslate(0.05f, 0.60f, 0.02f)),
+        MatrixMultiply(MatrixRotateXYZ((Vector3){0.20f, -0.30f, 0.35f}), MatrixTranslate(-0.10f, 0.50f, 0.08f)),
+    };
+    Matrix frame0[3] = {rest[0], rest[1], rest[2]};
+    Matrix frame1[3] = {
+        MatrixMultiply(MatrixRotateXYZ((Vector3){0.50f, -0.10f, 0.40f}), MatrixTranslate(0.60f, 1.10f, -0.25f)),
+        MatrixMultiply(MatrixRotateXYZ((Vector3){-0.20f, 0.40f, -0.15f}), MatrixTranslate(0.10f, 0.65f, 0.00f)),
+        MatrixMultiply(MatrixRotateXYZ((Vector3){0.30f, -0.20f, 0.50f}), MatrixTranslate(-0.05f, 0.55f, 0.12f)),
+    };
+    const char *names[3] = {"root", "child", "grandchild"};
+    short parents[3] = {-1, 0, 1};
+
+    const char *path = Scratch("regression_test.rig");
+    FILE *f = fopen(path, "wb");
+    fwrite("RIGB", 1, 4, f);
+    float fps = 30.0f;
+    fwrite(&fps, sizeof fps, 1, f);
+    unsigned short nb = 3, nv = 5, na = 1;
+    fwrite(&nb, sizeof nb, 1, f);
+    fwrite(&nv, sizeof nv, 1, f);
+    fwrite(&na, sizeof na, 1, f);
+    for (int i = 0; i < 3; i++)
+    {
+        char name[32] = {0};
+        strncpy(name, names[i], sizeof name - 1);
+        fwrite(name, 1, sizeof name, f);
+        fwrite(&parents[i], sizeof parents[i], 1, f);
+        RigTestWriteMatrix(f, rest[i]);
+    }
+    // Vertices: no weights, one, two, three (ordinary cases), then five (must truncate to four).
+    int vertN[5] = {0, 1, 2, 3, 5};
+    unsigned char vertBones[5][5] = {{0}, {1}, {0, 2}, {0, 1, 2}, {0, 1, 2, 0, 1}};
+    float vertWeights[5][5] = {
+        {0}, {1.0f}, {0.25f, 0.75f}, {0.20f, 0.30f, 0.50f}, {0.10f, 0.10f, 0.10f, 0.35f, 0.35f}};
+    for (int v = 0; v < 5; v++)
+    {
+        unsigned char n = (unsigned char)vertN[v];
+        fwrite(&n, 1, 1, f);
+        for (int k = 0; k < vertN[v]; k++)
+        {
+            unsigned char bone = vertBones[v][k];
+            unsigned short w = RigTestFloatToHalf(vertWeights[v][k]);
+            fwrite(&bone, 1, 1, f);
+            fwrite(&w, sizeof w, 1, f);
+        }
+    }
+    char clipName[64] = {0};
+    strncpy(clipName, "clip0", sizeof clipName - 1);
+    fwrite(clipName, 1, sizeof clipName, f);
+    short clipF0 = 10, clipF1 = 11;
+    fwrite(&clipF0, sizeof clipF0, 1, f);
+    fwrite(&clipF1, sizeof clipF1, 1, f);
+    Matrix *frames[2] = {frame0, frame1};
+    for (int fr = 0; fr < 2; fr++)
+        for (int b = 0; b < 3; b++)
+            RigTestWriteMatrix(f, frames[fr][b]);
+    fclose(f);
+
+    CoreRigFile rig = {0};
+    Check(CoreRigFileLoad(&rig, path), "a well-formed .rig file loads");
+    Check(rig.boneCount == 3 && !strcmp(rig.bones[0].name, "root") && !strcmp(rig.bones[1].name, "child") &&
+              !strcmp(rig.bones[2].name, "grandchild") && rig.bones[0].parent == -1 &&
+              rig.bones[1].parent == 0 && rig.bones[2].parent == 1 && RigTestClose(rig.fps, 30.0f, 1e-4f),
+          "bone names, parents and fps read back");
+
+    Check(rig.boneIds[0 * 4 + 0] == 0 && RigTestClose(rig.boneWeights[0 * 4 + 0], 1.0f, 1e-3f),
+          "a vertex with no weights gets bone 0 weight 1");
+    Check(rig.boneIds[1 * 4 + 0] == 1 && RigTestClose(rig.boneWeights[1 * 4 + 0], 1.0f, 1e-3f),
+          "a single-weight vertex reads back");
+    Check(rig.boneIds[2 * 4 + 0] == 0 && RigTestClose(rig.boneWeights[2 * 4 + 0], 0.25f, 1e-3f) &&
+              rig.boneIds[2 * 4 + 1] == 2 && RigTestClose(rig.boneWeights[2 * 4 + 1], 0.75f, 1e-3f),
+          "a two-weight vertex reads back at half-float precision");
+    Check(rig.boneIds[3 * 4 + 0] == 0 && rig.boneIds[3 * 4 + 1] == 1 && rig.boneIds[3 * 4 + 2] == 2 &&
+              RigTestClose(rig.boneWeights[3 * 4 + 0], 0.20f, 1e-3f) &&
+              RigTestClose(rig.boneWeights[3 * 4 + 1], 0.30f, 1e-3f) &&
+              RigTestClose(rig.boneWeights[3 * 4 + 2], 0.50f, 1e-3f),
+          "a three-weight vertex reads back");
+    Check(rig.boneIds[4 * 4 + 0] == 0 && rig.boneIds[4 * 4 + 1] == 1 && rig.boneIds[4 * 4 + 2] == 2 &&
+              rig.boneIds[4 * 4 + 3] == 0 && RigTestClose(rig.boneWeights[4 * 4 + 3], 0.35f, 1e-3f),
+          "a vertex with more than four weights keeps only the first four");
+
+    bool bindOk = true;
+    for (int i = 0; i < 3; i++)
+        if (!RigTestMatrixClose(TransformMatrix(rig.bindPose[i]), rest[i], 5e-3f))
+            bindOk = false;
+    Check(bindOk, "TransformMatrix(bindPose[i]) recomposes to the rest matrix it was decomposed from");
+
+    Check(rig.clipCount == 1 && !strcmp(rig.clips[0].name, "clip0") &&
+              rig.clips[0].animation.boneCount == 3 && rig.clips[0].animation.frameCount == 2 &&
+              rig.clips[0].animation.bones != NULL && rig.clips[0].animation.framePoses != NULL,
+          "one clip with two frames reads back, with animation.bones/boneCount set");
+
+    CoreSkeleton skel;
+    Check(RigInit(&skel, rig.bones, rig.bindPose, rig.boneCount),
+          "a CoreSkeleton initializes from the rig's bones and bind pose");
+    Matrix skin[3];
+    RigSkinMatrices(&skel, rig.clips[0].animation.framePoses[1], skin);
+    // Which order matches raylib's convention is exactly what this checks, two ways: matrix
+    // equality against both candidate products, and a rest-space vertex moved by the skin matrix
+    // versus moved by the two matrices applied in sequence, each in both orders.
+    bool matchesInvBindThenPose = true, matchesPoseThenInvBind = true;
+    bool vertexMatchesInvBindThenPose = true, vertexMatchesPoseThenInvBind = true;
+    Vector3 sample = {0.2f, 0.4f, -0.1f};
+    for (int i = 0; i < 3; i++)
+    {
+        Matrix invBind = MatrixInvert(rest[i]);
+        Matrix invBindThenPose = MatrixMultiply(invBind, frame1[i]);
+        Matrix poseThenInvBind = MatrixMultiply(frame1[i], invBind);
+        if (!RigTestMatrixClose(skin[i], invBindThenPose, 5e-3f))
+            matchesInvBindThenPose = false;
+        if (!RigTestMatrixClose(skin[i], poseThenInvBind, 5e-3f))
+            matchesPoseThenInvBind = false;
+        Vector3 viaSkin = Vector3Transform(sample, skin[i]);
+        Vector3 viaInvBindThenPose = Vector3Transform(Vector3Transform(sample, invBind), frame1[i]);
+        Vector3 viaPoseThenInvBind = Vector3Transform(Vector3Transform(sample, frame1[i]), invBind);
+        if (Vector3Distance(viaSkin, viaInvBindThenPose) > 5e-3f)
+            vertexMatchesInvBindThenPose = false;
+        if (Vector3Distance(viaSkin, viaPoseThenInvBind) > 5e-3f)
+            vertexMatchesPoseThenInvBind = false;
+    }
+    // Report: MatrixMultiply(MatrixInvert(rest), pose) -- invBind applied first, pose applied
+    // second -- is the order that matches RigSkinMatrices, both as a matrix and as a vertex moved
+    // through the two steps in that sequence.
+    Check(matchesInvBindThenPose && vertexMatchesInvBindThenPose && !matchesPoseThenInvBind &&
+              !vertexMatchesPoseThenInvBind,
+          "RigSkinMatrices matches MatrixMultiply(MatrixInvert(rest), pose): invBind applied first, "
+          "pose applied second, not the reverse order");
+
+    CoreRigFile truncated = {0};
+    const char *truncatedPath = Scratch("regression_test_truncated.rig");
+    FILE *tf = fopen(truncatedPath, "wb");
+    fwrite("RIGB", 1, 4, tf);
+    fwrite(&fps, sizeof fps, 1, tf);
+    fwrite(&nb, sizeof nb, 1, tf);
+    fwrite(&nv, sizeof nv, 1, tf);
+    fwrite(&na, sizeof na, 1, tf);
+    char rootName[32] = {0};
+    strncpy(rootName, names[0], sizeof rootName - 1);
+    fwrite(rootName, 1, sizeof rootName, tf); // only the first bone's name -- the file ends here
+    fclose(tf);
+    Check(!CoreRigFileLoad(&truncated, truncatedPath) && truncated.boneCount == 0 && truncated.bones == NULL &&
+              truncated.clips == NULL,
+          "a truncated .rig file fails to load and leaves the struct zeroed");
+
+    CoreRigFileFree(&rig);
+
+    // ActorLookAt only reads/writes the aim/look fields, so the snap can be checked on a bare
+    // Actor{0} without ActorInit, a Model, or a GPU -- no heavy Actor construction needed.
+    Actor snap = {0};
+    snap.aim.maxYaw = 75 * DEG2RAD;
+    snap.aim.maxPitch = 45 * DEG2RAD;
+    snap.aim.response = 0; // no response: ActorUpdate would never move lookYaw toward targetYaw
+    snap.lookYaw = 0.1f;
+    snap.lookPitch = -0.2f;
+    snap.previousYaw = -0.3f;
+    snap.previousPitch = 0.4f;
+    ActorLookAt(&snap, (Vector3){0, 0, 0}, (Vector3){1, 0, 1}, 0.0f);
+    Check((snap.targetYaw != 0.1f) && RigTestClose(snap.lookYaw, snap.targetYaw, 1e-6f) &&
+              RigTestClose(snap.previousYaw, snap.targetYaw, 1e-6f) &&
+              RigTestClose(snap.lookPitch, snap.targetPitch, 1e-6f) &&
+              RigTestClose(snap.previousPitch, snap.targetPitch, 1e-6f),
+          "ActorLookAt snaps look/previous yaw and pitch to target immediately when aim.response is zero");
+}
+
 static void NetOwnershipChecks(void)
 {
     /* A listen server's client registry has localIsServer true and localActor its own player id
@@ -2666,6 +2874,7 @@ int main(int argc, char **argv)
     GameObjectChecks();
     AudioChecks();
     FpsControllerChecks();
+    RigFileChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();
