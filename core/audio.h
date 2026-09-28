@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 #ifndef CORE_AUDIO_H
 #define CORE_AUDIO_H
+#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -37,4 +38,8 @@ bool CoreAudioPlayMusic(CoreAudio *audio, const char *path, const char *bus);
 void CoreAudioUpdate(CoreAudio *audio);
 /** Stops a cached music stream by path. False means it was never loaded. */
 bool CoreAudioStopMusic(CoreAudio *audio, const char *path);
+/* The audio service as an engine type, "audio": add-bus!, set-bus-volume!, set-bus-muted!,
+   play-sound!, play-music! and stop-music!. Stepping it keeps music streams fed. */
+extern const EngineType CoreAudioType;
+
 #endif

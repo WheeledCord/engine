@@ -4,6 +4,7 @@
 
 #include "core/file.h"
 #include "script.h"
+#include "raymath.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,9 +19,27 @@ bool ScriptHostInit(ScriptHost *host, GameplayWorld *world)
     if (!host || !world)
         return false;
     *host = (ScriptHost){0};
+    if (!EngineObjectsInit(&host->objects))
+        return false;
+    // The engine's own types, which a script makes by name.
+    static const EngineType *const engineTypes[] = {
+        &CoreCamera2DType, &CoreAudioType,     &Collision2DWorldType,   &CoreNetClockType,
+        &CoreNetInterpolatorType, &CoreTextureType, &CoreTimerType, &IsoRouterType, &IsoMoverType,
+    };
+    for (size_t i = 0; i < sizeof engineTypes / sizeof engineTypes[0]; i++)
+        if (!EngineObjectsRegisterType(&host->objects, engineTypes[i]))
+        {
+            EngineObjectsFree(&host->objects);
+            return false;
+        }
     host->world = world;
     active = host;
     return true;
+}
+
+bool ScriptHostRegisterType(ScriptHost *host, const EngineType *type)
+{
+    return host && EngineObjectsRegisterType(&host->objects, type);
 }
 
 void ScriptHostFree(ScriptHost *host)
@@ -33,24 +52,8 @@ void ScriptHostFree(ScriptHost *host)
         UnloadSound(host->sounds[i]);
     if (host->audioReady)
         CloseAudioDevice();
-    // Resource pools: free each live resource.
-    for (int i = 0; i < SCRIPT_AUDIO_CAPACITY; i++)
-        if (host->audioInitialized[i])
-            CoreAudioFree(&host->audios[i]);
-    for (int i = 0; i < SCRIPT_COLLISION_CAPACITY; i++)
-        if (host->collisionInitialized[i])
-            Collision2DWorldFree(&host->collisions[i]);
-    for (int i = 0; i < SCRIPT_PATHFINDER_CAPACITY; i++)
-    {
-        if (host->pathfinderInitialized[i])
-            IsoPathfinderFree(&host->pathfinders[i]);
-        free(host->pathfinderBlocked[i]);
-        if (host->pathInitialized[i])
-            IsoPathFree(&host->paths[i]);
-    }
-    for (int i = 0; i < SCRIPT_MOVER_CAPACITY; i++)
-        if (host->moverInitialized[i])
-            IsoMoverFree(&host->movers[i]);
+    // Everything scripts made, and the handles of every scripted entity still standing.
+    EngineObjectsFree(&host->objects);
     if (host->debugReady)
         CoreDebugFree(&host->debug);
     if (active == host)
@@ -66,8 +69,10 @@ void ScriptHostUseLanguage(ScriptHost *host, const ScriptLanguage *language)
 
 void ScriptHostSetAlpha(ScriptHost *host, float alpha)
 {
-    if (host)
-        host->alpha = alpha;
+    if (!host)
+        return;
+    host->alpha = alpha;
+    host->objects.alpha = alpha;
 }
 
 void ScriptHostFlush(ScriptHost *host)
@@ -92,29 +97,13 @@ ScriptClass *ScriptHostClass(ScriptHost *host, const char *name)
     return NULL;
 }
 
-// The script-side handle: the slot, plus as much of the generation as fits, so a handle kept past
-// the entity's death is spotted rather than pointing at whatever took its place. Zero is nothing.
-int ScriptHostIdOf(EntityHandle entity)
+EngineObjectId ScriptHostObjectOf(ScriptHost *host, EntityHandle entity)
 {
-    if (entity.index == UINT32_MAX)
-        return 0;
-    return (int)(((entity.index + 1) << 8) | (entity.generation & 0xff));
-}
-
-EntityHandle ScriptHostHandleOf(ScriptHost *host, int id)
-{
-    if (!host || id <= 0)
-        return ENTITY_NULL;
-    uint32_t index = (uint32_t)(id >> 8) - 1;
-    EntityHandle guess = {index, 0};
-    // The world keeps the real generation; this only has to agree on its low bits.
-    for (uint32_t generation = 0; generation < 256; generation++)
-    {
-        guess.generation = generation;
-        if ((int)(generation & 0xff) == (id & 0xff) && EntityAlive(host->world, guess))
-            return guess;
-    }
-    return ENTITY_NULL;
+    if (!host || !EntityAlive(host->world, entity) ||
+        !ScriptHostClass(host, EntityClassname(host->world, entity)))
+        return ENGINE_OBJECT_NULL;
+    const ScriptEntity *self = EntityData(host->world, entity);
+    return self ? self->object : ENGINE_OBJECT_NULL;
 }
 
 // ---- the callbacks a scripted class gets -----------------------------------------------------
@@ -131,15 +120,22 @@ static bool Dispatch(EntityContext *entity, size_t nameOffset)
         return true; // a class need not implement every event
     EntityContext *was = host->current;
     host->current = entity;
-    bool ok = type->language->Call(type->language->user, function);
+    bool ok = type->language->Call(type->language->user, function, ((ScriptEntity *)entity->data)->object);
     host->current = was;
     return ok;
 }
 
 static bool ScriptSpawn(EntityContext *entity)
 {
+    ScriptHost *host = active;
     ScriptEntity *self = entity->data;
     self->previous = self->transform;
+    self->entity = entity->entity;
+    // The payload does not move while the entity lives, so the object can simply point at it.
+    ScriptClass *type = host ? ScriptHostClass(host, EntityClassname(entity->world, entity->entity)) : NULL;
+    self->object = type ? EngineObjectAdopt(&host->objects, &type->type, self) : ENGINE_OBJECT_NULL;
+    if (EngineObjectIdIsNull(self->object))
+        return false;
     return Dispatch(entity, offsetof(ScriptClass, spawn));
 }
 
@@ -157,7 +153,13 @@ static void ScriptDraw(EntityContext *entity)
 
 static void ScriptDestroy(EntityContext *entity)
 {
-    Dispatch(entity, offsetof(ScriptClass, destroy));
+    ScriptEntity *self = entity->data;
+    if (!EngineObjectIdIsNull(self->object))
+        Dispatch(entity, offsetof(ScriptClass, destroy));
+    // After the script has said goodbye, so its destroy callback can still reach it.
+    if (active)
+        EngineObjectDestroy(&active->objects, self->object);
+    self->object = ENGINE_OBJECT_NULL;
 }
 
 // Registering happens once the script has finished declaring the class, because the world seals its
@@ -193,6 +195,14 @@ bool ScriptClassRegister(ScriptHost *host, ScriptClass *type)
         return false;
     type->defaults.transform = Transform2DIdentity();
     type->defaults.previous = type->defaults.transform;
+    type->defaults.entity = ENTITY_NULL;
+    type->defaults.object = ENGINE_OBJECT_NULL;
+    type->type = (EngineType){.name = type->name,
+                              .parent = &ScriptEntityType,
+                              .size = sizeof(ScriptEntity),
+                              .properties = type->properties,
+                              .propertyCount = (int)type->slotCount,
+                              .help = "a scripted entity class"};
     EntityClass declaration = {.classname = type->name,
                                .size = sizeof(ScriptEntity),
                                // A scripted class carries its own shape like any other.
@@ -214,60 +224,147 @@ bool ScriptClassRegister(ScriptHost *host, ScriptClass *type)
     return true;
 }
 
-// ---- host update and resource pool operations -----------------------------------------------
+// ---- host update ----------------------------------------------------------------------------
 
-void ScriptHostUpdate(ScriptHost *host, double dt)
+void ScriptHostStep(ScriptHost *host, float dt)
 {
     if (!host)
         return;
-    for (int i = 0; i < SCRIPT_AUDIO_CAPACITY; i++)
-        if (host->audioSlots[i].live && host->audioInitialized[i])
-            CoreAudioUpdate(&host->audios[i]);
-    if (host->debugReady)
-    {
-        CoreDebugUpdate(&host->debug, dt);
-        // Drawing must happen inside BeginDrawing/EndDrawing, so the project calls this from Draw.
-        CoreDebugDraw(&host->debug);
-    }
+    EngineObjectsStep(&host->objects, dt);
+    ScriptHostFlush(host);
 }
 
-int ScriptResResolve(const ScriptResSlot *slots, int capacity, int handle, ScriptResourceKind kind)
+void ScriptHostUpdate(ScriptHost *host, double dt)
 {
-    if (handle == 0)
-        return -1;
-    if (ScriptResKind(handle) != kind)
-        return -1;
-    int index = ScriptResIndex(handle);
-    if (index < 0 || index >= capacity)
-        return -1;
-    if (!slots[index].live)
-        return -1;
-    if (slots[index].generation != ScriptResGeneration(handle))
-        return -1;
-    return index;
+    if (!host || !host->debugReady)
+        return;
+    CoreDebugUpdate(&host->debug, dt);
+    // Drawing must happen inside BeginDrawing/EndDrawing, so the project calls this from Draw.
+    CoreDebugDraw(&host->debug);
 }
 
-int ScriptResCreate(ScriptResSlot *slots, int capacity, ScriptResourceKind kind, int *outIndex)
+// ---- what every scripted entity is ------------------------------------------------------------
+static bool EntityClassnameGet(const void *object, EngineValue *out)
 {
-    for (int i = 0; i < capacity; i++)
-    {
-        if (!slots[i].live)
-        {
-            slots[i].live = true;
-            if (outIndex)
-                *outIndex = i;
-            return ScriptResPack(kind, i, slots[i].generation);
-        }
-    }
-    return 0;
-}
-
-bool ScriptResDestroy(ScriptResSlot *slots, int capacity, int handle, ScriptResourceKind kind)
-{
-    int index = ScriptResResolve(slots, capacity, handle, kind);
-    if (index < 0)
-        return false;
-    slots[index].live = false;
-    slots[index].generation++;
+    const ScriptEntity *self = object;
+    const char *name = active ? EntityClassname(active->world, self->entity) : NULL;
+    *out = EngineString(name ? name : "");
     return true;
 }
+static bool EntityInterpolatedPosition(const void *object, EngineValue *out)
+{
+    const ScriptEntity *self = object;
+    float alpha = active ? active->alpha : 1.0f;
+    *out = EngineVector2(Vector2Lerp(self->previous.translation, self->transform.translation, alpha));
+    return true;
+}
+static float InterpolatedRotation(const ScriptEntity *self)
+{
+    float alpha = active ? active->alpha : 1.0f;
+    return self->previous.rotation + AngleDelta(self->previous.rotation, self->transform.rotation) * alpha;
+}
+static bool EntityInterpolatedRotation(const void *object, EngineValue *out)
+{
+    *out = EngineFloat(InterpolatedRotation(object));
+    return true;
+}
+static bool EntityDestroyMethod(EngineCall *call)
+{
+    const ScriptEntity *self = call->data;
+    call->result = EngineBool(active && EntityDestroy(active->world, self->entity));
+    return true;
+}
+// Think again after a delay: through the callback in flight when it is this entity's, so the
+// world's own rounding applies, and by absolute time otherwise.
+static void ScheduleThink(const ScriptEntity *self, double delay, bool next)
+{
+    if (!active)
+        return;
+    EntityContext *current = active->current;
+    if (current && current->entity.index == self->entity.index &&
+        current->entity.generation == self->entity.generation)
+    {
+        if (next)
+            EntityThinkNext(current);
+        else
+            EntityThinkAfter(current, delay);
+        return;
+    }
+    double step = active->world->tickInterval;
+    EntityScheduleThink(active->world, self->entity, GameplayTime(active->world) + (next ? step : delay));
+}
+static bool EntityThinkNextMethod(EngineCall *call)
+{
+    ScheduleThink(call->data, 0, true);
+    return true;
+}
+static bool EntityThinkAfterMethod(EngineCall *call)
+{
+    ScheduleThink(call->data, call->arguments[0].as.number, false);
+    return true;
+}
+static bool EntityRotate(EngineCall *call)
+{
+    Transform2DRotate(&((ScriptEntity *)call->data)->transform, call->arguments[0].as.number);
+    return true;
+}
+static bool EntityMoveWorld(EngineCall *call)
+{
+    Transform2DMoveWorld(&((ScriptEntity *)call->data)->transform, call->arguments[0].as.vector2);
+    return true;
+}
+static bool EntityMoveLocal(EngineCall *call)
+{
+    Transform2DMoveLocal(&((ScriptEntity *)call->data)->transform, call->arguments[0].as.vector2);
+    return true;
+}
+static bool EntityLookAt(EngineCall *call)
+{
+    call->result = EngineBool(Transform2DLookAt(&((ScriptEntity *)call->data)->transform,
+                                                call->arguments[0].as.vector2));
+    return true;
+}
+static bool EntityToLocal(EngineCall *call)
+{
+    const ScriptEntity *self = call->data;
+    // Drawn where the entity is this frame, so a shape follows the same interpolation its body does.
+    Transform2D render = self->transform;
+    render.translation = Vector2Lerp(self->previous.translation, render.translation,
+                                     active ? active->alpha : 1.0f);
+    render.rotation = InterpolatedRotation(self);
+    call->result = EngineVector2(Transform2DPoint(render, call->arguments[0].as.vector2));
+    return true;
+}
+static const EngineProperty entityProperties[] = {
+    ENGINE_FIELD("position", ScriptEntity, transform.translation, ENGINE_VECTOR2,
+                 ENGINE_PROPERTY_SCENE | ENGINE_PROPERTY_SAVE, "where it is"),
+    ENGINE_FIELD("rotation", ScriptEntity, transform.rotation, ENGINE_FLOAT,
+                 ENGINE_PROPERTY_SCENE | ENGINE_PROPERTY_SAVE, "which way it faces, in radians"),
+    ENGINE_COMPUTED("classname", ENGINE_STRING, ENGINE_PROPERTY_READ_ONLY, EntityClassnameGet, NULL,
+                    "the class it was spawned from"),
+    ENGINE_COMPUTED("drawn-position", ENGINE_VECTOR2, ENGINE_PROPERTY_READ_ONLY,
+                    EntityInterpolatedPosition, NULL, "where to draw it this frame, between steps"),
+    ENGINE_COMPUTED("drawn-rotation", ENGINE_FLOAT, ENGINE_PROPERTY_READ_ONLY,
+                    EntityInterpolatedRotation, NULL, "which way to draw it this frame, between steps"),
+};
+static const EngineMethod entityMethods[] = {
+    {"destroy!", ENGINE_BOOL, {ENGINE_NONE}, 0, EntityDestroyMethod, "remove it from the world"},
+    {"think-next!", ENGINE_NONE, {ENGINE_NONE}, 0, EntityThinkNextMethod, "think again next step"},
+    {"think-after!", ENGINE_NONE, {ENGINE_FLOAT}, 1, EntityThinkAfterMethod,
+     "think again after so many seconds"},
+    {"rotate!", ENGINE_NONE, {ENGINE_FLOAT}, 1, EntityRotate, "turn by so many radians"},
+    {"move-world!", ENGINE_NONE, {ENGINE_VECTOR2}, 1, EntityMoveWorld, "move along the world axes"},
+    {"move-local!", ENGINE_NONE, {ENGINE_VECTOR2}, 1, EntityMoveLocal, "move along its own axes"},
+    {"look-at!", ENGINE_BOOL, {ENGINE_VECTOR2}, 1, EntityLookAt, "face a point"},
+    {"to-local", ENGINE_VECTOR2, {ENGINE_VECTOR2}, 1, EntityToLocal,
+     "a point in its own space, placed where it is drawn this frame"},
+};
+const EngineType ScriptEntityType = {
+    .name = "entity",
+    .size = sizeof(ScriptEntity),
+    .properties = entityProperties,
+    .propertyCount = sizeof entityProperties / sizeof entityProperties[0],
+    .methods = entityMethods,
+    .methodCount = sizeof entityMethods / sizeof entityMethods[0],
+    .help = "a scripted entity: a transform, the fields its class declared, and its callbacks",
+};

@@ -28,59 +28,6 @@
 #include "script_api.def"
 #undef SCRIPT_BINDING
 
-// ---- reaching the entity whose callback is running -----------------------------------------------
-static ScriptEntity *Self(ScriptHost *host)
-{
-    return host && host->current ? (ScriptEntity *)host->current->data : NULL;
-}
-
-static ScriptClass *SelfClass(ScriptHost *host)
-{
-    if (!host || !host->current)
-        return NULL;
-    return ScriptHostClass(host, EntityClassname(host->current->world, host->current->entity));
-}
-
-static ScriptValue *Slot(ScriptHost *host, const char *field)
-{
-    ScriptClass *type = SelfClass(host);
-    ScriptEntity *self = Self(host);
-    if (!type || !self || !field)
-        return NULL;
-    for (size_t i = 0; i < type->slotCount; i++)
-        if (!strcmp(type->fieldNames[i], field))
-            return &self->slots[i];
-    return NULL;
-}
-
-/* A handle may name a C entity too. Cross-entity script access is deliberately limited to a
-   scripted class, whose field storage and transform are the public script contract. */
-static ScriptEntity *EntityScript(ScriptHost *host, EntityHandle entity, ScriptClass **type)
-{
-    if (type)
-        *type = NULL;
-    if (!host || !EntityAlive(host->world, entity))
-        return NULL;
-    ScriptClass *found = ScriptHostClass(host, EntityClassname(host->world, entity));
-    if (!found)
-        return NULL;
-    if (type)
-        *type = found;
-    return EntityData(host->world, entity);
-}
-
-static ScriptValue *EntitySlot(ScriptHost *host, EntityHandle entity, const char *field)
-{
-    ScriptClass *type = NULL;
-    ScriptEntity *data = EntityScript(host, entity, &type);
-    if (!data || !field)
-        return NULL;
-    for (size_t i = 0; i < type->slotCount; i++)
-        if (!strcmp(type->fieldNames[i], field))
-            return &data->slots[i];
-    return NULL;
-}
-
 static Color Unpack(int rgba)
 {
     return (Color){(unsigned char)((rgba >> 24) & 0xff), (unsigned char)((rgba >> 16) & 0xff),
@@ -130,8 +77,12 @@ SCRIPT_BODY(class_new)
 SCRIPT_BODY(class_field)
 {
     ScriptClass *type = ScriptHostClass(host, a[0].as.string);
-    if (!type || type->registered || type->slotCount == SCRIPT_CLASS_FIELDS)
+    if (!type || type->registered || type->slotCount == SCRIPT_CLASS_FIELDS ||
+        EngineTypeProperty(&ScriptEntityType, a[1].as.string) || EngineTypeMethod(&ScriptEntityType, a[1].as.string))
         return ScriptBool(false);
+    for (size_t i = 0; i < type->slotCount; i++)
+        if (!strcmp(type->fieldNames[i], a[1].as.string))
+            return ScriptBool(false);
     size_t slot = type->slotCount;
     const char *kind = a[2].as.string;
     EntityFieldType fieldType;
@@ -166,12 +117,13 @@ SCRIPT_BODY(class_field)
     snprintf(type->fieldNames[slot], sizeof type->fieldNames[slot], "%s", a[1].as.string);
     // A scene writes straight into the slot's value, so the tag is set in the defaults beforehand.
     type->defaults.slots[slot].type = slotType;
-    type->fields[type->fieldCount++] =
-        (EntityField){.name = type->fieldNames[slot],
-                      .type = fieldType,
-                      .offset = offsetof(ScriptEntity, slots) + slot * sizeof(ScriptValue) +
-                                offsetof(ScriptValue, as),
-                      .size = size};
+    size_t offset = offsetof(ScriptEntity, slots) + slot * sizeof(ScriptValue) + offsetof(ScriptValue, as);
+    type->fields[type->fieldCount++] = (EntityField){
+        .name = type->fieldNames[slot], .type = fieldType, .offset = offset, .size = size};
+    // The same field as a property of the class's engine type, which is how a script reads it.
+    type->properties[slot] = (EngineProperty){type->fieldNames[slot], slotType, offset,
+                                              ENGINE_PROPERTY_SCENE | ENGINE_PROPERTY_SAVE,
+                                              NULL, NULL, "declared by the script"};
     type->slotCount++;
     return ScriptBool(true);
 }
@@ -203,242 +155,49 @@ SCRIPT_BODY(class_done)
 SCRIPT_BODY(self)
 {
     UNUSED_ARGUMENTS;
-    return ScriptHandle(host && host->current ? ScriptHostIdOf(host->current->entity) : 0);
+    return ScriptObject(host && host->current ? ScriptHostObjectOf(host, host->current->entity)
+                                              : ENGINE_OBJECT_NULL);
 }
 
 SCRIPT_BODY(spawn)
 {
     if (!host)
-        return ScriptHandle(0);
+        return ScriptObject(ENGINE_OBJECT_NULL);
     char position[64];
     snprintf(position, sizeof position, "%.9g %.9g", (double)a[1].as.vector2.x,
              (double)a[1].as.vector2.y);
     EntityProperty properties[] = {{"position", position}};
     EntityHandle spawned = EntitySpawnWith(host->world, a[0].as.string, properties, 1);
-    return ScriptHandle(ScriptHostIdOf(spawned));
+    return ScriptObject(ScriptHostObjectOf(host, spawned));
 }
 
-SCRIPT_BODY(destroy)
+/* The next living scripted entity of a class from a handle on: a class written in C has no object a
+   script could hold, so the walk passes over it. */
+static EngineObjectId NextScripted(ScriptHost *host, EntityHandle at, const char *classname)
 {
-    return ScriptBool(host && EntityDestroy(host->world, ScriptHostHandleOf(host, a[0].as.entity)));
-}
-
-SCRIPT_BODY(alive)
-{
-    return ScriptBool(host && EntityAlive(host->world, ScriptHostHandleOf(host, a[0].as.entity)));
-}
-
-SCRIPT_BODY(classname)
-{
-    const char *name = host ? EntityClassname(host->world, ScriptHostHandleOf(host, a[0].as.entity)) : NULL;
-    return ScriptString(name ? name : "");
+    for (; EntityAlive(host->world, at); at = EntityNext(host->world, at, classname))
+    {
+        EngineObjectId object = ScriptHostObjectOf(host, at);
+        if (!EngineObjectIdIsNull(object))
+            return object;
+    }
+    return ENGINE_OBJECT_NULL;
 }
 
 SCRIPT_BODY(find_first)
 {
-    return ScriptHandle(host ? ScriptHostIdOf(EntityFirst(host->world, a[0].as.string)) : 0);
+    if (!host)
+        return ScriptObject(ENGINE_OBJECT_NULL);
+    return ScriptObject(NextScripted(host, EntityFirst(host->world, a[0].as.string), a[0].as.string));
 }
 
 SCRIPT_BODY(find_next)
 {
-    if (!host)
-        return ScriptHandle(0);
-    EntityHandle after = ScriptHostHandleOf(host, a[0].as.entity);
-    return ScriptHandle(ScriptHostIdOf(EntityNext(host->world, after, a[1].as.string)));
-}
-
-SCRIPT_BODY(entity_position)
-{
-    ScriptEntity *target = EntityScript(host, ScriptHostHandleOf(host, a[0].as.entity), NULL);
-    return ScriptVector2(target ? target->transform.translation : (Vector2){0, 0});
-}
-
-SCRIPT_BODY(set_entity_position)
-{
-    ScriptEntity *target = EntityScript(host, ScriptHostHandleOf(host, a[0].as.entity), NULL);
-    if (target)
-        target->transform.translation = a[1].as.vector2;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(think_next)
-{
-    UNUSED_ARGUMENTS;
-    if (host && host->current)
-        EntityThinkNext(host->current);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(think_after)
-{
-    if (host && host->current)
-        EntityThinkAfter(host->current, a[0].as.number);
-    return ScriptNone();
-}
-
-// ---- fields ------------------------------------------------------------------------------------------
-SCRIPT_BODY(get_number)
-{
-    ScriptValue *slot = Slot(host, a[0].as.string);
-    if (!slot)
-        return ScriptFloat(0);
-    if (slot->type == SCRIPT_INT)
-        return ScriptFloat((float)slot->as.integer);
-    if (slot->type == SCRIPT_BOOL)
-        return ScriptFloat(slot->as.boolean ? 1.0f : 0.0f);
-    return ScriptFloat(slot->as.number);
-}
-
-SCRIPT_BODY(set_number)
-{
-    ScriptValue *slot = Slot(host, a[0].as.string);
-    if (!slot)
-        return ScriptNone();
-    if (slot->type == SCRIPT_INT)
-        slot->as.integer = (int)a[1].as.number;
-    else if (slot->type == SCRIPT_BOOL)
-        slot->as.boolean = a[1].as.number != 0;
-    else
-        slot->as.number = a[1].as.number;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(get_vector)
-{
-    ScriptValue *slot = Slot(host, a[0].as.string);
-    return ScriptVector2(slot && slot->type == SCRIPT_VECTOR2 ? slot->as.vector2 : (Vector2){0, 0});
-}
-
-SCRIPT_BODY(set_vector)
-{
-    ScriptValue *slot = Slot(host, a[0].as.string);
-    if (slot && slot->type == SCRIPT_VECTOR2)
-        slot->as.vector2 = a[1].as.vector2;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(entity_get_number)
-{
-    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
-    if (!slot)
-        return ScriptFloat(0);
-    if (slot->type == SCRIPT_INT)
-        return ScriptFloat((float)slot->as.integer);
-    if (slot->type == SCRIPT_BOOL)
-        return ScriptFloat(slot->as.boolean ? 1.0f : 0.0f);
-    return ScriptFloat(slot->type == SCRIPT_FLOAT ? slot->as.number : 0);
-}
-
-SCRIPT_BODY(entity_set_number)
-{
-    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
-    if (slot && slot->type == SCRIPT_INT)
-        slot->as.integer = (int)a[2].as.number;
-    else if (slot && slot->type == SCRIPT_BOOL)
-        slot->as.boolean = a[2].as.number != 0;
-    else if (slot && slot->type == SCRIPT_FLOAT)
-        slot->as.number = a[2].as.number;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(entity_get_vector)
-{
-    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
-    return ScriptVector2(slot && slot->type == SCRIPT_VECTOR2 ? slot->as.vector2 : (Vector2){0, 0});
-}
-
-SCRIPT_BODY(entity_set_vector)
-{
-    ScriptValue *slot = EntitySlot(host, ScriptHostHandleOf(host, a[0].as.entity), a[1].as.string);
-    if (slot && slot->type == SCRIPT_VECTOR2)
-        slot->as.vector2 = a[2].as.vector2;
-    return ScriptNone();
-}
-
-// ---- the transform ------------------------------------------------------------------------------------
-SCRIPT_BODY(position)
-{
-    UNUSED_ARGUMENTS;
-    ScriptEntity *self = Self(host);
-    return ScriptVector2(self ? self->transform.translation : (Vector2){0, 0});
-}
-
-SCRIPT_BODY(set_position)
-{
-    ScriptEntity *self = Self(host);
-    if (self)
-        self->transform.translation = a[0].as.vector2;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(rotation)
-{
-    UNUSED_ARGUMENTS;
-    ScriptEntity *self = Self(host);
-    return ScriptFloat(self ? self->transform.rotation : 0);
-}
-
-SCRIPT_BODY(rotate)
-{
-    ScriptEntity *self = Self(host);
-    if (self)
-        Transform2DRotate(&self->transform, a[0].as.number);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(move_world)
-{
-    ScriptEntity *self = Self(host);
-    if (self)
-        Transform2DMoveWorld(&self->transform, a[0].as.vector2);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(move_local)
-{
-    ScriptEntity *self = Self(host);
-    if (self)
-        Transform2DMoveLocal(&self->transform, a[0].as.vector2);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(look_at)
-{
-    ScriptEntity *self = Self(host);
-    return ScriptBool(self && Transform2DLookAt(&self->transform, a[0].as.vector2));
-}
-
-SCRIPT_BODY(interpolated)
-{
-    UNUSED_ARGUMENTS;
-    ScriptEntity *self = Self(host);
-    if (!self)
-        return ScriptVector2((Vector2){0, 0});
-    return ScriptVector2(
-        Vector2Lerp(self->previous.translation, self->transform.translation, host->alpha));
-}
-
-SCRIPT_BODY(interpolated_rotation)
-{
-    UNUSED_ARGUMENTS;
-    ScriptEntity *self = Self(host);
-    if (!self)
-        return ScriptFloat(0);
-    return ScriptFloat(self->previous.rotation +
-                       AngleDelta(self->previous.rotation, self->transform.rotation) * host->alpha);
-}
-
-SCRIPT_BODY(to_local)
-{
-    ScriptEntity *self = Self(host);
-    if (!self)
-        return ScriptVector2(a[0].as.vector2);
-    // Drawn where the entity is now, so a shape follows the same interpolation its body does.
-    Transform2D render = self->transform;
-    render.translation = Vector2Lerp(self->previous.translation, render.translation, host->alpha);
-    render.rotation = self->previous.rotation +
-                      AngleDelta(self->previous.rotation, render.rotation) * host->alpha;
-    return ScriptVector2(Transform2DPoint(render, a[0].as.vector2));
+    const ScriptEntity *after = host ? EngineObjectData(&host->objects, a[0].as.object, &ScriptEntityType) : NULL;
+    if (!after)
+        return ScriptObject(ENGINE_OBJECT_NULL);
+    return ScriptObject(NextScripted(host, EntityNext(host->world, after->entity, a[1].as.string),
+                                     a[1].as.string));
 }
 
 // ---- input ---------------------------------------------------------------------------------------------
@@ -536,6 +295,12 @@ SCRIPT_BODY(now)
 {
     UNUSED_ARGUMENTS;
     return ScriptFloat(host ? (float)GameplayTime(host->world) : 0);
+}
+
+SCRIPT_BODY(elapsed)
+{
+    UNUSED_ARGUMENTS;
+    return ScriptFloat(host && host->current ? (float)host->current->elapsed : 0.0f);
 }
 
 SCRIPT_BODY(alpha)
@@ -724,528 +489,6 @@ SCRIPT_BODY(load_scene)
     // Loading destroys every entity, including the one asking, so it waits for the callback to end.
     snprintf(host->pendingScene, sizeof host->pendingScene, "%s", a[0].as.string);
     return ScriptBool(true);
-}
-
-// ---- camera resources ------------------------------------------------------------------------------------------
-SCRIPT_BODY(camera_create)
-{
-    (void)a;
-    int index = 0;
-    int handle = ScriptResCreate(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, SCRIPT_RES_CAMERA2D, &index);
-    if (!handle)
-        return ScriptResource(0);
-    host->cameras[index] = CoreCamera2DDefault();
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(camera_destroy)
-{
-    int index = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (index < 0)
-        return ScriptBool(false);
-    host->cameraSlots[index].live = false;
-    host->cameraSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(camera_position)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptVector2((Vector2){0, 0});
-    return ScriptVector2(host->cameras[i].position);
-}
-
-SCRIPT_BODY(camera_set_position)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptNone();
-    host->cameras[i].position = a[1].as.vector2;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(camera_zoom)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    return ScriptFloat(i >= 0 ? host->cameras[i].zoom : 0);
-}
-
-SCRIPT_BODY(camera_set_zoom)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptNone();
-    host->cameras[i].zoom = a[1].as.number;
-    return ScriptNone();
-}
-
-SCRIPT_BODY(camera_follow)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptNone();
-    CoreCamera2DFollow(&host->cameras[i], a[1].as.vector2, a[2].as.number);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(camera_world_to_screen)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptVector2((Vector2){0, 0});
-    return ScriptVector2(CoreCamera2DWorldToScreen(&host->cameras[i], host->alpha, a[1].as.vector2));
-}
-
-SCRIPT_BODY(camera_screen_to_world)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptVector2((Vector2){0, 0});
-    return ScriptVector2(CoreCamera2DScreenToWorld(&host->cameras[i], host->alpha, a[1].as.vector2));
-}
-
-SCRIPT_BODY(camera_interpolated)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptVector2((Vector2){0, 0});
-    return ScriptVector2(CoreCamera2DInterpolated(&host->cameras[i], host->alpha));
-}
-
-SCRIPT_BODY(camera_set_viewport)
-{
-    int i = ScriptResResolve(host->cameraSlots, SCRIPT_CAMERA_CAPACITY, a[0].as.integer, SCRIPT_RES_CAMERA2D);
-    if (i < 0)
-        return ScriptNone();
-    CoreCamera2DSetViewport(&host->cameras[i], a[1].as.vector2);
-    return ScriptNone();
-}
-
-// ---- audio resources -------------------------------------------------------------------------------------------
-SCRIPT_BODY(audio_create)
-{
-    (void)a;
-    int index = 0;
-    int handle = ScriptResCreate(host->audioSlots, SCRIPT_AUDIO_CAPACITY, SCRIPT_RES_AUDIO, &index);
-    if (!handle)
-        return ScriptResource(0);
-    if (!CoreAudioInit(&host->audios[index]))
-    {
-        host->audioSlots[index].live = false;
-        return ScriptResource(0);
-    }
-    host->audioInitialized[index] = true;
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(audio_destroy)
-{
-    int index = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (index < 0)
-        return ScriptBool(false);
-    if (host->audioInitialized[index])
-        CoreAudioFree(&host->audios[index]);
-    host->audioInitialized[index] = false;
-    host->audioSlots[index].live = false;
-    host->audioSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(audio_add_bus)
-{
-    int i = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (i < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreAudioAddBus(&host->audios[i], a[1].as.string, a[2].as.number));
-}
-
-SCRIPT_BODY(audio_bus_volume)
-{
-    int i = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (i < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreAudioSetBusVolume(&host->audios[i], a[1].as.string, a[2].as.number));
-}
-
-SCRIPT_BODY(audio_bus_muted)
-{
-    int i = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (i < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreAudioSetBusMuted(&host->audios[i], a[1].as.string, a[2].as.boolean));
-}
-
-SCRIPT_BODY(audio_play_sound)
-{
-    int i = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (i < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreAudioPlaySound(&host->audios[i], a[1].as.string, a[2].as.string));
-}
-
-SCRIPT_BODY(audio_play_music)
-{
-    int i = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (i < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreAudioPlayMusic(&host->audios[i], a[1].as.string, a[2].as.string));
-}
-
-SCRIPT_BODY(audio_stop_music)
-{
-    int i = ScriptResResolve(host->audioSlots, SCRIPT_AUDIO_CAPACITY, a[0].as.integer, SCRIPT_RES_AUDIO);
-    if (i < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreAudioStopMusic(&host->audios[i], a[1].as.string));
-}
-
-// ---- collision resources ---------------------------------------------------------------------------------------
-SCRIPT_BODY(collision_create)
-{
-    int index = 0;
-    int handle = ScriptResCreate(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, SCRIPT_RES_COLLISION, &index);
-    if (!handle)
-        return ScriptResource(0);
-    if (!Collision2DWorldInit(&host->collisions[index], a[0].as.integer, a[1].as.number))
-    {
-        host->collisionSlots[index].live = false;
-        return ScriptResource(0);
-    }
-    host->collisionInitialized[index] = true;
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(collision_destroy)
-{
-    int index = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (index < 0)
-        return ScriptBool(false);
-    if (host->collisionInitialized[index])
-        Collision2DWorldFree(&host->collisions[index]);
-    host->collisionInitialized[index] = false;
-    host->collisionSlots[index].live = false;
-    host->collisionSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(collision_add_circle)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptInt(0);
-    Collision2DShape shape = {COLLISION2D_CIRCLE, a[1].as.vector2, {0, 0}, a[2].as.number};
-    Collision2DFilter filter = {(uint32_t)a[3].as.integer, (uint32_t)a[4].as.integer};
-    Collision2DHandle h = Collision2DWorldAdd(&host->collisions[i], shape, filter, NULL);
-    if (h.index == UINT32_MAX)
-        return ScriptInt(0);
-    return ScriptInt((int)(((h.index + 1) << 8) | (h.generation & 0xff)));
-}
-
-SCRIPT_BODY(collision_remove)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptBool(false);
-    int packed = a[1].as.integer;
-    Collision2DHandle h = {(uint32_t)((packed >> 8) - 1), (uint32_t)(packed & 0xff)};
-    return ScriptBool(Collision2DWorldRemove(&host->collisions[i], h));
-}
-
-SCRIPT_BODY(collision_move_circle)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptBool(false);
-    int packed = a[1].as.integer;
-    Collision2DHandle h = {(uint32_t)((packed >> 8) - 1), (uint32_t)(packed & 0xff)};
-    Collision2DShape shape = {COLLISION2D_CIRCLE, a[2].as.vector2, {0, 0}, a[3].as.number};
-    return ScriptBool(Collision2DWorldSetShape(&host->collisions[i], h, shape));
-}
-
-SCRIPT_BODY(collision_query_circle)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptInt(0);
-    return ScriptInt(Collision2DQueryCircle(&host->collisions[i], a[1].as.vector2, a[2].as.number,
-                                            (uint32_t)a[3].as.integer, NULL, 0));
-}
-
-SCRIPT_BODY(collision_sweep_circle)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptFloat(1.0f);
-    Collision2DSweep sweep;
-    if (!Collision2DSweepCircle(&host->collisions[i], a[1].as.vector2, a[2].as.number,
-                                a[3].as.vector2, (uint32_t)a[4].as.integer, &sweep))
-        return ScriptFloat(1.0f);
-    return ScriptFloat(sweep.fraction);
-}
-
-SCRIPT_BODY(collision_query_aabb)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptInt(0);
-    Collision2DAabb aabb = Collision2DAabbMake(a[1].as.vector2, a[2].as.vector2);
-    return ScriptInt(Collision2DQueryAabb(&host->collisions[i], aabb, (uint32_t)a[3].as.integer, NULL, 0));
-}
-
-SCRIPT_BODY(collision_add_aabb)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptInt(0);
-    Collision2DShape shape = {COLLISION2D_AABB, a[1].as.vector2, a[2].as.vector2, 0.0f};
-    Collision2DFilter filter = {(uint32_t)a[3].as.integer, (uint32_t)a[4].as.integer};
-    Collision2DHandle h = Collision2DWorldAdd(&host->collisions[i], shape, filter, NULL);
-    if (h.index == UINT32_MAX)
-        return ScriptInt(0);
-    return ScriptInt((int)(((h.index + 1) << 8) | (h.generation & 0xff)));
-}
-
-SCRIPT_BODY(collision_move_aabb)
-{
-    int i = ScriptResResolve(host->collisionSlots, SCRIPT_COLLISION_CAPACITY, a[0].as.integer, SCRIPT_RES_COLLISION);
-    if (i < 0)
-        return ScriptBool(false);
-    int packed = a[1].as.integer;
-    Collision2DHandle h = {(uint32_t)((packed >> 8) - 1), (uint32_t)(packed & 0xff)};
-    Collision2DShape shape = {COLLISION2D_AABB, a[2].as.vector2, a[3].as.vector2, 0.0f};
-    return ScriptBool(Collision2DWorldSetShape(&host->collisions[i], h, shape));
-}
-
-// ---- pathfinder resources --------------------------------------------------------------------------------------
-static IsoHex HexOf(Vector2 v) { return (IsoHex){(int)v.x, (int)v.y}; }
-static int HexIndex(int x, int y, int w) { return y * w + x; }
-
-SCRIPT_BODY(pathfinder_create)
-{
-    int w = a[0].as.integer, h = a[1].as.integer;
-    if (w <= 0 || h <= 0)
-        return ScriptResource(0);
-    int index = 0;
-    int handle = ScriptResCreate(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, SCRIPT_RES_PATHFINDER, &index);
-    if (!handle)
-        return ScriptResource(0);
-    if (!IsoPathfinderInit(&host->pathfinders[index], w, h))
-    {
-        host->pathfinderSlots[index].live = false;
-        return ScriptResource(0);
-    }
-    host->pathfinderBlocked[index] = calloc((size_t)w * (size_t)h, sizeof(bool));
-    if (!host->pathfinderBlocked[index])
-    {
-        IsoPathfinderFree(&host->pathfinders[index]);
-        host->pathfinderSlots[index].live = false;
-        return ScriptResource(0);
-    }
-    int steps = w * h < SCRIPT_PATH_STEP_CAP ? w * h : SCRIPT_PATH_STEP_CAP;
-    if (!IsoPathInit(&host->paths[index], steps))
-    {
-        free(host->pathfinderBlocked[index]);
-        host->pathfinderBlocked[index] = NULL;
-        IsoPathfinderFree(&host->pathfinders[index]);
-        host->pathfinderSlots[index].live = false;
-        return ScriptResource(0);
-    }
-    host->pathfinderWidth[index] = w;
-    host->pathfinderHeight[index] = h;
-    host->pathfinderCtx[index] = (ScriptHexBlocked){host->pathfinderBlocked[index], w, h};
-    host->pathfinderInitialized[index] = true;
-    host->pathInitialized[index] = true;
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(pathfinder_destroy)
-{
-    int index = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    if (index < 0)
-        return ScriptBool(false);
-    if (host->pathfinderInitialized[index])
-        IsoPathfinderFree(&host->pathfinders[index]);
-    if (host->pathInitialized[index])
-        IsoPathFree(&host->paths[index]);
-    free(host->pathfinderBlocked[index]);
-    host->pathfinderBlocked[index] = NULL;
-    host->pathfinderInitialized[index] = false;
-    host->pathInitialized[index] = false;
-    host->pathfinderSlots[index].live = false;
-    host->pathfinderSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(pathfinder_block)
-{
-    int i = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    if (i < 0)
-        return ScriptBool(false);
-    IsoHex hex = HexOf(a[1].as.vector2);
-    if (hex.x < 0 || hex.x >= host->pathfinderWidth[i] || hex.y < 0 || hex.y >= host->pathfinderHeight[i])
-        return ScriptBool(false);
-    host->pathfinderBlocked[i][HexIndex(hex.x, hex.y, host->pathfinderWidth[i])] = true;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(pathfinder_unblock)
-{
-    int i = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    if (i < 0)
-        return ScriptBool(false);
-    IsoHex hex = HexOf(a[1].as.vector2);
-    if (hex.x < 0 || hex.x >= host->pathfinderWidth[i] || hex.y < 0 || hex.y >= host->pathfinderHeight[i])
-        return ScriptBool(false);
-    host->pathfinderBlocked[i][HexIndex(hex.x, hex.y, host->pathfinderWidth[i])] = false;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(pathfinder_blocked)
-{
-    int i = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    if (i < 0)
-        return ScriptBool(false);
-    IsoHex hex = HexOf(a[1].as.vector2);
-    if (hex.x < 0 || hex.x >= host->pathfinderWidth[i] || hex.y < 0 || hex.y >= host->pathfinderHeight[i])
-        return ScriptBool(false);
-    return ScriptBool(host->pathfinderBlocked[i][HexIndex(hex.x, hex.y, host->pathfinderWidth[i])]);
-}
-
-// The blocked-hex answer IsoPathfinderSolve and IsoMoverGoTo ask for, from the array the
-// pathfinder-block! bindings fill. Off-grid is blocked: the search stops at the edge.
-static bool ScriptBlockedHex(void *user, IsoHex hex)
-{
-    const ScriptHexBlocked *ctx = user;
-    if (hex.x < 0 || hex.x >= ctx->width || hex.y < 0 || hex.y >= ctx->height)
-        return true;
-    return ctx->blocked[hex.y * ctx->width + hex.x];
-}
-
-SCRIPT_BODY(pathfinder_solve)
-{
-    int i = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    if (i < 0)
-        return ScriptInt(0);
-    IsoPathClear(&host->paths[i]);
-    if (!IsoPathfinderSolve(&host->pathfinders[i], &host->paths[i], HexOf(a[1].as.vector2),
-                            HexOf(a[2].as.vector2), ScriptBlockedHex, &host->pathfinderCtx[i]))
-        return ScriptInt(0);
-    return ScriptInt(host->paths[i].count);
-}
-
-SCRIPT_BODY(pathfinder_path_length)
-{
-    int i = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    if (i < 0)
-        return ScriptInt(0);
-    return ScriptInt(host->paths[i].count);
-}
-
-SCRIPT_BODY(pathfinder_path_get)
-{
-    int i = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[0].as.integer, SCRIPT_RES_PATHFINDER);
-    int at = a[1].as.integer;
-    if (i < 0 || at < 0 || at >= host->paths[i].count)
-        return ScriptVector2((Vector2){0, 0});
-    IsoHex hex = host->paths[i].hexes[at];
-    return ScriptVector2((Vector2){(float)hex.x, (float)hex.y});
-}
-
-// ---- mover resources -------------------------------------------------------------------------------------------
-SCRIPT_BODY(mover_create)
-{
-    int index = 0;
-    int handle = ScriptResCreate(host->moverSlots, SCRIPT_MOVER_CAPACITY, SCRIPT_RES_MOVER, &index);
-    if (!handle)
-        return ScriptResource(0);
-    int capacity = a[1].as.integer > 0 ? a[1].as.integer : SCRIPT_PATH_STEP_CAP;
-    if (!IsoMoverInit(&host->movers[index], HexOf(a[0].as.vector2), capacity))
-    {
-        host->moverSlots[index].live = false;
-        return ScriptResource(0);
-    }
-    host->moverInitialized[index] = true;
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(mover_destroy)
-{
-    int index = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    if (index < 0)
-        return ScriptBool(false);
-    if (host->moverInitialized[index])
-        IsoMoverFree(&host->movers[index]);
-    host->moverInitialized[index] = false;
-    host->moverSlots[index].live = false;
-    host->moverSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(mover_goto)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    int f = ScriptResResolve(host->pathfinderSlots, SCRIPT_PATHFINDER_CAPACITY, a[1].as.integer, SCRIPT_RES_PATHFINDER);
-    if (i < 0 || f < 0)
-        return ScriptBool(false);
-    return ScriptBool(IsoMoverGoTo(&host->movers[i], &host->pathfinders[f], HexOf(a[2].as.vector2),
-                                   ScriptBlockedHex, &host->pathfinderCtx[f]));
-}
-
-SCRIPT_BODY(mover_truncate)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    if (i < 0)
-        return ScriptNone();
-    IsoMoverTruncate(&host->movers[i], a[1].as.integer);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(mover_remaining)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    return ScriptInt(i >= 0 ? IsoMoverRemainingSteps(&host->movers[i]) : 0);
-}
-
-SCRIPT_BODY(mover_stop)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    if (i < 0)
-        return ScriptNone();
-    IsoMoverStop(&host->movers[i]);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(mover_moving)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    return ScriptBool(i >= 0 && IsoMoverMoving(&host->movers[i]));
-}
-
-SCRIPT_BODY(mover_update)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    if (i < 0)
-        return ScriptNone();
-    IsoMoverUpdate(&host->movers[i], a[1].as.number);
-    return ScriptNone();
-}
-
-SCRIPT_BODY(mover_screen)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    if (i < 0)
-        return ScriptVector2((Vector2){0, 0});
-    return ScriptVector2(IsoMoverScreen(&host->movers[i]));
-}
-
-SCRIPT_BODY(mover_hex)
-{
-    int i = ScriptResResolve(host->moverSlots, SCRIPT_MOVER_CAPACITY, a[0].as.integer, SCRIPT_RES_MOVER);
-    if (i < 0)
-        return ScriptVector2((Vector2){0, 0});
-    IsoHex hex = host->movers[i].hex;
-    return ScriptVector2((Vector2){(float)hex.x, (float)hex.y});
 }
 
 // ---- saved key/values ------------------------------------------------------------------------------------------
@@ -1446,12 +689,7 @@ const ScriptBinding *ScriptBindingNamed(const char *name)
     return NULL;
 }
 
-const char *ScriptTypeName(ScriptType type)
-{
-    static const char *names[] = {"none",    "bool",    "int",    "float",
-                                  "vector2", "vector3", "string", "entity", "resource"};
-    return type >= SCRIPT_NONE && type <= SCRIPT_RESOURCE ? names[type] : "?";
-}
+const char *ScriptTypeName(ScriptType type) { return EngineValueTypeName(type); }
 
 bool ScriptInvoke(ScriptHost *host, const ScriptBinding *binding, const ScriptValue *arguments,
                   int count, ScriptValue *result, const char **message)
@@ -1483,190 +721,8 @@ bool ScriptInvoke(ScriptHost *host, const ScriptBinding *binding, const ScriptVa
     return true;
 }
 
-/* ---- networking clocks ----------------------------------------------------
-   A server simulates on a fixed tick and sends snapshots at its own lower rate; a client draws the
-   world slightly in the past so the pair of snapshots it interpolates between have both arrived.
-   Both are plain owned state, so scripts get them as handles. */
-
-SCRIPT_BODY(net_clock_create)
-{
-    int index = 0;
-    int handle = ScriptResCreate(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 SCRIPT_RES_NETCLOCK, &index);
-    if (!handle)
-        return ScriptResource(0);
-    if (!CoreNetClockInit(&host->netClocks[index], a[0].as.integer, a[1].as.integer))
-    {
-        host->netClockSlots[index].live = false;
-        host->netClockSlots[index].generation++;
-        return ScriptResource(0);
-    }
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(net_clock_destroy)
-{
-    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
-    if (index < 0)
-        return ScriptBool(false);
-    host->netClockSlots[index].live = false;
-    host->netClockSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(net_clock_advance)
-{
-    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
-    if (index < 0)
-        return ScriptInt(0);
-    return ScriptInt(CoreNetClockAdvance(&host->netClocks[index], a[1].as.number,
-                                         a[2].as.integer));
-}
-
-SCRIPT_BODY(net_clock_ticked)
-{
-    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
-    if (index < 0)
-        return ScriptInt(0);
-    return ScriptInt((int)CoreNetClockTicked(&host->netClocks[index]));
-}
-
-SCRIPT_BODY(net_clock_should_send)
-{
-    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
-    if (index < 0)
-        return ScriptBool(false);
-    return ScriptBool(CoreNetClockShouldSend(&host->netClocks[index]));
-}
-
-SCRIPT_BODY(net_clock_tick)
-{
-    int index = ScriptResResolve(host->netClockSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETCLOCK);
-    if (index < 0)
-        return ScriptInt(0);
-    return ScriptInt((int)host->netClocks[index].tick);
-}
-
 SCRIPT_BODY(net_clock_now)
 {
     (void)host; (void)a;
     return ScriptFloat((float)CoreNetClockNow());
-}
-
-SCRIPT_BODY(net_interp_create)
-{
-    int index = 0;
-    int handle = ScriptResCreate(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 SCRIPT_RES_NETINTERP, &index);
-    if (!handle)
-        return ScriptResource(0);
-    if (!CoreNetInterpolatorInit(&host->netInterps[index], a[0].as.integer, a[1].as.integer))
-    {
-        host->netInterpSlots[index].live = false;
-        host->netInterpSlots[index].generation++;
-        return ScriptResource(0);
-    }
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(net_interp_destroy)
-{
-    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
-    if (index < 0)
-        return ScriptBool(false);
-    host->netInterpSlots[index].live = false;
-    host->netInterpSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(net_interp_snapshot)
-{
-    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
-    if (index < 0 || a[1].as.integer < 0)
-        return ScriptBool(false);
-    CoreNetInterpolatorSnapshot(&host->netInterps[index], (uint32_t)a[1].as.integer);
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(net_interp_advance)
-{
-    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
-    if (index < 0)
-        return ScriptBool(false);
-    CoreNetInterpolatorAdvance(&host->netInterps[index], a[1].as.number);
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(net_interp_render_tick)
-{
-    int index = ScriptResResolve(host->netInterpSlots, SCRIPT_NETCLOCK_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_NETINTERP);
-    if (index < 0)
-        return ScriptFloat(0.0f);
-    return ScriptFloat((float)CoreNetInterpolatorRenderTick(&host->netInterps[index]));
-}
-
-/* ---- textures ---------------------------------------------------------- */
-
-static ScriptValue ScriptTextureLoad(ScriptHost *host, const ScriptValue *a, CoreTextureOptions o)
-{
-    int index = 0;
-    int handle = ScriptResCreate(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
-                                 SCRIPT_RES_TEXTURE, &index);
-    if (!handle)
-        return ScriptResource(0);
-    if (!CoreLoadTexture(&host->textures[index], a[0].as.string, o))
-    {
-        host->textureSlots[index].live = false;
-        host->textureSlots[index].generation++;
-        return ScriptResource(0);
-    }
-    return ScriptResource(handle);
-}
-
-SCRIPT_BODY(texture_load)
-{
-    return ScriptTextureLoad(host, a, CoreTextureOptionsDefault());
-}
-
-SCRIPT_BODY(texture_load_smooth)
-{
-    CoreTextureOptions options = CoreTextureOptionsDefault();
-    options.mipmaps = true;
-    options.filter = TEXTURE_FILTER_TRILINEAR;
-    return ScriptTextureLoad(host, a, options);
-}
-
-SCRIPT_BODY(texture_destroy)
-{
-    int index = ScriptResResolve(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_TEXTURE);
-    if (index < 0)
-        return ScriptBool(false);
-    CoreUnloadTexture(&host->textures[index]);
-    host->textureSlots[index].live = false;
-    host->textureSlots[index].generation++;
-    return ScriptBool(true);
-}
-
-SCRIPT_BODY(texture_width)
-{
-    int index = ScriptResResolve(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_TEXTURE);
-    return ScriptInt(index < 0 ? 0 : host->textures[index].width);
-}
-
-SCRIPT_BODY(texture_height)
-{
-    int index = ScriptResResolve(host->textureSlots, SCRIPT_TEXTURE_CAPACITY,
-                                 a[0].as.integer, SCRIPT_RES_TEXTURE);
-    return ScriptInt(index < 0 ? 0 : host->textures[index].height);
 }
