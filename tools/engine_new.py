@@ -137,11 +137,8 @@ def main():
                 '',
                 '# Pin the engine this is meant for, so another one cannot be used by accident:',
                 '#   engine >= 0.1.0        a floor',
-                '#   engine 0.1.0-ad0546a   exactly that build',
-                '',
-                'module entry']
+                '#   engine 0.1.0-ad0546a   exactly that build']
     if args.language == 'scheme':
-        manifest += ['module gameplay', 'module script-s7']
         (directory / 'src' / 'main.c').write_text(SCHEME_MAIN % {'name': name})
         (directory / f'{name}.scm').write_text(SCHEME_SCRIPT % {'name': name})
         (directory / 'scenes' / 'start.scene').write_text(SCENE)

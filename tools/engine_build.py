@@ -8,7 +8,9 @@ The project says what it is in engine.project and nothing about how to build it:
 compiler flags, no paths into the engine. Everything else comes from the SDK, which is found
 through pkg-config or named outright, and never lives inside the project."""
 import argparse
+import concurrent.futures
 import datetime
+import hashlib
 import os
 import pathlib
 import shutil
@@ -17,8 +19,7 @@ import sys
 
 MANIFEST = 'engine.project'
 # What a manifest may say. Anything else is a mistake worth stopping for.
-KEYS = {'name', 'engine', 'module', 'source', 'script', 'assets', 'scenes', 'shaders'}
-MODULES = {'core', 'gameplay', 'script-s7', 'entry'}
+KEYS = {'name', 'engine', 'source', 'script', 'assets', 'scenes', 'shaders'}
 
 
 def fail(message):
@@ -29,7 +30,7 @@ def read_manifest(path):
     """One key and its value per line, # starts a comment, order does not matter."""
     if not path.is_file():
         fail(f'no {MANIFEST} in {path.parent}')
-    project = {'name': None, 'engine': None, 'module': [], 'source': [], 'script': [],
+    project = {'name': None, 'engine': None, 'source': [], 'script': [],
                'assets': [], 'scenes': [], 'shaders': []}
     for number, line in enumerate(path.read_text().splitlines(), 1):
         line = line.split('#', 1)[0].strip()
@@ -37,6 +38,11 @@ def read_manifest(path):
             continue
         key, _, value = line.partition(' ')
         value = value.strip()
+        if key == 'module':
+            # Every project gets the whole engine; the linker keeps only what the game calls.
+            print(f'engine-build: {path}:{number}: `module {value}` is no longer needed, every project '
+                  f'gets the whole engine; delete the line', file=sys.stderr)
+            continue
         if key not in KEYS or not value:
             fail(f'{path}:{number}: expected one of {" ".join(sorted(KEYS))} and a value')
         if key in ('name', 'engine'):
@@ -47,9 +53,6 @@ def read_manifest(path):
         fail(f'{path}: the project needs a name')
     if not project['source']:
         fail(f'{path}: the project needs at least one source')
-    for module in project['module']:
-        if module not in MODULES:
-            fail(f'{path}: unknown module {module}, expected one of {" ".join(sorted(MODULES))}')
     return project
 
 
@@ -158,6 +161,76 @@ def sources_of(project, project_dir):
     return files
 
 
+def object_for(project_dir, objects_dir, source):
+    """Where a source's object goes: its path inside the project, so src/util.c and lib/util.c
+    cannot overwrite each other."""
+    source = pathlib.Path(source)
+    try:
+        relative = source.resolve().relative_to(pathlib.Path(project_dir).resolve())
+    except ValueError:
+        relative = pathlib.Path('_outside') / source.name
+    return pathlib.Path(objects_dir) / relative.with_suffix('.o')
+
+
+def _dependencies(depfile):
+    """The files a compiler -MMD dependency list names, or None when there is no usable list."""
+    try:
+        text = depfile.read_text()
+    except OSError:
+        return None
+    _, _, listed = text.replace('\\\n', ' ').partition(':')
+    return [pathlib.Path(p) for p in listed.split() if not p.endswith(':')]
+
+
+def _digest(command):
+    return hashlib.sha256('\0'.join(command).encode()).hexdigest()
+
+
+def _up_to_date(target, source, command):
+    """An object is current when it exists, was built by the same command, and is newer than
+    its source and every header that source included."""
+    record = target.with_suffix('.cmd')
+    if not target.is_file() or not record.is_file() or record.read_text() != _digest(command):
+        return False
+    dependencies = _dependencies(target.with_suffix('.d'))
+    if dependencies is None:
+        return False
+    built = target.stat().st_mtime
+    for dependency in [pathlib.Path(source), *dependencies]:
+        try:
+            if dependency.stat().st_mtime > built:
+                return False
+        except OSError:
+            return False
+    return True
+
+
+def compile_sources(cc, warnings, cflags, sources, project_dir, objects_dir):
+    """Compile what changed, in parallel. Returns how many were compiled and every object path."""
+    jobs = []
+    for source in sources:
+        target = object_for(project_dir, objects_dir, source)
+        jobs.append((source, target, [cc, *warnings, *cflags, '-c', str(source), '-o', str(target)]))
+
+    def build(job):
+        source, target, command = job
+        if _up_to_date(target, source, command):
+            return False
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.with_suffix('.cmd').unlink(missing_ok=True)
+        if subprocess.run(command + ['-MMD', '-MF', str(target.with_suffix('.d'))]).returncode:
+            return None
+        target.with_suffix('.cmd').write_text(_digest(command))
+        return True
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=os.cpu_count() or 1) as pool:
+        results = list(pool.map(build, jobs))
+    for (source, _, _), result in zip(jobs, results):
+        if result is None:
+            fail(f'{source} did not compile')
+    return sum(1 for r in results if r), [str(target) for _, target, _ in jobs]
+
+
 def sync_tree(source, destination, output_root):
     """Replace one declared output tree, so removed source assets cannot survive another build."""
     output_root = pathlib.Path(output_root).absolute()
@@ -214,20 +287,11 @@ def main():
     sdk_includes = [pathlib.Path(flag[2:]).resolve() for flag in cflags if flag.startswith('-I')]
 
     sources = sources_of(project, project_dir)
-    if 'entry' in project['module']:
-        # The standard main, which calls the project's EngineApplicationMain.
-        sources.append(pathlib.Path(datadir) / 'src' / 'entry.c')
-    check_includes(args.cc, cflags, [s for s in sources if project_dir in s.parents], project_dir,
-                   sdk_includes)
+    check_includes(args.cc, cflags, sources, project_dir, sdk_includes)
 
+    # The standard main lives in libcore: the linker takes it only when the project has none.
     warnings = ['-std=c99', '-O2', '-g', '-Wall', '-Wextra']
-    objects = []
-    for source in sources:
-        target = objects_dir / (source.stem + '.o')
-        objects.append(str(target))
-        command = [args.cc, *warnings, *cflags, '-c', str(source), '-o', str(target)]
-        if subprocess.run(command).returncode:
-            fail(f'{source} did not compile')
+    _, objects = compile_sources(args.cc, warnings, cflags, sources, project_dir, objects_dir)
     binary = out / project['name']
     # One static binary: the SDK's libraries are linked in, so it needs no engine to be installed.
     if subprocess.run([args.cc, *objects, *libs, '-o', str(binary)]).returncode:
