@@ -34,6 +34,13 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   saying where in a cell its subject's feet are, so a drawer never has to guess at the offset. Any
   producer will do: baked out of 3D, hand-drawn, whatever fills the grid. `SpriteAnim` keeps the
   clock, as Actor does for skeletons.
+- `particles`: a fixed-capacity pool of physically simulated billboards -- age, gravity, drag,
+  curl-noise turbulence, an optional pull toward an anchor and a rotation spin-up -- with a `step`
+  hook run after each particle moves and a `look` hook that can replace a particle's drawn size,
+  colour, up vector or rotation. A game owns what a `kind` means, its textures and its presets; the
+  pool only ages, pushes and draws them. As the `"particles"` engine type, a script sets a
+  template's life/size/gravity/drag and calls `emit!`/`clear!`; drawing is not reachable from
+  scripts.
 - `iso_grid`: the two grids Fallout 1/2 lay over the same ground -- a square tile grid for the floor
   and a hex grid twice as fine for everything that moves -- in their own trimetric projection, which
   leans rather than mirroring. Screen conversion both ways, hex neighbours, distance and facing,
