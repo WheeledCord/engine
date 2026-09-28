@@ -2569,6 +2569,13 @@ static void FpsControllerChecks(void)
     Check(fabsf(engine.position.x - before.x) < 0.2f && fabsf(engine.position.z - before.z) < 0.2f &&
               engine.bobAmp >= 0.0f,
           "a speed the game sets holds even at zero, rather than falling back to walking");
+    Vector3 standing = engine.position, facing = Vector3Subtract(engine.current.target, engine.current.position);
+    float lagBefore = engine.lagYaw;
+    FpsCameraLook(&engine, &config, (Vector2){200, 0});
+    Vector3 turned = Vector3Subtract(engine.current.target, engine.current.position);
+    Check(Vector3Distance(engine.position, standing) < 1e-6f && Vector3DotProduct(facing, turned) < 0.95f &&
+              engine.lagYaw == lagBefore,
+          "the view turns while time stands still, and nothing else moves");
 }
 
 static void NetOwnershipChecks(void)

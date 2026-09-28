@@ -42,6 +42,27 @@ static Vector3 Forward(float yaw, float pitch)
 {
     return (Vector3){cosf(pitch) * sinf(yaw), sinf(pitch), cosf(pitch) * cosf(yaw)};
 }
+// The view from where the body is, bobbed and breathing by the gait the last step left.
+static void BuildView(FpsCamera *s, const FpsCameraConfig *c)
+{
+    Vector3 f = Forward(s->yaw, s->pitch), flat = Forward(s->yaw, 0),
+            right = Vector3Normalize(Vector3CrossProduct(f, (Vector3){0, 1, 0}));
+    float amp = s->bobAmp, wave = sinf(2 * s->phase);
+    float y = c->bobVertical * amp * (-0.5f * cosf(2 * s->phase) + 0.1f * sinf(4 * s->phase));
+    float roll = c->bobRoll * amp * cosf(s->phase), nod = c->bobPitch * amp * wave;
+    Vector3 view = Vector3Add(s->position, Vector3Add(Vector3Scale(right, c->bobSide * amp * cosf(s->phase)),
+                                                      Vector3Scale(flat, c->bobForward * amp * wave)));
+    view.y += y + sinf((float)s->elapsed * 2 * PI * c->breathRate) * c->breathAmount * (1 - s->bobBlend);
+    f = Vector3Normalize(Vector3RotateByAxisAngle(f, right, nod));
+    Vector3 up = Vector3Normalize(Vector3CrossProduct(right, f));
+    s->current = (Camera){view, Vector3Add(view, f), Vector3RotateByAxisAngle(up, f, roll), c->fov,
+                          CAMERA_PERSPECTIVE};
+    float side = amp * cosf(s->phase), step = amp * (0.5f + 0.5f * cosf(2 * s->phase));
+    ViewmodelMotion m = c->viewmodel;
+    s->vmOffset = (Vector3){m.side * side, -m.down * step, m.forward * amp * wave};
+    s->vmRotation = QuaternionFromEuler(s->lagPitch + m.pitch * step, s->lagYaw + m.yaw * side,
+                                        m.roll * side + m.swayRoll * s->lagYaw);
+}
 void FpsCameraInit(FpsCamera *s, Vector3 pos, float yaw, float pitch, float fov)
 {
     *s = (FpsCamera){0};
@@ -111,24 +132,20 @@ int FpsCameraUpdate(FpsCamera *s, const FpsCameraConfig *c, FpsInput input, FpsW
     s->footfalls = (int)(next / PI) - (int)(s->phase / PI);
     s->phase = fmodf(next, 2 * PI);
     s->elapsed += dt;
-    float amp = s->bobBlend * Lerp(1, c->bobRunScale, run), wave = sinf(2 * s->phase);
-    s->bobAmp = amp;
+    s->bobAmp = s->bobBlend * Lerp(1, c->bobRunScale, run);
     s->runMix = run;
-    float y = c->bobVertical * amp * (-0.5f * cosf(2 * s->phase) + 0.1f * sinf(4 * s->phase));
-    float roll = c->bobRoll * amp * cosf(s->phase), nod = c->bobPitch * amp * wave;
-    Vector3 view = Vector3Add(s->position, Vector3Add(Vector3Scale(right, c->bobSide * amp * cosf(s->phase)),
-                                                      Vector3Scale(flat, c->bobForward * amp * wave)));
-    view.y += y + sinf((float)s->elapsed * 2 * PI * c->breathRate) * c->breathAmount * (1 - s->bobBlend);
-    f = Vector3Normalize(Vector3RotateByAxisAngle(f, right, nod));
-    Vector3 up = Vector3Normalize(Vector3CrossProduct(right, f));
-    s->current = (Camera){view, Vector3Add(view, f), Vector3RotateByAxisAngle(up, f, roll), c->fov,
-                          CAMERA_PERSPECTIVE};
-    float side = amp * cosf(s->phase), step = amp * (0.5f + 0.5f * cosf(2 * s->phase));
-    ViewmodelMotion m = c->viewmodel;
-    s->vmOffset = (Vector3){m.side * side, -m.down * step, m.forward * amp * wave};
-    s->vmRotation = QuaternionFromEuler(s->lagPitch + m.pitch * step, s->lagYaw + m.yaw * side,
-                                        m.roll * side + m.swayRoll * s->lagYaw);
+    BuildView(s, c);
     return s->footfalls;
+}
+void FpsCameraLook(FpsCamera *s, const FpsCameraConfig *c, Vector2 lookDelta)
+{
+    s->yaw = s->yaw - lookDelta.x * c->sensitivity;
+    s->yaw = atan2f(sinf(s->yaw), cosf(s->yaw));
+    s->pitch = Clamp(s->pitch - lookDelta.y * c->sensitivity, -c->pitchLimit, c->pitchLimit);
+    BuildView(s, c);
+    s->previous = s->current; // nothing to interpolate across: time did not pass
+    s->previousVmOffset = s->vmOffset;
+    s->previousVmRotation = s->vmRotation;
 }
 Camera FpsCameraInterpolated(const FpsCamera *s, float alpha)
 {
