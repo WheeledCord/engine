@@ -59,6 +59,7 @@ typedef struct EngineValue
 #define ENGINE_PROPERTY_READ_ONLY 1u /* scripts may read it but not write it */
 #define ENGINE_PROPERTY_SAVE 2u      /* part of what a save records */
 #define ENGINE_PROPERTY_SCENE 4u     /* a scene file may set it */
+#define ENGINE_PROPERTY_SHARED 8u    /* sent to the other machines in a networked game */
 
 typedef struct EngineProperty
 {

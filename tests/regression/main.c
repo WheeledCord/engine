@@ -45,6 +45,7 @@
 #include <sys/stat.h>
 #include <math.h>
 #include <time.h>
+#include <unistd.h>
 
 static int failures, checks;
 static UiContext ui;
@@ -862,6 +863,156 @@ static void ScriptChecks(void)
               EvalIs("(gun 'world-position)", "(1.0 2.0 3.0)") &&
               !ScriptS7Eval("(set! (hand 'parent) gun)", NULL),
           "a node made and attached from Scheme follows its parent, and cannot become its own ancestor");
+
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
+}
+
+// ---- scripting: sharing an engine object over the network ---------------------------------------
+typedef struct NetObjTestState
+{
+    float value;
+    Vector3 place;
+} NetObjTestState;
+static const EngineProperty netObjTestProperties[] = {
+    ENGINE_FIELD("value", NetObjTestState, value, ENGINE_FLOAT, ENGINE_PROPERTY_SHARED,
+                 "a shared float"),
+    ENGINE_FIELD("place", NetObjTestState, place, ENGINE_VECTOR3, ENGINE_PROPERTY_SHARED,
+                 "a shared vector3"),
+};
+static const EngineType netObjTestType = {
+    .name = "net-obj-test",
+    .size = sizeof(NetObjTestState),
+    .properties = netObjTestProperties,
+    .propertyCount = sizeof netObjTestProperties / sizeof netObjTestProperties[0],
+    .help = "a small type with shared fields, for testing (make 'network ...) object sharing",
+};
+
+static bool SchemeTrue(const char *expression)
+{
+    char *answer = NULL;
+    bool ok = ScriptS7Eval(expression, &answer);
+    bool yes = ok && answer && !strcmp(answer, "#t");
+    free(answer);
+    return yes;
+}
+
+// Steps the host until expression reads #t or the budget runs out, giving loopback packets a
+// little real time to arrive between polls: the network object's own step never blocks (it calls
+// CoreNetSessionStep with waitMs 0, so ScriptHostStep alone drives it), so the wait belongs here.
+static bool PumpScriptUntil(ScriptHost *host, const char *expression, int maxSteps)
+{
+    for (int i = 0; i < maxSteps; i++)
+    {
+        if (SchemeTrue(expression))
+            return true;
+        ScriptHostStep(host, 1.0f / 60.0f);
+        usleep(1000);
+    }
+    return SchemeTrue(expression);
+}
+
+// A property marked shared that cannot go on the wire must fail the whole make, not leave that
+// type quietly unable to be shared -- CoreNetFieldsFromType's own "answer nothing usable, not a
+// partial list" rule, carried through to how the network type uses it.
+typedef struct NetBadSharedBody
+{
+    const char *label;
+} NetBadSharedBody;
+static const EngineProperty netBadSharedProperties[] = {
+    ENGINE_FIELD("label", NetBadSharedBody, label, ENGINE_STRING, ENGINE_PROPERTY_SHARED,
+                 "bad: a shared string"),
+};
+static const EngineType netBadSharedType = {
+    .name = "net-bad-shared-test",
+    .size = sizeof(NetBadSharedBody),
+    .properties = netBadSharedProperties,
+    .propertyCount = 1,
+};
+
+static void NetworkBadSharedTypeChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    Check(ScriptHostRegisterType(&host, &netBadSharedType),
+          "a type with an unusable shared property registers with the host like any other");
+    Check(ScriptS7Open(&host), "the Scheme frontend opens");
+    Check(!ScriptS7Eval("(make 'network \"bad-shared-test\" 1)", NULL),
+          "a registered type marking a property shared that cannot go on the wire fails the whole make");
+    ScriptS7Close();
+    ScriptHostFree(&host);
+    GameplayWorldFree(&world);
+}
+
+static void NetObjectsChecks(void)
+{
+    GameplayWorld world = {0};
+    GameplayWorldInit(&world, (GameplayWorldConfig){16, 0.1});
+    ScriptHost host;
+    ScriptHostInit(&host, &world);
+    Check(ScriptHostRegisterType(&host, &netObjTestType),
+          "a game's own shared type registers with the host before any network object is made");
+    Check(ScriptS7Open(&host), "the Scheme frontend opens");
+
+    Check(!ScriptS7Eval("(make 'network \"netobj-test\")", NULL),
+          "network needs both a game name and a version");
+    Check(ScriptS7Eval("(define srv (make 'network \"netobj-test\" 1))", NULL) &&
+              ScriptS7Eval("(define cli (make 'network \"netobj-test\" 1))", NULL),
+          "two network objects are made in the same script host");
+    Check(EvalIs("(srv 'host! 99999)", "#f") && EvalIs("(cli 'join! \"127.0.0.1\" -1)", "#f") &&
+              EvalIs("(equal? (srv 'status) \"off\")", "#t"),
+          "a port outside 0..65535 is refused rather than truncated, and nothing was started");
+    Check(EvalIs("(srv 'host! 0)", "#t") && EvalIs("(srv 'server)", "#t") &&
+              EvalIs("(equal? (srv 'status) \"active\")", "#t"),
+          "hosting on port 0 lets the system pick a port, and the server is active at once");
+
+    char *portAnswer = NULL;
+    ScriptS7Eval("(srv 'port)", &portAnswer);
+    Check(portAnswer && strcmp(portAnswer, "0") != 0, "the bound port is read back from the server object");
+    char joinExpr[128];
+    snprintf(joinExpr, sizeof joinExpr, "(cli 'join! \"127.0.0.1\" %s)", portAnswer ? portAnswer : "0");
+    free(portAnswer);
+    Check(EvalIs(joinExpr, "#t"), "joining the host's own actual port succeeds");
+
+    Check(PumpScriptUntil(&host, "(equal? (cli 'status) \"welcomed\")", 300),
+          "pumping ScriptHostStep drives both sessions until the joiner is welcomed");
+    Check(EvalIs("(cli 'ready!)", "#t"), "the joiner says it is ready");
+    Check(EvalIs("(equal? (cli 'status) \"active\")", "#t"),
+          "readying a welcomed joiner makes it active at once");
+
+    Check(ScriptS7Eval("(define client-obj #f)", NULL) &&
+              ScriptS7Eval("(connect! cli 'appeared (lambda (obj) (set! client-obj obj)))", NULL),
+          "the joiner listens for appeared");
+
+    Check(ScriptS7Eval("(define host-obj (make 'net-obj-test))", NULL) &&
+              ScriptS7Eval("(set! (host-obj 'value) 4.5)", NULL) &&
+              ScriptS7Eval("(set! (host-obj 'place) (list 1 2 3))", NULL),
+          "a shared object is made and given values before it is shared");
+    Check(EvalIs("(cli 'share! host-obj)", "#f"), "share! refuses on a machine that is not the server");
+    Check(EvalIs("(srv 'share! host-obj)", "#t"), "the server shares it");
+    Check(EvalIs("(srv 'mine? host-obj)", "#t"), "the server decides the object it just shared");
+
+    Check(PumpScriptUntil(&host, "(and client-obj (equal? (client-obj 'value) 4.5))", 300),
+          "the joiner gets an object of the shared type carrying the host's own values");
+    Check(EvalIs("(client-obj 'place)", "(1.0 2.0 3.0)"), "...and its vector3 field too");
+    Check(EvalIs("(object-type client-obj)", "net-obj-test"),
+          "the joiner's object is of the same type the host shared");
+    Check(EvalIs("(cli 'mine? client-obj)", "#f"), "the joiner does not decide an object the server owns");
+
+    Check(ScriptS7Eval("(set! (host-obj 'value) 9.5)", NULL), "the host changes a shared value");
+    Check(PumpScriptUntil(&host, "(equal? (client-obj 'value) 9.5)", 300),
+          "the changed value reaches the joiner without a fresh share!");
+
+    Check(ScriptS7Eval("(cli 'leave!)", NULL), "leave! runs without error");
+    Check(EvalIs("(alive? client-obj)", "#f"),
+          "leaving destroys the object the network object created here for the joiner");
+
+    Check(ScriptS7Eval("(srv 'leave!)", NULL), "the server can leave! too");
+    Check(EvalIs("(alive? host-obj)", "#t"),
+          "leave! never destroys an object share! was given: it is the caller's, not the network object's");
 
     ScriptS7Close();
     ScriptHostFree(&host);
@@ -2156,6 +2307,103 @@ static void NetSyncChecks(void)
     CoreNetSyncFree(&server);
 }
 
+// ---- CoreNetFieldsFromType: a schema's fields read back from an engine type's shared properties --
+typedef struct NetFieldTestBody
+{
+    bool flag;
+    int count;
+    float amount;
+    Vector3 place;
+} NetFieldTestBody;
+static const EngineProperty netFieldTestProperties[] = {
+    ENGINE_FIELD("shared-int", NetFieldTestBody, count, ENGINE_INT, ENGINE_PROPERTY_SHARED,
+                 "a shared int"),
+    ENGINE_FIELD("shared-float", NetFieldTestBody, amount, ENGINE_FLOAT, ENGINE_PROPERTY_SHARED,
+                 "a shared float"),
+    ENGINE_FIELD("shared-vector3", NetFieldTestBody, place, ENGINE_VECTOR3, ENGINE_PROPERTY_SHARED,
+                 "a shared vector3"),
+    ENGINE_FIELD("plain-bool", NetFieldTestBody, flag, ENGINE_BOOL, 0, "not shared"),
+};
+static const EngineType netFieldTestType = {
+    .name = "net-field-test",
+    .size = sizeof(NetFieldTestBody),
+    .properties = netFieldTestProperties,
+    .propertyCount = sizeof netFieldTestProperties / sizeof netFieldTestProperties[0],
+};
+
+typedef struct NetFieldStringBody
+{
+    const char *label;
+    int count;
+} NetFieldStringBody;
+static const EngineProperty netFieldStringProperties[] = {
+    ENGINE_FIELD("shared-string", NetFieldStringBody, label, ENGINE_STRING, ENGINE_PROPERTY_SHARED,
+                 "bad: a shared string, which has no fixed size to put on the wire"),
+    ENGINE_FIELD("shared-int", NetFieldStringBody, count, ENGINE_INT, ENGINE_PROPERTY_SHARED,
+                 "otherwise a perfectly fine shared int"),
+};
+static const EngineType netFieldStringType = {
+    .name = "net-field-string-test",
+    .size = sizeof(NetFieldStringBody),
+    .properties = netFieldStringProperties,
+    .propertyCount = sizeof netFieldStringProperties / sizeof netFieldStringProperties[0],
+};
+
+static bool NetFieldComputedGet(const void *object, EngineValue *out)
+{
+    (void)object;
+    *out = EngineInt(1);
+    return true;
+}
+static const EngineProperty netFieldComputedProperties[] = {
+    ENGINE_COMPUTED("shared-computed", ENGINE_INT, ENGINE_PROPERTY_SHARED, NetFieldComputedGet, NULL,
+                    "bad: computed, so it has no offset into storage to copy"),
+};
+static const EngineType netFieldComputedType = {
+    .name = "net-field-computed-test",
+    .size = sizeof(int),
+    .properties = netFieldComputedProperties,
+    .propertyCount = 1,
+};
+
+static void NetFieldsFromTypeChecks(void)
+{
+    CoreNetField fields[8] = {0};
+    size_t count = CoreNetFieldsFromType(&netFieldTestType, fields, 8);
+    Check(count == 3, "one field per shared property, skipping the one that is not shared");
+    Check(!strcmp(fields[0].name, "shared-int") && fields[0].type == CORE_NET_I32 &&
+              fields[0].offset == offsetof(NetFieldTestBody, count) &&
+              fields[0].size == sizeof(int32_t) && fields[0].flags == 0,
+          "a shared int becomes a plain CORE_NET_I32 field at the property's own offset and size");
+    Check(!strcmp(fields[1].name, "shared-float") && fields[1].type == CORE_NET_F32 &&
+              fields[1].offset == offsetof(NetFieldTestBody, amount) &&
+              fields[1].size == sizeof(float) && fields[1].flags == CORE_NET_FIELD_INTERPOLATED,
+          "a shared float becomes an interpolated CORE_NET_F32 field");
+    Check(!strcmp(fields[2].name, "shared-vector3") && fields[2].type == CORE_NET_VECTOR3 &&
+              fields[2].offset == offsetof(NetFieldTestBody, place) &&
+              fields[2].size == sizeof(Vector3) && fields[2].flags == CORE_NET_FIELD_INTERPOLATED,
+          "a shared vector3 becomes an interpolated CORE_NET_VECTOR3 field");
+
+    Check(CoreNetFieldsFromType(&netFieldTestType, fields, 2) == 0,
+          "too little capacity for every shared field answers nothing usable, not a partial list");
+    Check(CoreNetFieldsFromType(&netFieldStringType, fields, 8) == 0,
+          "a shared property of a value type with no wire form (a string) answers nothing usable, "
+          "even though the type has another shared property that would have been fine alone");
+    Check(CoreNetFieldsFromType(&netFieldComputedType, fields, 8) == 0,
+          "a shared computed property, which has no offset to copy, answers nothing usable");
+    Check(CoreNetFieldsFromType(NULL, fields, 8) == 0, "no type answers nothing usable");
+
+    // The sizes and offsets CoreNetFieldsFromType hands out are exactly what CoreNetSyncRegister
+    // itself checks a field against, so a schema built from them registers cleanly.
+    count = CoreNetFieldsFromType(&netFieldTestType, fields, 8);
+    const CoreNetSchema schema = {50, "net-field-test", sizeof(NetFieldTestBody), fields, count,
+                                  CORE_NET_AUTHORITY_SERVER, 0};
+    CoreNetSync sync = {0};
+    Check(CoreNetSyncInit(&sync, 4, 2) && CoreNetSyncRegister(&sync, &schema),
+          "a schema built from a type's shared properties registers with CoreNetSyncRegister");
+    CoreNetSyncFree(&sync);
+}
+
 static void NetOwnerRecordCall(void *user, void *state, bool writing)
 {
     bool *record = (bool *)user;   /* record[0] = called, record[1] = writing */
@@ -3051,6 +3299,8 @@ typedef struct SessionTestGame
     int32_t lastEventValue;
     bool rejectUploads;
     NetTestState world, player, seen;
+    int appeared, vanished; // joiner only: how many times, and the identity of the last one
+    uint32_t lastAppearedId, lastVanishedId;
 } SessionTestGame;
 
 static const CoreNetField sessionTestFields[] = {
@@ -3127,6 +3377,21 @@ static void SessionTestEvent(void *user, uint8_t op, uint32_t object, CoreNetRea
     game->lastEventValue = (int32_t)value;
 }
 
+static void SessionTestAppeared(void *user, CoreNetSync *sync, CoreNetObject *object)
+{
+    (void)sync;
+    SessionTestGame *game = user;
+    game->appeared++;
+    game->lastAppearedId = object->id;
+}
+
+static void SessionTestVanished(void *user, uint32_t id)
+{
+    SessionTestGame *game = user;
+    game->vanished++;
+    game->lastVanishedId = id;
+}
+
 static CoreNetSessionConfig SessionTestConfig(SessionTestGame *game, const char *name, uint32_t version)
 {
     return (CoreNetSessionConfig){
@@ -3135,6 +3400,7 @@ static CoreNetSessionConfig SessionTestConfig(SessionTestGame *game, const char 
         .writeWelcome = SessionTestWriteWelcome, .readWelcome = SessionTestReadWelcome,
         .joined = SessionTestJoined, .left = SessionTestLeft, .accept = SessionTestAccept,
         .command = SessionTestCommand, .event = SessionTestEvent,
+        .appeared = SessionTestAppeared, .vanished = SessionTestVanished,
     };
 }
 
@@ -3197,6 +3463,20 @@ static bool SessionClientGone(const CoreNetSession *host, const CoreNetSession *
 {
     (void)client;
     return sessionHostGame->left[2] > 0 && !CoreNetSyncFind((CoreNetSync *)&host->sync, 2);
+}
+
+static bool SessionAllAppeared(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    (void)client;
+    return sessionClientGame->appeared >= 3;
+}
+
+static bool SessionWorldVanished(const CoreNetSession *host, const CoreNetSession *client)
+{
+    (void)host;
+    (void)client;
+    return sessionClientGame->vanished > 0;
 }
 
 static void NetSessionChecks(void)
@@ -3467,6 +3747,52 @@ static void WaypointsChecks(void)
           "a full link list refuses one more");
 }
 
+// appeared/vanished: a joiner is told about every object a snapshot adds or removes, once each,
+// and the server -- which creates its own objects -- is never told at all.
+static void NetAppearedVanishedChecks(void)
+{
+    SessionTestGame hostGame = {.seed = 9}, clientGame = {0};
+    sessionHostGame = &hostGame;
+    sessionClientGame = &clientGame;
+    CoreNetSessionConfig hostConfig = SessionTestConfig(&hostGame, "appear-test", 1);
+    CoreNetSessionConfig clientConfig = SessionTestConfig(&clientGame, "appear-test", 1);
+    CoreNetSession host = {0}, client = {0};
+
+    Check(CoreNetSessionHost(&host, &hostConfig, 0, true), "hosting starts, with the world object spawned");
+    uint16_t port = CoreNetPort(&host.endpoint);
+    Check(CoreNetSessionJoin(&client, &clientConfig, "127.0.0.1", port), "joining starts");
+    Check(SessionPump(&host, &client, SessionClientSettled) && client.status == CORE_NET_SESSION_WELCOMED,
+          "the joiner is welcomed");
+    Check(CoreNetSessionReady(&client), "the joiner says it is ready");
+
+    // Three objects are new to this joiner: the world (started), the host's own player (host!'s
+    // player of its own, actor 1) and this joiner's own player (joined, once the server sees
+    // MSG_READY). appeared must fire once for each.
+    Check(SessionPump(&host, &client, SessionAllAppeared) && clientGame.appeared == 3,
+          "appeared fires exactly once for each of the three objects the joiner did not have before");
+    Check(hostGame.appeared == 0 && hostGame.vanished == 0,
+          "the server is never told appeared or vanished; it creates its own objects");
+
+    int appearedSoFar = clientGame.appeared;
+    for (int i = 0; i < 30; i++)
+    {
+        CoreNetSessionStep(&host, 1.0 / 60.0, 2);
+        CoreNetSessionStep(&client, 1.0 / 60.0, 2);
+    }
+    Check(clientGame.appeared == appearedSoFar,
+          "further snapshots of the same objects do not announce them again");
+
+    CoreNetSyncDespawn(&host.sync, 100); // the world object goes away
+    Check(SessionPump(&host, &client, SessionWorldVanished) && clientGame.vanished == 1 &&
+              clientGame.lastVanishedId == 100 && !CoreNetSyncFind(&client.sync, 100),
+          "vanished fires once when a snapshot removes an object, which is then gone from the registry");
+    Check(CoreNetSyncFind(&client.sync, 2) != NULL,
+          "an object the snapshot did not remove is untouched by another one vanishing");
+
+    CoreNetSessionLeave(&client);
+    CoreNetSessionLeave(&host);
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -3487,6 +3813,8 @@ int main(int argc, char **argv)
     ConventionChecks();
     DeferredChecks();
     ScriptChecks();
+    NetworkBadSharedTypeChecks();
+    NetObjectsChecks();
     ElapsedChecks();
     StorageChecks();
     SaveAndInputMapChecks();
@@ -3504,11 +3832,13 @@ int main(int argc, char **argv)
     NetClockChecks();
     NetDeltaChecks();
     NetSyncChecks();
+    NetFieldsFromTypeChecks();
     NetOwnershipChecks();
     Collision3DChecks();
     NetSessionChecks();
     ParticlesChecks();
     WaypointsChecks();
+    NetAppearedVanishedChecks();
     ObjectChecks();
     GameObjectChecks();
     NodeChecks();

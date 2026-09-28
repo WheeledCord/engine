@@ -5,6 +5,7 @@
 #define CORE_NET_SYNC_H
 
 #include "network.h"
+#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -395,6 +396,26 @@ bool CoreNetSyncRead(CoreNetSync *sync, CoreNetReader *reader, uint32_t *tick);
  * @param outState Caller storage at least schema stateSize bytes long.
  * @return True on success. Only fields marked CORE_NET_FIELD_INTERPOLATED are blended. */
 bool CoreNetObjectSample(const CoreNetObject *object, float alpha, void *outState);
+
+/** @brief Builds a schema's field table from an engine type's shared properties.
+ *
+ * A game marks a property ENGINE_PROPERTY_SHARED on the type it already declared for scripts, and
+ * this reads that declaration back as the field table CoreNetSchema wants, instead of a second,
+ * separate list that could drift from the first: ENGINE_BOOL/INT map to CORE_NET_BOOL/I32,
+ * ENGINE_FLOAT/VECTOR2/VECTOR3 to CORE_NET_F32/VECTOR2/VECTOR3 flagged CORE_NET_FIELD_INTERPOLATED.
+ * Only a stored field counts -- one declared with ENGINE_FIELD, so it has a plain offset into the
+ * object's storage, rather than ENGINE_COMPUTED get/set functions (object.h) -- since there is no
+ * single offset in the object to copy to or from a computed property.
+ *
+ * A shared property this cannot place on the wire -- a string, an object, or a computed one -- or
+ * too little room to hold every field found, answers zero rather than the fields it could place:
+ * silently sending everything BUT the one field someone marked shared would replicate the wrong
+ * thing without saying so, which is worse than replicating nothing.
+ * @param type Engine type to read; its parents' properties count too, the way scripts see them.
+ * @param out Caller storage for the fields found.
+ * @param capacity How many fields out can hold.
+ * @return How many fields were written, or zero when nothing was written. */
+size_t CoreNetFieldsFromType(const EngineType *type, CoreNetField *out, size_t capacity);
 
 /** @brief Samples a replicated object at a point in server time, interpolating the pair it lies
  * between.

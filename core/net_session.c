@@ -4,6 +4,7 @@
 #include "net_session.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define CONTROL_CHANNEL 0
@@ -354,6 +355,31 @@ static void SendHello(CoreNetSession *session)
         CoreNetSend(&session->endpoint, session->server, CONTROL_CHANNEL, packet, writer.size, true);
 }
 
+/* Every object id active right now, so a caller can tell what a coming CoreNetSyncRead adds or
+   removes. CoreNetSyncRead replaces the registry's object storage wholesale on every applied read
+   (net_sync.h), so nothing about the current set survives that call except what was captured here
+   beforehand -- the same reason CoreNetSyncBindState's caller-owned buffer has to be handed back in
+   rather than found again afterwards. */
+static uint32_t *ActiveIds(const CoreNetSync *sync, size_t *count)
+{
+    *count = 0;
+    uint32_t *ids = malloc(sync->objectCapacity * sizeof *ids);
+    if (!ids)
+        return NULL;
+    for (size_t i = 0; i < sync->objectCapacity; i++)
+        if (sync->objects[i].active)
+            ids[(*count)++] = sync->objects[i].id;
+    return ids;
+}
+
+static bool IdWas(const uint32_t *ids, size_t count, uint32_t id)
+{
+    for (size_t i = 0; i < count; i++)
+        if (ids[i] == id)
+            return true;
+    return false;
+}
+
 static void ReadSnapshot(CoreNetSession *session, CoreNetReader *reader)
 {
     uint32_t applied = 0, tick = 0;
@@ -362,12 +388,33 @@ static void ReadSnapshot(CoreNetSession *session, CoreNetReader *reader)
     /* Snapshots arrive out of order; an older one must not un-handle a command. */
     if (applied > session->commandApplied)
         session->commandApplied = applied;
+
+    bool watching = session->config.appeared || session->config.vanished;
+    size_t beforeCount = 0;
+    uint32_t *before = watching ? ActiveIds(&session->sync, &beforeCount) : NULL;
+
     if (CoreNetSyncRead(&session->sync, reader, &tick) && tick != session->tick)
     {
         session->tick = tick;
         CoreNetSyncRemember(&session->sync, tick);
         CoreNetInterpolatorSnapshot(&session->interp, tick);
+
+        if (before)
+        {
+            if (session->config.vanished)
+                for (size_t i = 0; i < beforeCount; i++)
+                    if (!CoreNetSyncFind(&session->sync, before[i]))
+                        session->config.vanished(session->config.user, before[i]);
+            if (session->config.appeared)
+                for (size_t i = 0; i < session->sync.objectCapacity; i++)
+                {
+                    CoreNetObject *object = &session->sync.objects[i];
+                    if (object->active && !IdWas(before, beforeCount, object->id))
+                        session->config.appeared(session->config.user, &session->sync, object);
+                }
+        }
     }
+    free(before);
 }
 
 static void ClientHandle(CoreNetSession *session, const CoreNetEvent *event)
