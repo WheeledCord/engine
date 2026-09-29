@@ -142,7 +142,7 @@ run: $(BUILD)/core_integration
 	./$(BUILD)/core_integration
 test-gameplay: $(BUILD)/gameplay_integration
 	./$(BUILD)/gameplay_integration
-test-regression: $(BUILD)/regression_test
+test-regression: $(BUILD)/regression_test $(BUILD)/trench
 	./$(BUILD)/regression_test
 integration: $(BUILD)/core_integration $(BUILD)/regression_test
 	./$(BUILD)/core_integration --smoke

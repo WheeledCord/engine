@@ -25,7 +25,8 @@ typedef struct CoreDiagnostics
 const CoreDiagnostics *CoreDiagnosticsCurrent(void);
 typedef enum CoreDebugPrimitiveKind { CORE_DEBUG_LINE, CORE_DEBUG_CIRCLE, CORE_DEBUG_RECT, CORE_DEBUG_TEXT } CoreDebugPrimitiveKind;
 typedef struct CoreDebugPrimitive { CoreDebugPrimitiveKind kind; Vector2 a, b; float radius, seconds; Color color; char text[128]; } CoreDebugPrimitive;
-typedef struct CoreDebug { CoreDebugPrimitive *items; size_t count, capacity; bool overlay; int x, y; } CoreDebug;
+/* font: NULL draws text in raylib's default font; otherwise in this font at its base size. */
+typedef struct CoreDebug { CoreDebugPrimitive *items; size_t count, capacity; bool overlay; int x, y; const Font *font; } CoreDebug;
 /** Initializes a caller-owned debug queue. overlay enables the timing readout when CoreDebugDraw is called. */
 bool CoreDebugInit(CoreDebug *debug, bool overlay);
 /** Releases queued primitives. Safe for a zeroed or failed context. */

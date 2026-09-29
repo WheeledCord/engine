@@ -16,7 +16,7 @@ typedef struct EngineConfig
     int width, height, targetFps;
     double fixed_dt;     /* zero: variable-only; positive: accumulator */
     double max_frame_dt; /* zero: no clamp; positive: explicit catch-up time clamp */
-    unsigned int windowFlags;
+    unsigned int windowFlags; /* raylib ConfigFlags for the window; the default is FLAG_VSYNC_HINT */
     CoreRequirements requirements;
     const char *engine_path; /* path to engine root containing core/; NULL: use executable directory */
     bool headless;     /* true: no window, GL, audio, drawing or UI; the loop calls Update at fixed_dt

@@ -590,6 +590,13 @@ executable (engine-build copies it) or the directory given as the first argument
 --bench              print per-tick and per-frame timing at exit (p50/p99 in microseconds, and the
                      draw stats), as tools/store_bench does
 --save FILE / --load FILE
+--present            with --headless only: each tick also runs World3DUpdateTransforms(1) and
+                     StoreFrame(dt) without GL, so frame, -changed and draw-hud run; the HUD list is
+                     counted and cleared each tick, play-sound and burst do nothing, screen-width and
+                     screen-height answer 1280x720; --bench prints "bench hud calls per frame p50 N"
+--shot-every N       windowed only: after drawing, every N ticks, save DIR/shot_<tick>.png and print
+                     "shot T PATH"
+--shot-dir DIR       where --shot-every writes (default: the current directory)
 ```
 
 ### 6.2 The loop

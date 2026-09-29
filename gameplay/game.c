@@ -9,11 +9,13 @@
 
 #include "game.h"
 
+#include "core/audio.h"
 #include "core/draw_path.h"
 #include "core/engine.h"
 #include "core/file.h"
 #include "core/particles.h"
 #include "core/replay.h"
+#include "core/shader.h"
 #include "core/store.h"
 #include "core/world3d.h"
 #include "gameplay/script/game_s7.h"
@@ -51,6 +53,7 @@ typedef struct ModelEntry
     char name[NAME];
     Model model;
     uint32_t *meshes; /* draw path ids, per model mesh */
+    bool placeholder; /* the file is missing: a magenta cube stands in */
 } ModelEntry;
 
 typedef struct TextureEntry
@@ -62,7 +65,7 @@ typedef struct TextureEntry
 typedef struct SoundEntry
 {
     char name[NAME];
-    Sound sound;
+    char path[1024]; /* as CoreAudio caches it */
     bool loaded;
 } SoundEntry;
 
@@ -105,10 +108,10 @@ typedef struct Samples
 typedef struct Runner
 {
     // Options.
-    char dir[512], gameFile[1024], title[128], prelude[1024];
-    const char *recordPath, *replayPath, *savePath, *loadPath;
-    bool headless, bot, bench;
-    uint64_t maxTicks, seed, hashEvery;
+    char dir[512], gameFile[1024], title[128], prelude[1024], worldVs[1024], worldFs[1024], fontPath[1024];
+    const char *recordPath, *replayPath, *savePath, *loadPath, *shotDir;
+    bool headless, bot, bench, present;
+    uint64_t maxTicks, seed, hashEvery, shotEvery, lastShot;
     // The world.
     Store store;
     World3D world;
@@ -121,14 +124,30 @@ typedef struct Runner
     uint64_t lastPrinted;
     bool printedAny, warnedArgs;
     // Timing.
-    Samples ticks, frames;
+    Samples ticks, frames, hudCalls;
     uint64_t updates, frameCount;
     DrawStats lastStats;
     // Presentation (windowed only).
-    bool gl, audioOpened, audioWarned, replGreeted;
+    bool gl, audioReady, replGreeted, shaderLoaded, fontLoaded;
     DrawPath path;
     Shader shader;
-    Texture2D white;
+    int normalLoc, lightDirLoc, lightColorLoc, ambientLoc, fogColorLoc, fogDensityLoc, viewPosLoc;
+    Texture2D white, grey;
+    Font font;
+    CoreAudio audio;
+    CoreMouseCapture capture;
+    bool captureWanted, cursorReported, overlay;
+    Vector2 mouseDelta; /* captured since the last tick */
+    CoreDebug debug;
+    int missingAssets;
+    char overlayText[3][128]; /* the overlay's lines on the last drawn frame, shown or not */
+    struct
+    {
+        char text[256];
+        uint64_t tick;
+        double at;
+    } errors[3];
+    int errorCount;
     CoreParticles particles;
     uint64_t fxState;
     ChunkEntry chunks[MAX_CHUNKS];
@@ -285,18 +304,17 @@ static GameInput FromEngine(const EngineInput *in)
     {
         bool mouse;
         int code = KeyCode(GameS7ActionKey(i), &mouse);
-        if (code < 0)
+        if (code < 0 || (!mouse && code == KEY_ESCAPE)) /* Escape releases the mouse instead */
             continue;
         bool down = mouse ? in->mouseDown[code] : code < CORE_KEY_COUNT && in->down[code];
         bool pressed = mouse ? in->mousePressed[code] : code < CORE_KEY_COUNT && in->pressed[code];
         input.held |= down ? 1u << i : 0u;
         input.pressed |= pressed ? 1u << i : 0u;
     }
-    if (in)
-    {
-        input.mouseDx = in->mouseDelta.x;
-        input.mouseDy = in->mouseDelta.y;
-    }
+    // The captured pointer's motion since the last tick, which the first tick of a frame takes.
+    input.mouseDx = run.mouseDelta.x;
+    input.mouseDy = run.mouseDelta.y;
+    run.mouseDelta = (Vector2){0, 0};
     return input;
 }
 
@@ -367,12 +385,28 @@ static bool ReplayInput(GameInput *input)
     return true;
 }
 
+// A presentation frame without GL (--present): the frame and -changed handlers and draw-hud run and
+// fill the HUD list, which is counted and cleared; nothing is drawn.
+static void PresentHeadless(float dt)
+{
+    World3DUpdateTransforms(&run.world, 1.0f);
+    StoreFrame(&run.store, dt);
+    Push(&run.hudCalls, run.hudCount);
+    run.hudCount = 0;
+}
+
 static bool Update(void *context, double dt, const EngineInput *in)
 {
     (void)context;
     const CoreDiagnostics *d = CoreDiagnosticsCurrent();
     if (run.bench && run.updates > 0 && d)
         Push(&run.ticks, d->tickMicrosLast);
+    // Windowed, the runner stops the run itself, a call after the last tick, so that tick is drawn.
+    if (!run.headless && run.maxTicks && run.updates >= run.maxTicks)
+    {
+        run.ended = true;
+        return false;
+    }
     run.updates++;
     GameInput input;
     if (run.replaying)
@@ -393,6 +427,8 @@ static bool Update(void *context, double dt, const EngineInput *in)
     GameS7SetInput(&run.input);
     World3DBeginTick(&run.world);
     StoreTick(&run.store, (float)dt);
+    if (run.present)
+        PresentHeadless((float)dt);
     if (run.hashEvery && StoreTickCount(&run.store) % run.hashEvery == 0)
         PrintHash();
     return true;
@@ -411,7 +447,10 @@ static Texture2D TextureNamed(const char *name)
     const char *path = AssetPath(name, buf, sizeof buf);
     Texture2D texture = path ? LoadTexture(path) : (Texture2D){0};
     if (!texture.id)
-        TraceLog(LOG_WARNING, "RUN: no texture %s; drawing white", name);
+    {
+        TraceLog(LOG_WARNING, "RUN: no texture %s; drawing mid-grey", name);
+        run.missingAssets++;
+    }
     if (run.textureCount < MAX_TEXTURES)
     {
         TextureEntry *e = &run.textures[run.textureCount++];
@@ -424,14 +463,14 @@ static Texture2D TextureNamed(const char *name)
 static uint32_t MaterialFor(Texture2D texture, Color tint)
 {
     if (!texture.id)
-        texture = run.white;
+        texture = run.grey;
     for (int i = 0; i < run.materialCount; i++)
     {
         MaterialEntry *m = &run.materials[i];
         if (m->texture == texture.id && !memcmp(&m->tint, &tint, sizeof tint))
             return m->id;
     }
-    uint32_t id = DrawPathMaterial(&run.path, run.shader, texture, tint, -1);
+    uint32_t id = DrawPathMaterial(&run.path, run.shader, texture, tint, run.normalLoc);
     if (id && run.materialCount < MAX_MATERIALS)
         run.materials[run.materialCount++] = (MaterialEntry){texture.id, tint, id};
     return id;
@@ -453,10 +492,12 @@ static ModelEntry *ModelNamed(const char *name)
         e->model = LoadModel(path);
     if (!e->model.meshCount)
     {
-        TraceLog(LOG_WARNING, "RUN: no model %s; drawing a 0.5 m cube", name[0] ? name : "(no mesh named)");
+        TraceLog(LOG_WARNING, "RUN: no model %s; drawing a magenta 0.25 m cube", name[0] ? name : "(no mesh named)");
         if (e->model.meshes || e->model.materials)
             UnloadModel(e->model);
-        e->model = LoadModelFromMesh(GenMeshCube(0.5f, 0.5f, 0.5f));
+        e->model = LoadModelFromMesh(GenMeshCube(0.25f, 0.25f, 0.25f));
+        e->placeholder = true;
+        run.missingAssets++;
     }
     e->meshes = calloc((size_t)(e->model.meshCount > 0 ? e->model.meshCount : 1), sizeof *e->meshes);
     for (int i = 0; e->meshes && i < e->model.meshCount; i++)
@@ -599,7 +640,7 @@ static void AddModels(Camera3D camera)
         ModelEntry *e = ModelNamed(Field(id, "mesh", &mesh) && mesh.type == STORE_STRING ? mesh.as.str : "");
         if (!e || !e->meshes)
             continue;
-        Color tint = TintOf(id);
+        Color tint = e->placeholder ? (Color){255, 0, 255, 255} : TintOf(id);
         uint8_t layer = FieldTrue(id, "viewmodel") ? DRAW_LAYER_VIEWMODEL : DRAW_LAYER_OPAQUE;
         for (int m = 0; m < e->model.meshCount; m++)
         {
@@ -652,9 +693,10 @@ static void DrawHud(void)
         {
         case HUD_TEXT:
         {
-            int width = MeasureText(h->text, h->size);
-            int x = (int)h->x - (h->align == 1 ? width / 2 : h->align == 2 ? width : 0);
-            DrawText(h->text, x, (int)h->y, h->size, h->color);
+            // The engine's 16 px bitmap font, scaled by size/16.
+            float width = MeasureTextEx(run.font, h->text, (float)h->size, 1).x;
+            float x = h->x - (h->align == 1 ? width / 2 : h->align == 2 ? width : 0);
+            DrawTextEx(run.font, h->text, (Vector2){floorf(x), floorf(h->y)}, (float)h->size, 1, h->color);
             break;
         }
         case HUD_RECT: DrawRectangle((int)h->x, (int)h->y, (int)h->w, (int)h->h, h->color); break;
@@ -670,6 +712,7 @@ static void DrawHud(void)
         }
         }
     }
+    Push(&run.hudCalls, run.hudCount);
     run.hudCount = 0;
 }
 
@@ -703,6 +746,150 @@ static void PollRepl(void)
     }
 }
 
+static double Seconds(void) { return run.gl ? GetTime() : 0; }
+
+// The world shader's light for this frame: the first directional light (its rotation turning
+// (0,-1,0)) or a default sun, over the first ambient light's energy or 0.3, fogged to the clear colour.
+static void SetLights(Camera3D camera)
+{
+    Vector3 dir = Vector3Normalize((Vector3){0.5f, -1.0f, 0.3f}), color = {1, 1, 1}, ambient = {0.3f, 0.3f, 0.3f};
+    bool haveSun = false, haveAmbient = false;
+    int count;
+    StoreId *ids = ThingsOf(run.world.light, &count);
+    for (int i = 0; ids && i < count; i++)
+    {
+        StoreValue type;
+        const char *name = Field(ids[i], "type", &type) && type.type == STORE_SYMBOL
+                               ? StoreSymbolName(&run.store, type.as.sym)
+                               : NULL;
+        float energy = FieldFloat(ids[i], "energy", 1);
+        Matrix m;
+        if (name && !strcmp(name, "directional") && !haveSun && World3DWorldMatrix(&run.world, ids[i], &m))
+        {
+            haveSun = true;
+            Vector3 at = {m.m12, m.m13, m.m14};
+            Vector3 turned = Vector3Subtract(Vector3Transform((Vector3){0, -1, 0}, m), at);
+            if (Vector3Length(turned) > 0)
+                dir = Vector3Normalize(turned);
+            StoreValue c;
+            Vector3 tint = Field(ids[i], "color", &c) && c.type == STORE_VEC3 ? c.as.v : (Vector3){1, 1, 1};
+            color = Vector3Scale(tint, energy);
+        }
+        else if (name && !strcmp(name, "ambient") && !haveAmbient)
+        {
+            haveAmbient = true;
+            ambient = (Vector3){energy, energy, energy};
+        }
+    }
+    free(ids);
+    Color clear = {30, 32, 36, 255};
+    Vector3 fog = {clear.r / 255.0f, clear.g / 255.0f, clear.b / 255.0f};
+    float density = 0.02f;
+    SetShaderValue(run.shader, run.lightDirLoc, &dir, SHADER_UNIFORM_VEC3);
+    SetShaderValue(run.shader, run.lightColorLoc, &color, SHADER_UNIFORM_VEC3);
+    SetShaderValue(run.shader, run.ambientLoc, &ambient, SHADER_UNIFORM_VEC3);
+    SetShaderValue(run.shader, run.fogColorLoc, &fog, SHADER_UNIFORM_VEC3);
+    SetShaderValue(run.shader, run.fogDensityLoc, &density, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(run.shader, run.viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
+}
+
+// Handler errors, kept by the sink with their tick, shown for five seconds along the bottom.
+static void OnError(const char *message)
+{
+    if (run.errorCount == 3)
+    {
+        memmove(&run.errors[0], &run.errors[1], 2 * sizeof run.errors[0]);
+        run.errorCount = 2;
+    }
+    // The error layer does not say whether the engine or game code raised it; both read `game:`.
+    snprintf(run.errors[run.errorCount].text, sizeof run.errors[0].text, "game: %.240s", message);
+    run.errors[run.errorCount].tick = StoreTickCount(&run.store);
+    run.errors[run.errorCount].at = Seconds();
+    run.errorCount++;
+}
+
+static void DrawErrors(void)
+{
+    double now = Seconds();
+    int line = 0;
+    for (int i = run.errorCount - 1; i >= 0; i--)
+    {
+        if (now - run.errors[i].at > 5.0)
+            continue;
+        char text[300];
+        snprintf(text, sizeof text, "tick %" PRIu64 " %s", run.errors[i].tick, run.errors[i].text);
+        Vector2 at = {12, (float)GetScreenHeight() - 24.0f * (float)(++line) - 8};
+        DrawTextEx(run.font, text, at, 16, 1, (Color){255, 70, 70, 255});
+    }
+}
+
+// The diagnostics overlay's own lines, beside CoreDebug's timing readout; --bench prints the same.
+static int OverlayLines(char lines[3][128])
+{
+    const CoreDiagnostics *d = CoreDiagnosticsCurrent();
+    snprintf(lines[0], 128, "tick us last %.0f max %.0f | frame us last %.0f | fps %d", d ? d->tickMicrosLast : 0,
+             d ? d->tickMicrosMax : 0, d ? d->frameMicrosLast : 0, GetFPS());
+    snprintf(lines[1], 128, "draw items %d visible %d draws %d shader switches %d", run.lastStats.items,
+             run.lastStats.visible, run.lastStats.draws, run.lastStats.shaderSwitches);
+    snprintf(lines[2], 128, "things %u | missing assets: %d", StoreCount(&run.store), run.missingAssets);
+    return 3;
+}
+
+static void DrawOverlay(void)
+{
+    char (*lines)[128] = run.overlayText;
+    int n = OverlayLines(lines);
+    if (!run.overlay)
+        return;
+    DrawRectangle(0, 0, 520, 20 + 18 * n + 8, (Color){0, 0, 0, 160});
+    for (int i = 0; i < n; i++)
+        CoreDebugText(&run.debug, (Vector2){(float)run.debug.x, (float)run.debug.y + 18.0f * (float)(i + 1)}, lines[i],
+                      (Color){140, 255, 140, 255}, 0);
+    CoreDebugDraw(&run.debug);
+}
+
+static void TakeShot(void)
+{
+    uint64_t tick = StoreTickCount(&run.store);
+    if (!run.shotEvery || !tick || tick % run.shotEvery || tick == run.lastShot)
+        return;
+    run.lastShot = tick;
+    char path[1024];
+    snprintf(path, sizeof path, "%s/shot_%" PRIu64 ".png", run.shotDir, tick);
+    MakeDirectory(run.shotDir);
+    Image image = LoadImageFromScreen();
+    bool ok = image.data && ExportImage(image, path);
+    UnloadImage(image);
+    if (ok)
+        printf("shot %" PRIu64 " %s\n", tick, path);
+    else
+        TraceLog(LOG_WARNING, "RUN: could not write %s", path);
+    fflush(stdout);
+}
+
+// Once per rendered frame, before the ticks: the pointer is captured while wanted and focused,
+// Escape toggles that, F3 the overlay; neither key reaches the game.
+static void FrameInput(void *context, const EngineInput *frame)
+{
+    (void)context;
+    if (frame->pressed[KEY_ESCAPE])
+        run.captureWanted = !run.captureWanted;
+    if (frame->pressed[KEY_F3])
+    {
+        run.overlay = !run.overlay;
+        printf("overlay %s\n", run.overlay ? "on" : "off");
+        fflush(stdout);
+    }
+    Vector2 delta = CoreMouseCaptureUpdate(&run.capture, run.captureWanted && IsWindowFocused());
+    run.mouseDelta = Vector2Add(run.mouseDelta, delta);
+    if (!run.cursorReported)
+    {
+        run.cursorReported = true;
+        printf("run: cursor captured %s\n", IsCursorHidden() ? "yes" : "no");
+        fflush(stdout);
+    }
+}
+
 static void Draw(void *context, float alpha)
 {
     (void)context;
@@ -714,7 +901,14 @@ static void Draw(void *context, float alpha)
     World3DUpdateTransforms(&run.world, alpha);
     StoreFrame(&run.store, dt);
     CoreParticlesUpdate(&run.particles, dt, NULL, NULL);
+    CoreDebugUpdate(&run.debug, dt);
     Camera3D camera = ChooseCamera();
+    if (run.audioReady)
+    {
+        CoreAudioSetListener(&run.audio, camera.position, Vector3Subtract(camera.target, camera.position), camera.up);
+        CoreAudioUpdate(&run.audio);
+    }
+    SetLights(camera);
     DrawPathBegin(&run.path, camera, GetScreenWidth(), GetScreenHeight());
     BeginMode3D(camera);
     AddTilemaps();
@@ -723,6 +917,10 @@ static void Draw(void *context, float alpha)
     CoreParticlesDraw(&run.particles, camera, NULL, NULL);
     EndMode3D();
     DrawHud();
+    DrawErrors();
+    DrawOverlay();
+    rlDrawRenderBatchActive();
+    TakeShot();
     PollRepl();
 }
 
@@ -977,9 +1175,12 @@ static s7_pointer SchemeMoveAndSlide(s7_scheme *sc, s7_pointer args)
 
 static s7_pointer SchemeTeleport(s7_scheme *sc, s7_pointer args)
 {
-    StoreId id;
+    // (teleport! where) moves the running thing, as move-and-slide! does; (teleport! thing where) another.
+    StoreId id = StoreCurrent(&run.store);
     Vector3 at;
-    if (!ThingArg(sc, s7_car(args), "teleport!", 1, &id) || !VecArg(sc, s7_cadr(args), "teleport!", 2, &at))
+    bool one = !s7_is_pair(s7_cdr(args));
+    if ((!one && !ThingArg(sc, s7_car(args), "teleport!", 1, &id)) ||
+        !VecArg(sc, one ? s7_car(args) : s7_cadr(args), "teleport!", one ? 1 : 2, &at))
         return s7_f(sc);
     if (StorePhaseNow(&run.store) == STORE_PHASE_PRESENTATION)
         return GameS7Error(sc, "teleport! changes shared state; a presentation handler can't call it");
@@ -1098,20 +1299,12 @@ static s7_pointer SchemePlaySound(s7_scheme *sc, s7_pointer args)
 {
     if (!s7_is_string(s7_car(args)))
         return s7_wrong_type_arg_error(sc, "play-sound", 1, s7_car(args), "a file name");
-    if (!run.gl)
+    Vector3 at = {0, 0, 0};
+    s7_pointer where = GameS7KeywordArg(sc, args, "at");
+    if (where && !VecArg(sc, where, "play-sound", 2, &at))
         return s7_f(sc);
-    if (!run.audioOpened && !IsAudioDeviceReady())
-    {
-        InitAudioDevice();
-        run.audioOpened = IsAudioDeviceReady();
-    }
-    if (!IsAudioDeviceReady())
-    {
-        if (!run.audioWarned)
-            TraceLog(LOG_WARNING, "RUN: no audio device; play-sound is silent");
-        run.audioWarned = true;
+    if (!run.gl || !run.audioReady)
         return s7_f(sc);
-    }
     const char *name = s7_string(s7_car(args));
     SoundEntry *e = NULL;
     for (int i = 0; i < run.soundCount && !e; i++)
@@ -1119,21 +1312,30 @@ static s7_pointer SchemePlaySound(s7_scheme *sc, s7_pointer args)
             e = &run.sounds[i];
     if (!e && run.soundCount < MAX_SOUNDS)
     {
+        // Loaded once through the engine's audio service; a missing file is one warning.
         e = &run.sounds[run.soundCount++];
         memset(e, 0, sizeof *e);
         snprintf(e->name, sizeof e->name, "%s", name);
-        char buf[1024];
-        const char *path = AssetPath(name, buf, sizeof buf);
-        if (path)
-            e->sound = LoadSound(path);
-        e->loaded = e->sound.frameCount > 0;
-        if (!e->loaded)
+        const char *path = AssetPath(name, e->path, sizeof e->path);
+        if (!path)
+        {
             TraceLog(LOG_WARNING, "RUN: no sound %s", name);
+            run.missingAssets++;
+        }
+        else
+        {
+            if (path != e->path)
+                snprintf(e->path, sizeof e->path, "%s", path);
+            e->loaded = CoreAudioLoadSound(&run.audio, e->path, "game");
+            if (!e->loaded)
+                TraceLog(LOG_WARNING, "RUN: sound %s could not be loaded or no audio device; it is silent", name);
+        }
     }
     if (!e || !e->loaded)
         return s7_f(sc);
-    PlaySound(e->sound);
-    return s7_t(sc);
+    bool played = where ? CoreAudioPlaySoundAt(&run.audio, e->path, "game", at, 40.0f, 1.0f)
+                        : CoreAudioPlaySound(&run.audio, e->path, "game");
+    return s7_make_boolean(sc, played);
 }
 
 static float FxUnit(void) { return (float)(SplitMix(&run.fxState) >> 40) / (float)(1u << 24); }
@@ -1276,13 +1478,15 @@ static s7_pointer SchemeProfileSet(s7_scheme *sc, s7_pointer args)
 
 static s7_pointer SchemeRgba(s7_scheme *sc, s7_pointer args)
 {
+    // Integers or reals, each rounded and clamped to 0..255: (* 300 hurt) is a fine alpha.
     s7_int c[4] = {0, 0, 0, 255};
     s7_pointer p = args;
     for (int i = 0; i < 4 && s7_is_pair(p); i++, p = s7_cdr(p))
     {
-        if (!s7_is_integer(s7_car(p)))
-            return s7_wrong_type_arg_error(sc, "rgba", i + 1, s7_car(p), "an integer 0 to 255");
-        c[i] = s7_integer(s7_car(p)) & 255;
+        if (!s7_is_real(s7_car(p)))
+            return s7_wrong_type_arg_error(sc, "rgba", i + 1, s7_car(p), "a number 0 to 255");
+        double v = s7_is_integer(s7_car(p)) ? (double)s7_integer(s7_car(p)) : s7_real(s7_car(p));
+        c[i] = v != v ? 0 : v <= 0 ? 0 : v >= 255 ? 255 : (s7_int)floor(v + 0.5);
     }
     return s7_make_integer(sc, c[0] << 24 | c[1] << 16 | c[2] << 8 | c[3]);
 }
@@ -1307,7 +1511,7 @@ static bool RegisterCalls(void)
         {"cell->world", SchemeCellToWorld, 3, 0, false, "(cell->world tilemap x z) -> vec3"},
         {"world->cell", SchemeWorldToCell, 2, 0, false, "(world->cell tilemap point) -> (x z) or #f"},
         {"move-and-slide!", SchemeMoveAndSlide, 0, 1, false, "(move-and-slide! [character]) by velocity * dt"},
-        {"teleport!", SchemeTeleport, 2, 0, false, "(teleport! node world-position)"},
+        {"teleport!", SchemeTeleport, 1, 1, false, "(teleport! [node] world-position)"},
         {"draw-text", SchemeDrawText, 3, 0, true, "(draw-text text x y :size s :color c :align 'left|'center|'right)"},
         {"draw-rect", SchemeDrawRect, 4, 0, true, "(draw-rect x y w h :color c)"},
         {"draw-ring", SchemeDrawRing, 3, 0, true, "(draw-ring x y r :color c)"},
@@ -1338,14 +1542,72 @@ static bool RegisterCalls(void)
 
 /* ---- lifecycle ------------------------------------------------------------------------------- */
 
+static bool Fail(const char *format, const char *detail)
+{
+    fprintf(stderr, "trench: ");
+    fprintf(stderr, format, detail);
+    fprintf(stderr, "\n");
+    return false;
+}
+
+// The engine's bitmap font at 16 px, as core/ui.c loads it: fixed cells positioned by their top-left.
+static bool LoadHudFont(void)
+{
+    run.font = LoadFontEx(run.fontPath, 16, NULL, 0);
+    if (!IsFontValid(run.font) || run.font.texture.id == GetFontDefault().texture.id)
+        return false;
+    for (int i = 0; i < run.font.glyphCount; i++)
+        run.font.glyphs[i].offsetX = 0, run.font.glyphs[i].offsetY = 0;
+    SetTextureFilter(run.font.texture, TEXTURE_FILTER_POINT);
+    run.fontLoaded = true;
+    return true;
+}
+
+// Fits the window to 80% of its monitor at 16:9, centred.
+static void FitWindow(void)
+{
+    int monitor = GetCurrentMonitor();
+    int mw = GetMonitorWidth(monitor), mh = GetMonitorHeight(monitor);
+    if (mw <= 0 || mh <= 0)
+        return;
+    int w = mw * 8 / 10, h = mh * 8 / 10;
+    if (w * 9 > h * 16)
+        w = h * 16 / 9;
+    else
+        h = w * 9 / 16;
+    Vector2 origin = GetMonitorPosition(monitor);
+    SetWindowSize(w, h);
+    SetWindowPosition((int)origin.x + (mw - w) / 2, (int)origin.y + (mh - h) / 2);
+    printf("run: window %dx%d on monitor %dx%d\n", w, h, mw, mh);
+}
+
 static bool InitPresentation(void)
 {
     run.gl = true;
+    FitWindow();
     DrawPathInit(&run.path);
-    run.shader = (Shader){rlGetShaderIdDefault(), rlGetShaderLocsDefault()};
+    ShaderFile files = {run.worldVs, run.worldFs};
+    if (!CoreLoadShaders(&files, 1, &run.shader))
+        return Fail("could not build the world shader %s", run.worldFs);
+    run.shaderLoaded = true;
+    run.normalLoc = GetShaderLocation(run.shader, "matNormal");
+    run.lightDirLoc = GetShaderLocation(run.shader, "lightDir");
+    run.lightColorLoc = GetShaderLocation(run.shader, "lightColor");
+    run.ambientLoc = GetShaderLocation(run.shader, "ambient");
+    run.fogColorLoc = GetShaderLocation(run.shader, "fogColor");
+    run.fogDensityLoc = GetShaderLocation(run.shader, "fogDensity");
+    run.viewPosLoc = GetShaderLocation(run.shader, "viewPos");
+    if (!LoadHudFont())
+        return Fail("could not load the HUD font %s", run.fontPath);
     run.white = (Texture2D){rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    Image grey = GenImageColor(1, 1, (Color){160, 160, 160, 255});
+    run.grey = LoadTextureFromImage(grey);
+    UnloadImage(grey);
     run.fxState = run.seed ^ 0x5eedull;
-    return CoreParticlesInit(&run.particles, 2048);
+    run.audioReady = CoreAudioInit(&run.audio) && CoreAudioAddBus(&run.audio, "game", 1.0f);
+    CoreDebugInit(&run.debug, true);
+    run.debug.font = &run.font;
+    return CoreParticlesInit(&run.particles, 2048) || Fail("out of memory for particles%s", "");
 }
 
 static void FreePresentation(void)
@@ -1358,22 +1620,18 @@ static void FreePresentation(void)
     for (int i = 0; i < run.textureCount; i++)
         if (run.textures[i].texture.id)
             UnloadTexture(run.textures[i].texture);
-    for (int i = 0; i < run.soundCount; i++)
-        if (run.sounds[i].loaded)
-            UnloadSound(run.sounds[i].sound);
-    if (run.audioOpened)
-        CloseAudioDevice();
+    if (run.grey.id)
+        UnloadTexture(run.grey);
+    if (run.fontLoaded)
+        UnloadFont(run.font);
+    if (run.shaderLoaded)
+        CoreUnloadShaders(&run.shader, 1);
+    CoreAudioFree(&run.audio);
+    CoreDebugFree(&run.debug);
+    CoreMouseCaptureRelease(&run.capture);
     DrawPathFree(&run.path);
     CoreParticlesFree(&run.particles);
     run.gl = false;
-}
-
-static bool Fail(const char *format, const char *detail)
-{
-    fprintf(stderr, "trench: ");
-    fprintf(stderr, format, detail);
-    fprintf(stderr, "\n");
-    return false;
 }
 
 static bool Init(void *context)
@@ -1386,7 +1644,19 @@ static bool Init(void *context)
     if (!prelude || !Readable(prelude))
         return Fail("no Scheme prelude core/scheme/kinds.scm beside the engine%s", "");
     snprintf(run.prelude, sizeof run.prelude, "%s", prelude);
+    // The world shader and the HUD font are the engine's too, found the same way.
+    static const char *const engineFiles[3] = {"core/shaders/world.vs", "core/shaders/world.fs",
+                                               "core/fonts/unifont-17.0.04.bdf"};
+    char *targets[3] = {run.worldVs, run.worldFs, run.fontPath};
+    for (int i = 0; i < 3; i++)
+    {
+        const char *path = CoreResolvePath(engineFiles[i], buf, sizeof buf);
+        if (!run.headless && (!path || !Readable(path)))
+            return Fail("no %s beside the engine", engineFiles[i]);
+        snprintf(targets[i], sizeof run.worldVs, "%s", path ? path : "");
+    }
     CoreSetDataRoot(run.dir);
+    GameS7SetErrorSink(OnError);
     uint64_t recordedKinds = 0;
     if (run.replayPath)
     {
@@ -1458,7 +1728,7 @@ static bool Init(void *context)
     }
     run.skipCommands = StoreCommandsPending(&run.store, NULL, NULL, NULL, NULL, 0);
     if (!run.headless && !InitPresentation())
-        return Fail("out of memory for particles%s", "");
+        return false;
     run.ready = true;
     return true;
 }
@@ -1484,12 +1754,20 @@ static void Shutdown(void *context)
                 printf("bench draw items %d visible %d draws %d shader-switches %d texture-switches %d\n",
                        run.lastStats.items, run.lastStats.visible, run.lastStats.draws,
                        run.lastStats.shaderSwitches, run.lastStats.textureSwitches);
+                for (int i = 0; i < 3; i++) /* as the overlay read on the last drawn frame */
+                    printf("overlay: %s\n", run.overlayText[i]);
+            }
+            if (run.hudCalls.count)
+            {
+                qsort(run.hudCalls.items, run.hudCalls.count, sizeof *run.hudCalls.items, CompareDoubles);
+                printf("bench hud calls per frame p50 %.0f\n", run.hudCalls.items[(run.hudCalls.count - 1) / 2]);
             }
             fflush(stdout);
         }
     }
     if (run.gl)
         FreePresentation();
+    GameS7SetErrorSink(NULL);
     GameS7SetInput(NULL);
     if (run.scriptOpen)
         GameS7Close();
@@ -1501,7 +1779,8 @@ static void Shutdown(void *context)
     ReplayClose(&run.replay);
     free(run.ticks.items);
     free(run.frames.items);
-    run.ticks = run.frames = (Samples){0};
+    free(run.hudCalls.items);
+    run.ticks = run.frames = run.hudCalls = (Samples){0};
     run.scriptOpen = run.worldOpen = run.storeOpen = run.ready = false;
     CoreSetDataRoot(GetApplicationDirectory());
 }
@@ -1513,7 +1792,8 @@ static int Usage(const char *problem)
     if (problem)
         fprintf(stderr, "trench: %s\n", problem);
     fprintf(stderr, "usage: trench run <dir> [--headless] [--ticks N] [--seed S] [--record FILE] "
-                    "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE]\n");
+                    "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] "
+                    "[--present] [--shot-every N] [--shot-dir DIR]\n");
     return 2;
 }
 
@@ -1567,6 +1847,7 @@ int GameRun(int argc, char **argv)
 {
     memset(&run, 0, sizeof run);
     lastHash = 0;
+    SetTraceLogLevel(LOG_WARNING); /* raylib's INFO lines would bury the warnings */
     int i = 1;
     if (i < argc && !strcmp(argv[i], "run"))
         i++;
@@ -1586,9 +1867,11 @@ int GameRun(int argc, char **argv)
             run.bot = true, takes = false;
         else if (!strcmp(flag, "--bench"))
             run.bench = true, takes = false;
+        else if (!strcmp(flag, "--present"))
+            run.present = true, takes = false;
         else if (strcmp(flag, "--ticks") && strcmp(flag, "--seed") && strcmp(flag, "--hash-every") &&
                  strcmp(flag, "--record") && strcmp(flag, "--replay") && strcmp(flag, "--save") &&
-                 strcmp(flag, "--load"))
+                 strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir"))
             return Usage("unknown flag");
         else if (!value)
             return Usage("a flag is missing its value");
@@ -1607,6 +1890,13 @@ int GameRun(int argc, char **argv)
             if (!Count(value, &run.hashEvery))
                 return Usage("--hash-every takes a number");
         }
+        else if (!strcmp(flag, "--shot-every"))
+        {
+            if (!Count(value, &run.shotEvery) || !run.shotEvery)
+                return Usage("--shot-every takes a number above 0");
+        }
+        else if (!strcmp(flag, "--shot-dir"))
+            run.shotDir = value;
         else if (!strcmp(flag, "--record"))
             run.recordPath = value;
         else if (!strcmp(flag, "--replay"))
@@ -1618,16 +1908,25 @@ int GameRun(int argc, char **argv)
         if (takes)
             i++;
     }
+    if (run.present && !run.headless)
+        return Usage("--present is for --headless runs; a window presents anyway");
+    if ((run.shotEvery || run.shotDir) && run.headless)
+        return Usage("--shot-every and --shot-dir need a window");
+    if (run.shotEvery && !run.shotDir)
+        run.shotDir = ".";
     if (!ReadProject())
         return 1;
     EngineApplication app = EngineApplicationDefault();
     app.config.title = run.title;
-    app.config.width = 1280;
-    app.config.height = 720;
+    // Opened at a size every display holds, then fitted to the monitor in Init.
+    app.config.width = 1024;
+    app.config.height = 576;
+    app.config.windowFlags = FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT;
     app.config.fixed_dt = RUN_DT;
     app.config.headless = run.headless;
-    app.config.maxTicks = run.maxTicks;
-    app.callbacks = (EngineProject){Init, NULL, Update, Draw, Shutdown};
+    app.config.maxTicks = run.headless ? run.maxTicks : 0; /* windowed, Update stops after the last tick is drawn */
+    run.captureWanted = true;
+    app.callbacks = (EngineProject){Init, FrameInput, Update, Draw, Shutdown};
     app.clearColor = (Color){30, 32, 36, 255};
     int result = EngineRunApplication(&app);
     return result ? 1 : 0;
