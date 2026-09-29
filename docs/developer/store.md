@@ -148,6 +148,11 @@ uint32_t StoreCount(const Store *);
   (recursively) and detaches its guests at their last world transform: the store cannot compute
   world transforms, so it calls the `orphan` hook (§2.6) before detaching, and the world3d module
   writes the world position into the guest's local fields there.
+- A thing can be made local (`bool StoreMarkLocal(Store *, StoreId)`, `StoreIsLocal`) while its
+  `start` is still pending: every field of it then counts as `STORE_LOCAL` for §2.7, and its
+  declared children, present or spawned later, are local too. Local things are left out of
+  `StoreHash`, `StoreSave` (so a load never sees them; the Scheme layer respawns missing `:local`
+  children from the declarations) and nothing else: snapshots keep them and `StoreThings` lists them.
 - Handles never point at freed memory or at a newer thing in the same slot (generation check on
   every call). Ids are 64 bits so a Scheme c-object can carry one in its value word (§5.1).
 

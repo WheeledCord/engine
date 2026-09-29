@@ -130,6 +130,52 @@ keyboard through `mouse-position`, `mouse-delta`, `mouse-wheel`, `mouse-down?` a
 needs a `UiContext`. The raw key and mouse calls cover what a script asks input for until it is
 described as an engine type.
 
+## The store's frontend (`game_s7.c`)
+
+A second, separate Scheme frontend runs games written against the store (`core/store.h`,
+`docs/developer/store.md` §5). It has its own interpreter and leaves `script_s7.c` and the binding
+table alone. `GameS7Open` loads the prelude `core/scheme/kinds.scm` (`define-kind`, its code walk,
+`define-actions`, `clamp`, `map-for-each`); `GameS7LoadGame` loads a game file into a fresh
+environment under the rootlet and then freezes it, so a top-level `set!` fails with rule 2's
+message; `GameS7Reload` loads it again into another environment and swaps the handlers in, refusing
+when a kind's fields changed; `GameS7Eval` is the REPL.
+
+- A thing is a c-object whose value word is its store handle, one object per live handle, so `eq?`
+  works. `(t 'field)` reads a declared child, then a field; `(set! (t 'field) v)` writes through
+  the store, which applies the rules. A map field reads as a view (`(ammo 'pistol)`, `map-keys`,
+  `map-values`, `map-remove!`, `map-for-each`), a grid as a view (`grid-ref`, `grid-set!`,
+  `grid-fill!`, `grid-fill-rect!`, `grid-width`, `grid-height`), a list or set as a fresh list.
+- Inside a kind's handlers and helpers, fields, children (nested ones too) and helpers are plain
+  names; the walk turns them into `(%field self i)`, `(%set-field! self i v)`, `(%child self slot)`
+  and `((%helper-ref self 'name) self ...)`.
+- Calls: `spawn` (`:at`, `:owner`, `:parent`, any field), `remove`, `attach!`, `detach!`, `parent`,
+  `children`, `first-child`, `child`, `is?`, `kind-of`, `things`, `game`, `local-player`,
+  `players`, `send`, `after`, `go`, `random`, `tick-time`, `held?`, `pressed?`, `input-vector`,
+  `mouse-motion`, the vec3 calls (`vec3 vx vy vz v+ v- v* vscale vlength vdistance vnormalize vdot
+  vcross rotate-y heading aim spread`), and at the REPL `inspect`, `reload`, `save-game`,
+  `load-game`, `snapshot`, `restore`. `host-game` and `join-game` say networking comes in phase 2.
+- A handler that raises is reported as `<kind> #<index> <event>: <message> (<file>:<line>)` at most
+  once per kind and event per second, and the game carries on. The five rules' messages are
+  proposal A4's.
+
+None of these calls is a `script_api.def` row, and none is meant to become one: they take keyword
+arguments (`(spawn 'soldier :at v :owner 2)`), things, map and grid views and vec3 float-vectors,
+and the table has no types for any of those. Other modules add theirs the same way, with
+`GameS7Define`, `GameS7DefineTyped` (for calls that never call back into Scheme) and
+`GameS7DefineMethod`, converting with `GameS7Thing`, `GameS7ToId`, `GameS7ToValue`,
+`GameS7FromValue`, `GameS7Vec3`, `GameS7ToVec3` and `GameS7KeywordArg`. The world calls
+(`raycast`, `move-and-slide!`, `nearest` ...) and the presentation calls (`draw-text`,
+`play-sound` ...) are registered that way by world3d and the runner; until they are, a handler that
+calls one reports it as unbound.
+
+A child declared `:local #t` is spawned and then made local (`StoreMarkLocal`), with its own
+children: presentation handlers may write its fields and gameplay handlers may not read them. Saves
+leave it out, and `(load-game path)` (or `GameS7RestoreLocalChildren` after a runner's `StoreLoad`)
+spawns it again from the declaration.
+
+Not yet: `:up` on `detach!` tilts by the normal's slopes and is exact only for an upright normal;
+`:keep-world` needs a `world-position` call registered by world3d.
+
 ## Adding to the engine
 
 - A thing a script makes, holds and changes is an engine type: describe its properties, methods and

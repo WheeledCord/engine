@@ -112,7 +112,7 @@ sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) scr
 	cp gameplay/script/*.h gameplay/script/script_api.def $(SDK)/include/gameplay/script/
 	cp $(RLSRC)/raylib.h $(RLSRC)/raymath.h $(RLSRC)/rlgl.h $(SDK)/include/
 	cp $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(SDK)/lib/
-	cp -r core/fonts core/shaders $(SDK)/share/engine/
+	cp -r core/fonts core/shaders core/scheme $(SDK)/share/engine/
 	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(BUILD)/script-objects.md $(SDK)/share/engine/docs/
 	cp tools/engine_build.py $(SDK)/bin/engine-build
 	cp tools/engine_new.py $(SDK)/bin/engine-new

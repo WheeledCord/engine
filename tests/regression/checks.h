@@ -16,4 +16,7 @@ int DrawPathChecks(void);
 /* The store: kinds, fields, the tree, the tick order, rules, snapshot, hash, save and load. */
 int StoreChecks(void);
 
+/* The store's Scheme frontend: define-kind's code walk, the calls, and the five rule errors. */
+int GameChecks(void);
+
 #endif

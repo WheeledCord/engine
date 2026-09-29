@@ -292,6 +292,25 @@ StoreId StoreSpawn(Store *store, StoreKind kind, int owner, StoreId parent, Stor
  * @return True when removed; false for a stale id or a refused removal, with StoreLastError set. */
 bool StoreRemove(Store *store, StoreId id);
 
+/** @brief Makes a thing local (proposal B1's :local children): presentation only on this machine.
+ *
+ * Every field of a local thing counts as STORE_LOCAL for the rules (a presentation handler may
+ * write it, a gameplay handler may not read it). Its declared children are local too, those
+ * already there and those spawned under it later. StoreHash and StoreSave leave local things and
+ * their timers out, so a load never sees them (the language recreates them from its declarations);
+ * snapshots keep them as they are, and StoreThings still lists them. A local thing's random stream
+ * was still seeded from its spawner's, as every spawn's is.
+ * @param store Store.
+ * @param id Thing whose `start` is still pending: marking is refused once it has started.
+ * @return True when marked; false for a stale or started thing, with StoreLastError set. */
+bool StoreMarkLocal(Store *store, StoreId id);
+
+/** @brief Says whether a thing is local (StoreMarkLocal, or a declared child of a local thing).
+ * @param store Store.
+ * @param id Thing.
+ * @return True for a live local thing. */
+bool StoreIsLocal(const Store *store, StoreId id);
+
 /** @brief Says whether a handle names a thing that exists and has not been removed.
  * @param store Store.
  * @param id Handle.
