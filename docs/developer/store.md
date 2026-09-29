@@ -748,21 +748,30 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
   Spawns create the thing raw (no declared children, no `start`); updates write the differing fields
   with `StoreSetEngine`; header changes reparent raw; removes remove it. After a new thing appears the
   runner is told (`onArrived`), so the Scheme layer can spawn its declared `:local` children.
-- **Interpolation (B3.5).** Of a remote thing, only transform fields registered with
-  `StoreNetInterpolate(net, kind, field)` (the runner registers `node`'s `position` and `rotation`)
-  are held back: each tick they are set to the value interpolated between the two applied states
-  either side of `renderTick = newest sender tick received + ticks since it arrived - 6` (100 ms).
-  A parent change between the two states is a jump (the later value, B3.5). **Every other field
-  applies on arrival**: B3.4 requires a message's carried state to be visible before the message,
-  and a held-back field would be overwritten by an older interpolated one. This refines B3.5.
+- **Interpolation (B3.5), one tick per remote thing.** States are not applied on arrival. Each
+  tick, per sender, `renderTick = newest sender tick received + ticks since it arrived - 6` (100 ms);
+  every remote thing from that sender is written (with `StoreSetEngine`) as it stood at `renderTick`:
+  fields registered with `StoreNetInterpolate(net, kind, field)` (any FLOAT or VEC3, not only
+  transforms) are blended between the two received states either side of `renderTick`; every other
+  field, the header (parent, owner) and spawns and removes come from the earlier of the two. A parent
+  change between the two states is a jump (the later value). So a remote thing never shows two
+  ticks at once. (Replaces a first cut that applied non-registered fields on arrival:
+  `resolutions.md` §20 in the design repository.)
+- **Releasing ownership.** A machine that stops owning a thing by its own write (a detach, or an
+  attach under another owner's thing) at its tick D ignores the header of that thing in states
+  whose sender has not yet acknowledged a capture of this machine at or after D, so a grab and a
+  drop inside one round trip cannot re-attach it.
+- **Large states.** A state packet over 1,200 bytes goes reliable on channel 0 (B3.2).
 
 ### 9.3 Messages, commands, effects (B2.4, B3.4)
 
 - The store gains one hook, `StoreHooks.outgoing(user, target, event, args, count)`, called for a
   message or command whose target is owned by a machine that is not local, instead of dropping it.
 - The net layer sends it reliable on channel 0 **in the same packet as a state delta for that peer**
-  (the packet the next send would produce, sent now and reliably). The receiver applies the state,
-  then delivers the message with `StoreSend` (arguments translated, §9.1).
+  (it leaves at the end of the tick that queued it, with that tick's capture). The receiver queues
+  the message with the sender tick it came with and delivers it with `StoreSend` (arguments
+  translated, §9.1) in the first tick whose `renderTick` for that sender reaches it, after that
+  tick's state is written: a message never overtakes its state and never arrives ahead of it.
 - The host, receiving a message for a thing it does not own, forwards it to that thing's owner with
   its own delta. A client receiving a message for a thing it no longer owns sends it back to the
   host once (a flag in the packet); the host delivers it to the current owner, or drops it with a
@@ -796,6 +805,7 @@ typedef struct StoreNetConfig {
     void (*onJoined)(void *user, int player);                 /* client: welcome received */
     void (*onEnded)(void *user, const char *why);             /* refused, dropped, host left */
     const char *game;
+    bool dedicated;          /* host only: plays no one; local owners {0}; clients are players 2+ */
 } StoreNetConfig;
 bool StoreNetHost(StoreNet *, Store *, const StoreNetConfig *);
 bool StoreNetJoin(StoreNet *, Store *, const StoreNetConfig *);   /* sends hello to peer 0 */
@@ -813,6 +823,31 @@ uint64_t StoreNetStateHash(const StoreNet *);   /* shared fields of replicated t
                                                    every machine once the game has been still */
 void StoreNetFree(StoreNet *);
 ```
+
+And in the store (`core/store.h`), for native code (B7): `bool StoreOwnedHere(const Store *, StoreId)`
+(its root owner is one of this machine's local owners) and `int StoreFieldOffset(const Store *,
+StoreKind, int field)` (byte offset in the shared or local block, by the field's flags; -1 for none).
+
+### 9.5b The shared transport (`core/store_net_enet.{h,c}`)
+
+The ENet glue lives in core, so the runner and a C game use the same code:
+
+```c
+typedef void (*StoreNetLinkTap)(void *user, int peer, int channel, const void *data, size_t size);
+typedef struct StoreNetLink { StoreNet net; uint64_t wireSent, wireReceived; /* ENet's totals */ ... } StoreNetLink;
+bool StoreNetLinkHost(StoreNetLink *, Store *, const StoreNetConfig *, uint16_t port);
+bool StoreNetLinkJoin(StoreNetLink *, Store *, const StoreNetConfig *, const char *address, uint16_t port);
+bool StoreNetLinkInterpolate(StoreNetLink *, StoreKind, const char *field);
+void StoreNetLinkPoll(StoreNetLink *, uint32_t timeoutMs);
+void StoreNetLinkFlush(StoreNetLink *);
+const char *StoreNetLinkEnded(const StoreNetLink *);   /* NULL while live or joining, else why */
+void StoreNetLinkSetTap(StoreNetLink *, StoreNetLinkTap, void *user);   /* sees every received packet */
+void StoreNetLinkClose(StoreNetLink *, double lingerSeconds);
+```
+
+The link supplies `config.send`, maps transport peers as §9.5 says, retries a join for 5 s, and
+counts ENet's own wire totals (headers and acknowledgements included), which is what a byte gate
+compares.
 
 Transport peers are numbered by the caller: on a client the host is peer 0; on the host a client's
 peer number is its player id.
