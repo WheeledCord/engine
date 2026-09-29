@@ -2297,23 +2297,60 @@ static s7_pointer SchemeGame(s7_scheme *sc, s7_pointer args)
     return s7_car(found);
 }
 
+// The runner's networking (docs/developer/store.md §9.6); none: one machine, player 1.
+static GameS7Network network;
+
+void GameS7SetNetwork(const GameS7Network *hooks)
+{
+    memset(&network, 0, sizeof network);
+    if (hooks)
+        network = *hooks;
+}
+
 static s7_pointer SchemeLocalPlayer(s7_scheme *sc, s7_pointer args)
 {
     (void)args;
-    return s7_make_integer(sc, 1);
+    return s7_make_integer(sc, network.player ? network.player(network.user) : 1);
 }
 
 static s7_pointer SchemePlayers(s7_scheme *sc, s7_pointer args)
 {
     (void)args;
-    return s7_list(sc, 1, s7_make_integer(sc, 1));
+    int ids[64], n = network.players ? network.players(network.user, ids, 64) : 0;
+    if (!network.players)
+        ids[0] = 1, n = 1;
+    s7_pointer list = s7_nil(sc);
+    for (int i = (n < 64 ? n : 64) - 1; i >= 0; i--)
+        list = s7_cons(sc, s7_make_integer(sc, ids[i]), list);
+    return list;
 }
 
-static s7_pointer SchemeNetworking(s7_scheme *sc, s7_pointer args)
+// host-game and join-game come from a key press: gameplay code runs again on replay and on other
+// machines, so it can't open a session.
+static s7_pointer Session(s7_scheme *sc, s7_pointer args, bool host)
 {
-    (void)args;
-    return Fail(sc, "networking comes in phase 2");
+    const char *name = host ? "host-game" : "join-game";
+    s7_pointer address = host ? NULL : s7_car(args), port = host ? s7_car(args) : s7_cadr(args);
+    if (StorePhaseNow(game.store) == STORE_PHASE_GAMEPLAY)
+        return Fail(sc, "%s is for presentation: call it from a key press in a frame handler or from the "
+                        "REPL. A gameplay handler runs again on replay and on other machines.",
+                    name);
+    if (address && !s7_is_string(address))
+        return s7_wrong_type_arg_error(sc, name, 1, address, "an address string");
+    if (!s7_is_integer(port) || s7_integer(port) < 1 || s7_integer(port) > 65535)
+        return s7_wrong_type_arg_error(sc, name, host ? 1 : 2, port, "a port from 1 to 65535");
+    char why[256] = "";
+    if (host ? !network.host : !network.join)
+        return Fail(sc, "%s needs the runner (trench run), which owns the sockets", name);
+    bool ok = host ? network.host(network.user, (int)s7_integer(port), why, sizeof why)
+                   : network.join(network.user, s7_string(address), (int)s7_integer(port), why, sizeof why);
+    if (!ok)
+        return Fail(sc, "%s: %s", name, why[0] ? why : "it could not start");
+    return s7_t(sc);
 }
+
+static s7_pointer SchemeHostGame(s7_scheme *sc, s7_pointer args) { return Session(sc, args, true); }
+static s7_pointer SchemeJoinGame(s7_scheme *sc, s7_pointer args) { return Session(sc, args, false); }
 
 // ---- time, randomness, messages, states -------------------------------------------------------
 // Gameplay draws from the running thing's stream, presentation from the local one, and code
@@ -2770,10 +2807,10 @@ static const Call calls[] = {
     {"kind-of", SchemeKindOf, 1, 0, false, true, "(kind-of thing) its kind's name"},
     {"things", SchemeThings, 0, 1, false, true, "(things 'kind): things of a kind and derived kinds, in id order"},
     {"game", SchemeGame, 0, 0, false, true, "(game): the first thing of the kind named game"},
-    {"local-player", SchemeLocalPlayer, 0, 0, false, true, "(local-player): 1 until networking"},
-    {"players", SchemePlayers, 0, 0, false, true, "(players): '(1) until networking"},
-    {"host-game", SchemeNetworking, 0, 0, true, true, "networking comes in phase 2"},
-    {"join-game", SchemeNetworking, 0, 0, true, true, "networking comes in phase 2"},
+    {"local-player", SchemeLocalPlayer, 0, 0, false, true, "(local-player): this machine's player, 1 on the host"},
+    {"players", SchemePlayers, 0, 0, false, true, "(players): the players in the session, ascending"},
+    {"host-game", SchemeHostGame, 1, 0, false, true, "(host-game port): host a session (presentation only)"},
+    {"join-game", SchemeJoinGame, 2, 0, false, true, "(join-game address port): join one (presentation only)"},
     {"random", SchemeRandom, 1, 0, false, true, "(random n): [0, n) from the running thing's stream"},
     {"tick-time", SchemeTickTime, 0, 0, false, true, "(tick-time): seconds since the world started"},
     {"after", SchemeAfter, 2, 0, true, true, "(after seconds 'event args...) a timer on self"},

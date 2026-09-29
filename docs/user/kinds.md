@@ -40,19 +40,24 @@ screen for five seconds, prefixed `game:`, besides being printed.
 
 | Flag | Meaning |
 |---|---|
-| `--headless` | no window, GL or audio; ticks as fast as the CPU allows |
+| `--headless` | no window, GL or audio; ticks as fast as the CPU allows (at 60 ticks a second in a live session) |
 | `--ticks N` | stop after N ticks |
 | `--seed S` | world seed (default: from the clock) |
-| `--record FILE` | record the session's input and player commands |
+| `--record FILE` | record the session's input, player commands and the packets that arrived |
 | `--replay FILE` | replay a recording; refused when the game's kinds changed since it was made |
 | `--hash-every N` | print `tick T hash H` every N ticks; the last tick's line is always printed |
 | `--bot` | synthesize input from the seed: a random walk over the actions and the mouse |
-| `--bench` | print tick (and, in a window, frame) microseconds p50/p99/max and the draw stats |
+| `--bot-until N` | with `--bot`: no input after tick N, so the world comes to rest |
+| `--bench` | print tick (and, in a window, frame) microseconds p50/p99/max and the draw stats; in a session also `net sent X B/s received Y B/s` |
 | `--save FILE` / `--load FILE` | save the world on exit / load one after the game file |
 | `--present` | with `--headless` only: also run the `frame`, `-changed` and `draw-hud` handlers each tick, drawing nothing; `--bench` then prints the HUD calls per frame |
 | `--shot-every N` | in a window only: save a screenshot every N ticks, printing `shot T PATH` |
 | `--shot-dir DIR` | where the screenshots go, as `DIR/shot_<tick>.png` (default: the current directory) |
 | `--no-time-limit` | let handlers run as long as they take (by default one running over 50 ms is stopped) |
+| `--host PORT` | host a co-op session on that UDP port |
+| `--join ADDRESS:PORT` | join one, such as `--join 192.168.1.20:7777` |
+| `--print-field KIND FIELD` | at the end print `field KIND FIELD VALUE` for the first thing of KIND |
+| `--print-count KIND` | at the end print `count KIND N`, derived kinds included |
 
 With no display (over ssh, say) a windowed run exits at once with `Engine: no display; run with
 --headless or under a display`.
@@ -63,6 +68,44 @@ A recording replayed in a fresh process with the same build reaches the same has
 trench run mygame --headless --bot --ticks 600 --seed 7 --record run.replay
 trench run mygame --headless --replay run.replay
 ```
+
+## Co-op
+
+One machine hosts and the others join, from the command line or from the game:
+
+```
+trench run mygame --host 7777                  # player 1, and owner of the world
+trench run mygame --join 192.168.1.20:7777     # players 2 to 16, one machine each
+```
+
+`(host-game port)` and `(join-game "address" port)` do the same while the game runs. They come
+from a key press, so call them from a `frame` handler or the REPL; a gameplay handler that calls
+them is an error, because gameplay code runs again on replay and on other machines. `(local-player)`
+is this machine's player (1 on the host; a client's id once the host has welcomed it) and
+`(players)` lists everyone in the session.
+
+A game needs nothing more for co-op than to spawn each player's things in `game`'s
+`player-joined` handler, `:owner` that player:
+
+```scheme
+(on (player-joined p)
+  (spawn 'soldier :owner p :at (spot-for p)))
+```
+
+The engine sends `player-joined` for the host's own player at start and for each client as it
+joins; a joining machine spawns no `game` of its own and gets the host's world. When a player
+leaves, the things they spawned go and `game` hears `player-left`. Every handler runs on the
+machine that owns its thing; `play-sound` and `burst` from gameplay code are shown on every machine.
+A client whose game declares other kinds than the host's is refused with the kinds that differ
+(`kinds differ: crate (missing on the host)`); that, a join the host never answers within 5 s, and
+the host leaving each print `run: the session ended: <why>` and end the run with exit status 1.
+Ctrl+C on a client leaves the session cleanly. A headless host that reaches its `--ticks` waits up
+to 5 s for its clients to finish theirs before it leaves.
+
+Each machine can record its side (`--record`); replaying it opens no socket, takes whether it
+hosted or joined from the recording (a `--host` or `--join` given with `--replay` is ignored, with
+a note) and reaches the same hashes as the live run. `tests/regression/net_game/` is a minimal
+co-op game.
 
 In a window, the terminal is a REPL on the running game (`(things 'player)`, `(inspect (game))`,
 `(reload)`). REPL lines are not recorded.

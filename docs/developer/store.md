@@ -549,7 +549,8 @@ kind distance), `path-next` (tilemap from to), `cell->world`, `world->cell`, `mo
 `draw-ring` (x y r :color), `draw-image` (name x y), `screen-width`, `screen-height`, `rgba`,
 colour symbols `white black red ...`, `play-sound` (name :at), `burst` (preset :at), `profile-ref`,
 `profile-set!` (a per-player key/value file beside the project, presentation only), `format` (s7's).
-Networking: `host-game` and `join-game` exist and raise `networking comes in phase 2`. REPL:
+Networking: `(host-game port)`, `(join-game address port)` (presentation or REPL only; §9.6),
+`local-player`, `players`, answered through `GameS7SetNetwork` by the runner. REPL:
 `(things 'kind)`, `(inspect thing)` prints every field, `(reload)`, `(save-game path)`,
 `(load-game path)`, `(snapshot)`, `(restore s)`.
 
@@ -599,6 +600,7 @@ executable (engine-build copies it) or the directory given as the first argument
                      "shot T PATH"
 --shot-dir DIR       where --shot-every writes (default: the current directory)
 --no-time-limit      GameS7SetHandlerLimit(0): no handler is stopped (default 0.05 s)
+--host PORT / --join ADDRESS:PORT, --bot-until N, --print-field KIND FIELD, --print-count KIND: §9.6
 ```
 
 A handler that runs past the limit (proposal B2.6, 50 ms) is stopped: `Run` in game_s7.c arms the
@@ -642,11 +644,13 @@ play by this work; the user does that on their hardware.
 
 ```c
 typedef struct ReplayTick { uint32_t actions; uint32_t pressed; float mouseDx, mouseDy;
-                            uint16_t commandCount; /* commands follow in the file */ } ReplayTick;
+                            uint16_t commandCount, packetCount; /* commands, then packets */ } ReplayTick;
 bool ReplayOpenWrite(Replay *, const char *path, uint64_t seed, const char *engineRevision, uint64_t kindsHash);
-bool ReplayWriteTick(Replay *, const ReplayTick *, const ReplayCommand *commands);
-bool ReplayOpenRead(Replay *, const char *path, uint64_t *seed, uint64_t *kindsHash);
+bool ReplaySetRole(Replay *, ReplayRole role, int player);           /* §9.6 */
+bool ReplayWriteTick(Replay *, const ReplayTick *, const ReplayCommand *commands, const ReplayPacket *packets);
+bool ReplayOpenRead(Replay *, const char *path, uint64_t *seed, uint64_t *kindsHash); /* role in Replay */
 bool ReplayReadTick(Replay *, ReplayTick *, ReplayCommand *commands, int max);
+bool ReplayReadPacket(Replay *, ReplayPacket *);                     /* the tick's packets, in order */
 void ReplayClose(Replay *);
 ```
 
@@ -823,6 +827,44 @@ arrival tick, channel and peer; replaying feeds them back at the same ticks inst
 a client's or the host's session replays exactly. `--bench` prints bytes per second sent and
 received. The kinds check refusal is printed and the process exits nonzero.
 
+How it is built:
+
+- **Calls.** `host-game`/`join-game` are refused in a gameplay handler (`host-game is for
+  presentation: ...`); from a `frame` handler or the REPL they start the session at once. game_s7.c
+  answers them and `local-player`/`players` through `GameS7SetNetwork` (runner-provided hooks).
+- **Setup.** Hosting: `StoreNetHost` after world3d's hooks and the game are in (so store_net chains
+  in front), local owners {0, 1}; `game` is spawned and told `player-joined 1` as in phase 1. Joining:
+  no `game`, no `player-joined`; ENet connects (retried for up to 5 s), `StoreNetJoin` says hello on
+  connect, and until the welcome the runner ticks nothing but the network; the client's tick count
+  (`--ticks`, `--bot-until`) starts at the welcome. store_net sets the local owners to {p} at the
+  welcome (`onJoined`), which the runner repeats.
+- **Transport.** On a client the host's ENet peer is peer 0. On the host a connecting ENet peer takes
+  the lowest free player id from 2 and that is its store_net peer number (`StoreNetPeerConnected`);
+  a disconnect is `StoreNetPeerLeft`. Per tick: poll ENet (each event to store_net) ->
+  `StoreNetBeforeTick` -> `GameS7RestoreLocalChildren` once if anything arrived (their `:local`
+  children) -> input -> `World3DBeginTick` -> `StoreTick` -> `StoreNetAfterTick` -> flush. Things
+  store_net creates go through the store's `spawned` hook, so world3d caches their transforms.
+  Headless, a live session keeps to 60 ticks a second (it sleeps; `--bench` leaves the sleep out).
+- **Effects.** `onEffect` plays the sound (at its place; a sound given no `:at` travels with a NaN
+  x) or bursts the preset in a window, and does nothing headless.
+- **Ending.** A refusal, a join with no welcome in 5 s, or the host leaving prints `run: the
+  session ended: <why>`; the run ends and exits 1. At exit every networked run prints `net state
+  hash H` (`StoreNetStateHash`) after its `tick T hash H`. Ctrl+C disconnects cleanly. A headless
+  host that reached its `--ticks` waits up to 5 s for its clients to leave before it closes, so
+  that clients finishing a moment later are not told the host left.
+- **Flags added for the checks.** `--bot-until N`: bot input only up to tick N, zero after.
+  `--print-field KIND FIELD` prints `field KIND FIELD VALUE` for the first thing of KIND at exit;
+  `--print-count KIND` prints `count KIND N`.
+- **Replay format (version 2).** The header gains the role (`REPLAY_ROLE_NONE/HOST/CLIENT`, u32)
+  and the player id (u32; a client's is written at the welcome); each tick record gains a packet
+  count (u16) and, after its commands, that many packets: store_net peer (u32), channel (u8), size
+  (u32), bytes. Channels 252-255 are transport events with no bytes: a session hosted or joined at
+  that tick from `host-game`/`join-game`, a peer connected, a peer left. A client records from its
+  welcome tick. The commands recorded are those queued before the tick's poll, so messages that
+  arrived are not recorded twice. Replaying a networked recording opens no socket: the role comes
+  from the header (`--host`/`--join` are ignored with a note), packets go to `StoreNetReceive` at
+  their ticks and outgoing ones are dropped. Version 1 files still read (no role, no packets).
+
 ### 9.7 Checks
 
 - `tests/regression/net_checks.c`: three stores in one process joined by an in-memory transport
@@ -833,6 +875,13 @@ received. The kinds check refusal is printed and the process exits nonzero.
   client-owned thing after its carried state; an attach by the host moves ownership to the client
   and a detach back; a kinds mismatch is refused with the kind named; a leaver's roots are removed and
   guests orphaned; bytes per state packet for 300 things with one field changing is under 1 KB.
-- The runner: a headless host and two headless bot clients of SWAT Tower as three processes over
-  loopback for 1,200 ticks, then 120 still ticks; all three print the same `StoreNetStateHash`, and
-  none prints `ERROR`. Replaying the host's recording reproduces its hashes.
+- The runner (`tests/regression/runner_checks.c`, built): three processes of
+  `tests/regression/net_game` (a host and two clients, 1,500 ticks, bots until tick 600) print the
+  same `net state hash`, no `ERROR`, and the host counts 3 hellos; the host's and a client's
+  recordings replay to their live `tick 1500 hash`. Three processes of SWAT Tower with bots
+  throughout for 1,200 ticks: no `ERROR`, 3 soldiers on every machine, the host's bytes per second
+  per client printed (SWAT Tower is never still, so its state hashes are not compared). Also: things
+  store_net creates reach world3d's spawned hook; `(host-game port)` from a frame handler hosts and
+  its recording replays; a join nobody answers, a kinds refusal and a host leaving exit 1; Ctrl+C on
+  a client leaves cleanly. The checks are skipped with a note when ENet cannot bind a loopback
+  port.

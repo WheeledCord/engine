@@ -3,12 +3,16 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 #include "replay.h"
+#include <stdlib.h>
 #include <string.h>
 
 #define REPLAY_MAGIC "TRENCHREPLAY"
-#define REPLAY_VERSION 1u
+#define REPLAY_VERSION 2u /* 1: no role, no packets */
 #define REPLAY_REVISION 64
 #define REPLAY_SLOT 64
+#define REPLAY_HEADER (16 + 8 + 8 + REPLAY_REVISION)
+#define REPLAY_ROLE_AT REPLAY_HEADER /* version 2: role and player, u32 each */
+#define REPLAY_MAX_PACKET (1024u * 1024u)
 
 static void Put32(unsigned char *p, uint32_t v)
 {
@@ -112,7 +116,8 @@ bool ReplayOpenWrite(Replay *replay, const char *path, uint64_t seed, const char
     if (!replay->file)
         return false;
     replay->writing = true;
-    unsigned char header[16 + 8 + 8 + REPLAY_REVISION] = {0};
+    replay->version = REPLAY_VERSION;
+    unsigned char header[REPLAY_HEADER + 8] = {0};
     memcpy(header, REPLAY_MAGIC, 12);
     Put32(header + 12, REPLAY_VERSION);
     Put64(header + 16, seed);
@@ -127,17 +132,35 @@ bool ReplayOpenWrite(Replay *replay, const char *path, uint64_t seed, const char
     return true;
 }
 
-bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand *commands)
+bool ReplaySetRole(Replay *replay, ReplayRole role, int player)
 {
-    if (!replay || !tick || (tick->commandCount && !commands))
+    if (!replay || !replay->file || !replay->writing)
         return false;
-    unsigned char head[18];
+    long at = ftell(replay->file);
+    unsigned char bytes[8];
+    Put32(bytes, (uint32_t)role);
+    Put32(bytes + 4, (uint32_t)player);
+    bool ok = at >= 0 && !fseek(replay->file, REPLAY_ROLE_AT, SEEK_SET) && Write(replay, bytes, sizeof bytes);
+    ok = at >= 0 && !fseek(replay->file, at, SEEK_SET) && ok;
+    if (ok)
+        replay->role = role, replay->player = player;
+    return ok;
+}
+
+bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand *commands,
+                     const ReplayPacket *packets)
+{
+    if (!replay || !tick || (tick->commandCount && !commands) || (tick->packetCount && !packets))
+        return false;
+    unsigned char head[20];
     Put32(head, tick->actions);
     Put32(head + 4, tick->pressed);
     Put32(head + 8, FloatBits(tick->mouseDx));
     Put32(head + 12, FloatBits(tick->mouseDy));
     head[16] = (unsigned char)(tick->commandCount & 0xff);
     head[17] = (unsigned char)(tick->commandCount >> 8);
+    head[18] = (unsigned char)(tick->packetCount & 0xff);
+    head[19] = (unsigned char)(tick->packetCount >> 8);
     if (!Write(replay, head, sizeof head))
         return false;
     for (int i = 0; i < tick->commandCount; i++)
@@ -154,6 +177,18 @@ bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand
         if (!Write(replay, bytes, sizeof bytes))
             return false;
     }
+    for (int i = 0; i < tick->packetCount; i++)
+    {
+        const ReplayPacket *p = &packets[i];
+        unsigned char bytes[9];
+        if (p->size > REPLAY_MAX_PACKET || (p->size && !p->data))
+            return false;
+        Put32(bytes, (uint32_t)p->peer);
+        bytes[4] = (unsigned char)p->channel;
+        Put32(bytes + 5, (uint32_t)p->size);
+        if (!Write(replay, bytes, sizeof bytes) || (p->size && !Write(replay, p->data, p->size)))
+            return false;
+    }
     replay->ticks++;
     return true;
 }
@@ -166,12 +201,21 @@ bool ReplayOpenRead(Replay *replay, const char *path, uint64_t *seed, uint64_t *
     replay->file = fopen(path, "rb");
     if (!replay->file)
         return false;
-    unsigned char header[16 + 8 + 8 + REPLAY_REVISION];
-    if (!Read(replay, header, sizeof header) || memcmp(header, REPLAY_MAGIC, 12) ||
-        Get32(header + 12) != REPLAY_VERSION)
+    unsigned char header[REPLAY_HEADER + 8];
+    uint32_t version = 0;
+    if (!Read(replay, header, REPLAY_HEADER) || memcmp(header, REPLAY_MAGIC, 12) ||
+        ((version = Get32(header + 12)) != 1 && version != REPLAY_VERSION) ||
+        (version >= 2 && !Read(replay, header + REPLAY_HEADER, 8)))
     {
         ReplayClose(replay);
         return false;
+    }
+    replay->version = version;
+    if (version >= 2)
+    {
+        uint32_t role = Get32(header + REPLAY_ROLE_AT);
+        replay->role = role <= REPLAY_ROLE_CLIENT ? (ReplayRole)role : REPLAY_ROLE_NONE;
+        replay->player = (int)Get32(header + REPLAY_ROLE_AT + 4);
     }
     if (seed)
         *seed = Get64(header + 16);
@@ -182,14 +226,22 @@ bool ReplayOpenRead(Replay *replay, const char *path, uint64_t *seed, uint64_t *
 
 bool ReplayReadTick(Replay *replay, ReplayTick *tick, ReplayCommand *commands, int max)
 {
-    unsigned char head[18];
-    if (!tick || !Read(replay, head, sizeof head))
+    unsigned char head[20];
+    ReplayPacket skipped;
+    while (replay && replay->unread > 0)
+    {
+        if (!ReplayReadPacket(replay, &skipped))
+            return false;
+        free(skipped.data);
+    }
+    if (!tick || !Read(replay, head, replay && replay->version >= 2 ? 20 : 18))
         return false;
     tick->actions = Get32(head);
     tick->pressed = Get32(head + 4);
     tick->mouseDx = BitsFloat(Get32(head + 8));
     tick->mouseDy = BitsFloat(Get32(head + 12));
     tick->commandCount = (uint16_t)(head[16] | head[17] << 8);
+    tick->packetCount = replay->version >= 2 ? (uint16_t)(head[18] | head[19] << 8) : 0;
     for (int i = 0; i < tick->commandCount; i++)
     {
         unsigned char bytes[8 + 32 + 4 + REPLAY_MAX_ARGS * (4 + REPLAY_SLOT)];
@@ -206,7 +258,31 @@ bool ReplayReadTick(Replay *replay, ReplayTick *tick, ReplayCommand *commands, i
         for (int a = 0; a < c->count; a++)
             DecodeValue(bytes + 44 + a * (4 + REPLAY_SLOT), &c->args[a]);
     }
+    replay->unread = tick->packetCount;
     replay->ticks++;
+    return true;
+}
+
+bool ReplayReadPacket(Replay *replay, ReplayPacket *packet)
+{
+    unsigned char bytes[9];
+    if (!packet)
+        return false;
+    memset(packet, 0, sizeof *packet);
+    if (!replay || replay->unread <= 0 || !Read(replay, bytes, sizeof bytes))
+        return false;
+    replay->unread--;
+    packet->peer = (int)Get32(bytes);
+    packet->channel = bytes[4];
+    packet->size = Get32(bytes + 5);
+    if (packet->size > REPLAY_MAX_PACKET)
+        return false;
+    if (packet->size && (!(packet->data = malloc(packet->size)) || !Read(replay, packet->data, packet->size)))
+    {
+        free(packet->data);
+        packet->data = NULL;
+        return false;
+    }
     return true;
 }
 
