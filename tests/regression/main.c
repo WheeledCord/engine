@@ -6,6 +6,7 @@
 // asserts on a value read back: a pixel, a rectangle, a return code. Run with no arguments for the
 // checks that share one window, and with --runner for the ones that need the engine's own loop.
 #define _DEFAULT_SOURCE
+#include "checks.h"
 #include "core/collision3d.h"
 #include "core/engine.h"
 #include "core/fps_camera.h"
@@ -3845,6 +3846,7 @@ int main(int argc, char **argv)
     AudioChecks();
     FpsControllerChecks();
     RigFileChecks();
+    failures += HeadlessChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

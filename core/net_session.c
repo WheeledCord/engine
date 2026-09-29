@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 #include "net_session.h"
 
+#include "enet/enet.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -518,6 +519,32 @@ static void ClientStep(CoreNetSession *session, double dt, uint32_t waitMs)
     }
 }
 
+/* ENet counts bytes per host in 32 bits and never clears them. Each step takes what it counted into
+   the session's 64-bit totals and zeroes its counters, so they cannot wrap. The rates are bytes per
+   second over the last whole second of stepped time. */
+static void SampleTraffic(CoreNetSession *session, double dt)
+{
+    ENetHost *host = (ENetHost *)session->endpoint.host;
+    if (!host)
+        return;
+    uint32_t sent = host->totalSentData, received = host->totalReceivedData;
+    host->totalSentData = 0;
+    host->totalReceivedData = 0;
+    session->bytesSent += sent;
+    session->bytesReceived += received;
+    session->rateSent += sent;
+    session->rateReceived += received;
+    if (dt > 0)
+        session->rateClock += dt;
+    if (session->rateClock >= 1.0)
+    {
+        session->sendRate = (double)session->rateSent / session->rateClock;
+        session->receiveRate = (double)session->rateReceived / session->rateClock;
+        session->rateClock = 0.0;
+        session->rateSent = session->rateReceived = 0;
+    }
+}
+
 void CoreNetSessionStep(CoreNetSession *session, double dt, uint32_t waitMs)
 {
     if (!session || session->status == CORE_NET_SESSION_OFF || !session->endpoint.host)
@@ -526,6 +553,7 @@ void CoreNetSessionStep(CoreNetSession *session, double dt, uint32_t waitMs)
         ServerStep(session, dt, waitMs);
     else
         ClientStep(session, dt, waitMs);
+    SampleTraffic(session, dt);
 }
 
 /* ---- both -------------------------------------------------------------------------------------- */

@@ -5,7 +5,22 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-typedef struct CoreDiagnostics { double frameDt, fixedBacklog; uint64_t frames; unsigned updates; } CoreDiagnostics;
+/* Timing of the running application, in both windowed and headless mode. frameDt is the last frame's
+   duration in seconds (windowed only; zero headless). frames counts loop iterations, updates the
+   Update calls of the current iteration, ticks every Update call since the run began. The tick*
+   fields time each Update call and the frame* fields each whole loop iteration (windowed only), in
+   microseconds from CLOCK_MONOTONIC: Last is the most recent finished one, Max the slowest, Total
+   the sum. ticks counts a call as it starts, so Update sees itself counted; the micros of a tick or
+   frame in progress are not yet included. Headless, frameDt is fixed_dt and each frame is one tick. */
+typedef struct CoreDiagnostics
+{
+    double frameDt, fixedBacklog;
+    uint64_t frames;
+    unsigned updates;
+    double tickMicrosLast, tickMicrosMax, tickMicrosTotal;
+    uint64_t ticks;
+    double frameMicrosLast, frameMicrosMax, frameMicrosTotal;
+} CoreDiagnostics;
 /** Returns the live application's latest timing snapshot during callbacks, or NULL outside an application run. */
 const CoreDiagnostics *CoreDiagnosticsCurrent(void);
 typedef enum CoreDebugPrimitiveKind { CORE_DEBUG_LINE, CORE_DEBUG_CIRCLE, CORE_DEBUG_RECT, CORE_DEBUG_TEXT } CoreDebugPrimitiveKind;

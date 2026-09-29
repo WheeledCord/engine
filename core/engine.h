@@ -7,6 +7,7 @@
 #include "capabilities.h"
 #include "raylib.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include "input.h"
 #include "diagnostics.h"
 typedef struct EngineConfig
@@ -18,6 +19,10 @@ typedef struct EngineConfig
     unsigned int windowFlags;
     CoreRequirements requirements;
     const char *engine_path; /* path to engine root containing core/; NULL: use executable directory */
+    bool headless;     /* true: no window, GL, audio, drawing or UI; the loop calls Update at fixed_dt
+                          (which must be positive) with an empty EngineInput and never sleeps. Set
+                          BuildUi to NULL. False (the default): the normal windowed loop. */
+    uint64_t maxTicks; /* stop after this many Update calls, windowed or headless; 0: no limit */
 } EngineConfig;
 typedef struct EngineProject
 {
@@ -56,9 +61,11 @@ EngineApplication EngineApplicationDefault(void);
 /**
  * @brief Runs an application's window and callback lifecycle.
  *
- * The application and every object it borrows must remain valid until this call returns.
+ * The application and every object it borrows must remain valid until this call returns. With
+ * config.headless no window is created and no raylib window call is made; see EngineConfig.
  * @param application Borrowed application descriptor; NULL is rejected.
- * @return Zero after normal exit, or nonzero after configuration, initialization, or render failure.
+ * @return Zero after normal exit, or nonzero after configuration, initialization, or render failure
+ *         (including headless with a nonpositive fixed_dt, or with BuildUi set).
  */
 int EngineRunApplication(const EngineApplication *application);
 /**
