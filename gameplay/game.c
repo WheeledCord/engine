@@ -5,6 +5,7 @@
 // The runner of a Scheme-only project (docs/developer/store.md §6): a store with the built-in 3D
 // kinds, the game file on top, one fixed tick per Update and, in a window, one frame per Draw
 // through the draw path. Everything lives in one static Runner: there is one s7 per process.
+#define _DEFAULT_SOURCE /* sigaction under -std=c99 */
 #include "s7.h"
 
 #include "game.h"
@@ -23,6 +24,7 @@
 #include "rlgl.h"
 #include <inttypes.h>
 #include <math.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -169,6 +171,35 @@ typedef struct Runner
 
 static Runner run;
 static uint64_t lastHash;
+
+/* Ctrl+C: the first only sets flags. Update ends the run at its next call, and the handler time
+   limit's checks stop a handler that is running, so a loop in one does not hold the exit up. A
+   second Ctrl+C in the same run kills the process, for a loop those checks cannot see. */
+static volatile sig_atomic_t interruptSeen;
+static bool interruptSaid;
+
+static void OnInterrupt(int number)
+{
+    if (interruptSeen)
+    {
+        signal(number, SIG_DFL);
+        raise(number);
+        return;
+    }
+    interruptSeen = 1;
+    GameS7SetInterrupted(true);
+}
+
+static bool Interrupted(void)
+{
+    if (interruptSeen && !interruptSaid)
+    {
+        interruptSaid = true;
+        printf("run: interrupted (press Ctrl+C again to kill)\n");
+        fflush(stdout);
+    }
+    return interruptSeen != 0;
+}
 
 uint64_t GameLastHash(void) { return lastHash; }
 
@@ -401,6 +432,8 @@ static bool Update(void *context, double dt, const EngineInput *in)
     const CoreDiagnostics *d = CoreDiagnosticsCurrent();
     if (run.bench && run.updates > 0 && d)
         Push(&run.ticks, d->tickMicrosLast);
+    if (Interrupted())
+        return false;
     // Windowed, the runner stops the run itself, a call after the last tick, so that tick is drawn.
     if (!run.headless && run.maxTicks && run.updates >= run.maxTicks)
     {
@@ -431,7 +464,7 @@ static bool Update(void *context, double dt, const EngineInput *in)
         PresentHeadless((float)dt);
     if (run.hashEvery && StoreTickCount(&run.store) % run.hashEvery == 0)
         PrintHash();
-    return true;
+    return !Interrupted();
 }
 
 /* ---- presentation caches --------------------------------------------------------------------- */
@@ -492,10 +525,11 @@ static ModelEntry *ModelNamed(const char *name)
         e->model = LoadModel(path);
     if (!e->model.meshCount)
     {
-        TraceLog(LOG_WARNING, "RUN: no model %s; drawing a magenta 0.25 m cube", name[0] ? name : "(no mesh named)");
+        TraceLog(LOG_WARNING, "RUN: no model %s; drawing a magenta 0.25 m cube (on a character, a 0.5 x 1.6 m box)",
+                 name[0] ? name : "(no mesh named)");
         if (e->model.meshes || e->model.materials)
             UnloadModel(e->model);
-        e->model = LoadModelFromMesh(GenMeshCube(0.25f, 0.25f, 0.25f));
+        e->model = LoadModelFromMesh(GenMeshCube(1, 1, 1)); /* sized and stood up in AddModels */
         e->placeholder = true;
         run.missingAssets++;
     }
@@ -641,6 +675,15 @@ static void AddModels(Camera3D camera)
         if (!e || !e->meshes)
             continue;
         Color tint = e->placeholder ? (Color){255, 0, 255, 255} : TintOf(id);
+        Matrix local = e->model.transform;
+        if (e->placeholder) /* standing on the node's origin: a character's is its feet */
+        {
+            StoreId parent = StoreParent(&run.store, id);
+            bool character = StoreAlive(&run.store, parent) &&
+                             StoreKindIs(&run.store, StoreKindOf(&run.store, parent), run.world.character);
+            Vector3 size = character ? (Vector3){0.5f, 1.6f, 0.5f} : (Vector3){0.25f, 0.25f, 0.25f};
+            local = MatrixMultiply(MatrixScale(size.x, size.y, size.z), MatrixTranslate(0, size.y / 2, 0));
+        }
         uint8_t layer = FieldTrue(id, "viewmodel") ? DRAW_LAYER_VIEWMODEL : DRAW_LAYER_OPAQUE;
         for (int m = 0; m < e->model.meshCount; m++)
         {
@@ -650,7 +693,7 @@ static void AddModels(Camera3D camera)
             Texture2D texture = which >= 0 && which < e->model.materialCount && e->model.materials[which].maps
                                     ? e->model.materials[which].maps[MATERIAL_MAP_DIFFUSE].texture
                                     : (Texture2D){0};
-            DrawItem item = {e->meshes[m], MaterialFor(texture, tint), MatrixMultiply(e->model.transform, world),
+            DrawItem item = {e->meshes[m], MaterialFor(texture, tint), MatrixMultiply(local, world),
                              {0, 0, 0}, 0, layer};
             const DrawPathMeshData *data = &run.path.meshes[e->meshes[m] - 1];
             item.center = Vector3Transform(data->center, item.world);
@@ -935,8 +978,10 @@ static s7_pointer Refuse(s7_scheme *sc, const char *format, const char *name)
     return GameS7Error(sc, text);
 }
 
+// The argument helpers also check the handler time limit (GameS7LimitCheck).
 static bool NumberArg(s7_scheme *sc, s7_pointer p, const char *caller, int position, float *out)
 {
+    GameS7LimitCheck(sc);
     if (!s7_is_real(p))
     {
         s7_wrong_type_arg_error(sc, caller, position, p, "a number");
@@ -948,6 +993,7 @@ static bool NumberArg(s7_scheme *sc, s7_pointer p, const char *caller, int posit
 
 static bool VecArg(s7_scheme *sc, s7_pointer p, const char *caller, int position, Vector3 *out)
 {
+    GameS7LimitCheck(sc);
     if (!GameS7ToVec3(p, out))
     {
         s7_wrong_type_arg_error(sc, caller, position, p, "a vec3");
@@ -958,6 +1004,7 @@ static bool VecArg(s7_scheme *sc, s7_pointer p, const char *caller, int position
 
 static bool ThingArg(s7_scheme *sc, s7_pointer p, const char *caller, int position, StoreId *out)
 {
+    GameS7LimitCheck(sc);
     if (!GameS7ToId(p, out))
     {
         s7_wrong_type_arg_error(sc, caller, position, p, "a thing");
@@ -1793,7 +1840,7 @@ static int Usage(const char *problem)
         fprintf(stderr, "trench: %s\n", problem);
     fprintf(stderr, "usage: trench run <dir> [--headless] [--ticks N] [--seed S] [--record FILE] "
                     "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] "
-                    "[--present] [--shot-every N] [--shot-dir DIR]\n");
+                    "[--present] [--shot-every N] [--shot-dir DIR] [--no-time-limit]\n");
     return 2;
 }
 
@@ -1857,6 +1904,7 @@ int GameRun(int argc, char **argv)
     for (size_t n = strlen(run.dir); n > 1 && run.dir[n - 1] == '/'; n--)
         run.dir[n - 1] = 0;
     run.seed = (uint64_t)time(NULL) ^ ((uint64_t)clock() << 32);
+    double handlerLimit = 0.05; /* proposal B2.6: a handler that runs longer is stopped */
     for (; i < argc; i++)
     {
         const char *flag = argv[i], *value = i + 1 < argc ? argv[i + 1] : NULL;
@@ -1869,6 +1917,8 @@ int GameRun(int argc, char **argv)
             run.bench = true, takes = false;
         else if (!strcmp(flag, "--present"))
             run.present = true, takes = false;
+        else if (!strcmp(flag, "--no-time-limit"))
+            handlerLimit = 0, takes = false;
         else if (strcmp(flag, "--ticks") && strcmp(flag, "--seed") && strcmp(flag, "--hash-every") &&
                  strcmp(flag, "--record") && strcmp(flag, "--replay") && strcmp(flag, "--save") &&
                  strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir"))
@@ -1928,6 +1978,17 @@ int GameRun(int argc, char **argv)
     run.captureWanted = true;
     app.callbacks = (EngineProject){Init, FrameInput, Update, Draw, Shutdown};
     app.clearColor = (Color){30, 32, 36, 255};
+    GameS7SetHandlerLimit(handlerLimit);
+    interruptSeen = 0;
+    interruptSaid = false;
+    GameS7SetInterrupted(false);
+    struct sigaction interrupt, previous;
+    memset(&interrupt, 0, sizeof interrupt);
+    interrupt.sa_handler = OnInterrupt; /* no SA_RESTART: a blocking read returns at once */
+    sigemptyset(&interrupt.sa_mask);
+    sigaction(SIGINT, &interrupt, &previous);
     int result = EngineRunApplication(&app);
+    sigaction(SIGINT, &previous, NULL);
+    GameS7SetHandlerLimit(0);
     return result ? 1 : 0;
 }

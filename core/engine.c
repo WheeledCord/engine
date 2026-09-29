@@ -99,6 +99,20 @@ int EngineRun(const EngineConfig *config, const EngineProject *project, void *co
 
 static const EngineConfig *runningConfig;
 
+/* raylib 5.5's InitWindow ignores a failed platform start and goes on to set up OpenGL, which
+   crashes with no display (rcore.c:671-676). So GLFW, which raylib builds in, is started once
+   first to ask. */
+int glfwInit(void);
+void glfwTerminate(void);
+
+static bool DisplayReachable(void)
+{
+    if (!glfwInit())
+        return false;
+    glfwTerminate();
+    return true;
+}
+
 const EngineConfig *EngineRunningConfig(void) { return runningConfig; }
 
 int EngineRunApplication(const EngineApplication *application)
@@ -134,9 +148,19 @@ int EngineRunApplication(const EngineApplication *application)
     runningConfig = c;
     if (!c->headless)
     {
-        SetConfigFlags(c->windowFlags);
-        InitWindow(c->width, c->height, c->title ? c->title : "Core");
-        if (!IsWindowReady()) { runningConfig = NULL; return 1; }
+        bool ready = DisplayReachable();
+        if (ready)
+        {
+            SetConfigFlags(c->windowFlags);
+            InitWindow(c->width, c->height, c->title ? c->title : "Core");
+            ready = IsWindowReady();
+        }
+        if (!ready)
+        {
+            TraceLog(LOG_ERROR, "Engine: no display; run with --headless or under a display");
+            runningConfig = NULL;
+            return 1;
+        }
     }
     CoreSetDataRoot(c->engine_path ? c->engine_path : GetApplicationDirectory());
     if (!c->headless)
