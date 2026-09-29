@@ -249,6 +249,7 @@ typedef struct StoreHooks {
     void (*orphan)(void *user, StoreId guest);              /* just before a guest is detached */
     void (*spawned)(void *user, StoreId thing);             /* after a thing's blocks exist */
     void (*removed)(void *user, StoreId thing);             /* before its blocks are freed */
+    void (*outgoing)(void *user, StoreId target, StoreSymbol event, const StoreValue *args, int count); /* owned elsewhere (§9.3) */
 } StoreHooks;
 void StoreSetHooks(Store *, const StoreHooks *);
 ```

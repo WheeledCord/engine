@@ -390,7 +390,7 @@ static void TreeChecks(void)
     Store s;
     StoreInit(&s, 3);
     StoreKind node = StoreDeclareKind(&s, "node", -1, NULL, 0, NULL);
-    StoreHooks hooks = {&s, NULL, OnOrphan, OnSpawned, OnRemoved};
+    StoreHooks hooks = {&s, NULL, OnOrphan, OnSpawned, OnRemoved, NULL};
     StoreSetHooks(&s, &hooks);
     orphans = removedHooks = spawnedHooks = 0;
     StoreSymbol eyeName = StoreIntern(&s, "eye"), gunName = StoreIntern(&s, "gun"),
@@ -709,7 +709,7 @@ static void RuleChecks(void)
     StoreKindSetHandler(&s, k, RuleHandler, NULL);
     StoreKindHandles(&s, k, StoreIntern(&s, "tick"), true);
     StoreKindHandles(&s, k, StoreIntern(&s, "frame"), true);
-    StoreHooks hooks = {NULL, OnError, NULL, NULL, NULL};
+    StoreHooks hooks = {NULL, OnError, NULL, NULL, NULL, NULL};
     StoreSetHooks(&s, &hooks);
     ruleMine = StoreSpawn(&s, k, 0, STORE_NULL, STORE_NO_SYMBOL);
     ruleTheirs = StoreSpawn(&s, k, 2, STORE_NULL, STORE_NO_SYMBOL);
