@@ -135,7 +135,8 @@ static void WriteThing(FILE *f, const Store *store, uint32_t index)
         if (!(k->fields[field].flags & STORE_LOCAL))
             WriteField(f, store, id, field, &k->fields[field]);
     for (uint32_t c = t->firstChild; c != STORE_NO_INDEX; c = store->things[c].nextSibling)
-        if ((store->things[c].flags & (STORE_THING_LIVE | STORE_THING_REMOVED)) == STORE_THING_LIVE)
+        if ((store->things[c].flags & (STORE_THING_LIVE | STORE_THING_REMOVED | STORE_THING_LOCAL)) ==
+            STORE_THING_LIVE)
             WriteThing(f, store, c);
 }
 
@@ -153,13 +154,16 @@ bool StoreSave(const Store *store, const char *path)
     for (uint32_t i = 0; i < store->thingCount; i++)
     {
         const StoreThing *t = &store->things[i];
-        if ((t->flags & (STORE_THING_LIVE | STORE_THING_REMOVED)) == STORE_THING_LIVE &&
+        // Local things (and the declared children under them) are presentation: never saved.
+        if ((t->flags & (STORE_THING_LIVE | STORE_THING_REMOVED | STORE_THING_LOCAL)) == STORE_THING_LIVE &&
             t->parent == STORE_NO_INDEX)
             WriteThing(f, store, i);
     }
     for (int i = 0; i < store->timerCount; i++)
     {
         const StoreTimer *timer = &store->timers[i];
+        if (StoreLocalTimer(store, timer))
+            continue;
         const char *event = StoreSymbolName(store, timer->event);
         fprintf(f, "timer %" PRIu32 " after %" PRIu64 " %s (", timer->target.index, timer->due,
                 event ? event : "#f");

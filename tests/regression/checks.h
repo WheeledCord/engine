@@ -18,5 +18,7 @@ int StoreChecks(void);
 
 /* The built-in 3D kinds: slide, areas, rays, paths, chunks, cached transforms, determinism. */
 int World3DChecks(void);
+/* The store's Scheme frontend: define-kind's code walk, the calls, and the five rule errors. */
+int GameChecks(void);
 
 #endif

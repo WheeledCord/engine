@@ -11,6 +11,7 @@
 #define STORE_THING_LIVE 1u
 #define STORE_THING_REMOVED 2u /* out of every query; freed at the end of the tick or frame */
 #define STORE_THING_GUEST 4u
+#define STORE_THING_LOCAL 8u /* presentation only: StoreMarkLocal, or a declared child of one */
 
 /* One slot of the thing table. Only integers, so a snapshot copies it and a hash reads it field by
    field with no padding in play. */
@@ -78,6 +79,8 @@ bool StorePlaceThing(Store *store, StoreId id, StoreKind kind, int owner, int sp
 /* Hangs child last under parent (after the declared children when not a guest). */
 void StoreLinkChild(Store *store, uint32_t child, uint32_t parent, StoreSymbol name, bool guest);
 bool StoreInsertTimer(Store *store, const StoreTimer *timer);
+/* Whether a timer belongs to a local thing: not hashed, not saved. */
+bool StoreLocalTimer(const Store *store, const StoreTimer *timer);
 void StoreSetClock(Store *store, uint64_t tickCount, uint64_t worldRandom);
 const char *StoreTypeName(StoreType type);
 

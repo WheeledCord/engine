@@ -1062,6 +1062,83 @@ static void SaveChecks(void)
     StoreFree(&d);
 }
 
+// ---- local things: StoreMarkLocal ---------------------------------------------------------------
+static StoreId localShared, localThing;
+static bool localReadRefused, localWritten, sharedWriteRefused;
+
+static bool LocalHandler(Store *s, StoreId self, StoreSymbol event, const StoreValue *args, int count,
+                         void *user)
+{
+    (void)args;
+    (void)count;
+    (void)user;
+    StoreValue v, glow = Int(9);
+    if (!Same(self, localShared))
+        return true;
+    if (!strcmp(StoreSymbolName(s, event), "tick"))
+        localReadRefused = !StoreGet(s, localThing, 0, &v) && Prefix(s, "local-read");
+    else
+    {
+        localWritten = StoreSet(s, localThing, 0, &glow);
+        sharedWriteRefused = !StoreSet(s, localShared, 0, &glow) && Prefix(s, "shared-write");
+    }
+    return true;
+}
+
+// Two worlds that differ only by a local thing: withLocal also marks one and hangs a child under it.
+static uint64_t LocalWorld(Store *s, bool withLocal, StoreId *local, StoreId *child)
+{
+    StoreInit(s, 11);
+    StoreFieldDecl fields[] = {Field("glow", STORE_INT, 0, Int(1))};
+    StoreKind k = StoreDeclareKind(s, "lamp", -1, fields, 1, NULL);
+    StoreKindSetHandler(s, k, LocalHandler, NULL);
+    StoreKindHandles(s, k, StoreIntern(s, "tick"), true);
+    StoreKindHandles(s, k, StoreIntern(s, "frame"), true);
+    localShared = StoreSpawn(s, k, 0, STORE_NULL, STORE_NO_SYMBOL);
+    if (withLocal)
+    {
+        *local = localThing = StoreSpawn(s, k, 0, STORE_NULL, STORE_NO_SYMBOL);
+        Expect(StoreMarkLocal(s, *local) && StoreIsLocal(s, *local), "a thing is marked local before its first tick");
+        *child = StoreSpawn(s, k, 0, *local, StoreIntern(s, "bulb"));
+        Expect(StoreIsLocal(s, *child), "a declared child of a local thing is local");
+    }
+    StoreTick(s, 1.0f / 60.0f);
+    StoreFrame(s, 1.0f / 60.0f);
+    return StoreHash(s);
+}
+
+static void LocalChecks(void)
+{
+    Store a, b, c;
+    StoreId local, child, none;
+    localReadRefused = localWritten = sharedWriteRefused = false;
+    uint64_t with = LocalWorld(&a, true, &local, &child);
+    Expect(localReadRefused, "a gameplay handler can't read a field of a local thing (local-read)");
+    Expect(localWritten && sharedWriteRefused,
+           "a presentation handler writes a field of a local thing, and still not a shared one");
+    Expect(!StoreMarkLocal(&a, localShared) && !StoreIsLocal(&a, localShared),
+           "a thing that has started can't be made local");
+    Expect(StoreThings(&a, -1, NULL, 0) == 3, "StoreThings lists local things");
+    uint64_t without = LocalWorld(&b, false, &none, &none);
+    Expect(with == without, "a local thing leaves the hash as it was");
+    StoreSnapshot *snapshot = StoreSnapshotTake(&a);
+    Expect(snapshot && StoreSnapshotRestore(&a, snapshot) && StoreIsLocal(&a, local) && StoreIsLocal(&a, child),
+           "a snapshot keeps local things local");
+    StoreSnapshotFree(snapshot);
+    const char *path = Scratch("regression_store_local.sav");
+    char pathCopy[256];
+    snprintf(pathCopy, sizeof pathCopy, "%s", path);
+    StoreInit(&c, 3);
+    StoreFieldDecl fields[] = {Field("glow", STORE_INT, 0, Int(1))};
+    StoreDeclareKind(&c, "lamp", -1, fields, 1, NULL);
+    Expect(StoreSave(&a, pathCopy) && StoreLoad(&c, pathCopy) && StoreCount(&c) == 1 &&
+               StoreAlive(&c, localShared) && !StoreAlive(&c, local),
+           "a save leaves local things out");
+    StoreFree(&a);
+    StoreFree(&b);
+    StoreFree(&c);
+}
+
 int StoreChecks(void)
 {
     failures = 0;
@@ -1074,5 +1151,6 @@ int StoreChecks(void)
     FrameChecks();
     SnapshotChecks();
     SaveChecks();
+    LocalChecks();
     return failures;
 }
