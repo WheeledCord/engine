@@ -17,12 +17,12 @@
     </method>
     <method name="EngineRunApplication" brief="Runs an application's window and callback lifecycle.">
       <return type="int">
-        <description>Zero after normal exit, or nonzero after configuration, initialization, or render failure.</description>
+        <description>Zero after normal exit, or nonzero after configuration, initialization, or render failure (including headless with a nonpositive fixed_dt, or with BuildUi set).</description>
       </return>
       <param name="application" type="const EngineApplication *">
         <description>Borrowed application descriptor; NULL is rejected.</description>
       </param>
-      <description>The application and every object it borrows must remain valid until this call returns.</description>
+      <description>The application and every object it borrows must remain valid until this call returns. With config.headless no window is created and no raylib window call is made; see EngineConfig.</description>
     </method>
     <method name="EngineRunningConfig" brief="Returns the configuration installed for the current application lifecycle.">
       <return type="const EngineConfig *">

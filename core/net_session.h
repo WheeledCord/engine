@@ -115,6 +115,16 @@ typedef struct CoreNetSession
     uint32_t commandSequence;    /* client: the last command sent */
     uint32_t commandApplied;     /* the highest of ours the server has handled; never goes back */
     double connectingFor, uploadAccumulator;
+    /* Traffic, read from ENet's per-host counters at every CoreNetSessionStep (the ENet counters are
+       zeroed after each read, so nothing wraps). bytesSent and bytesReceived are cumulative for this
+       session, counting every UDP datagram including ENet's own headers and acknowledgements.
+       sendRate and receiveRate are bytes per second over the last whole second of dt stepped; they
+       stay zero until one second has been stepped. All four are zero on an unused session. */
+    uint64_t bytesSent, bytesReceived;
+    double sendRate, receiveRate;
+    /* Private: the accumulator behind the rates. */
+    double rateClock;
+    uint64_t rateSent, rateReceived;
 } CoreNetSession;
 
 /** @brief Opens a server on this machine.
