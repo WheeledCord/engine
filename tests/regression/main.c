@@ -3854,6 +3854,7 @@ int main(int argc, char **argv)
     failures += StoreChecks();
     failures += World3DChecks();
     failures += GameChecks();
+    failures += GameRunnerChecks();
     printf("REGRESSION TEST failures=%d checks=%d\n", failures, checks);
     return failures ? 1 : 0;
 }

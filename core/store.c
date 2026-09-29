@@ -2017,6 +2017,26 @@ bool StoreCommand(Store *store, StoreId target, StoreSymbol event, const StoreVa
            StoreFail(store, false, "memory: out of memory queueing %s", SymbolText(store, event));
 }
 
+int StoreCommandsPending(const Store *store, StoreId *targets, StoreSymbol *events,
+                         StoreValue (*args)[STORE_MAX_ARGS], int *counts, int max)
+{
+    if (!store)
+        return 0;
+    for (int i = 0; i < store->commandCount && i < max; i++)
+    {
+        const StoreMessage *m = &store->commands[i];
+        if (targets)
+            targets[i] = m->target;
+        if (events)
+            events[i] = m->event;
+        if (args)
+            memcpy(args[i], m->args, sizeof m->args);
+        if (counts)
+            counts[i] = m->count;
+    }
+    return store->commandCount;
+}
+
 bool StoreInsertTimer(Store *store, const StoreTimer *timer)
 {
     StoreTimer *timers = Grow(store->timers, &store->timerCapacity, store->timerCount + 1,
