@@ -3853,6 +3853,7 @@ int main(int argc, char **argv)
     CloseWindow();
     failures += StoreChecks();
     failures += World3DChecks();
+    failures += GameChecks();
     printf("REGRESSION TEST failures=%d checks=%d\n", failures, checks);
     return failures ? 1 : 0;
 }

@@ -1218,6 +1218,7 @@ StoreId StoreSpawn(Store *store, StoreKind kind, int owner, StoreId parent, Stor
         StoreThing *p = &store->things[parent.index];
         store->things[index].owner = p->owner;
         store->things[index].spawner = p->spawner;
+        store->things[index].flags |= p->flags & STORE_THING_LOCAL; // a local thing's children are
         StoreLinkChild(store, index, parent.index, childName, false);
     }
     // Spawned while the tick's queue is open: start later this tick, before its first tick.
@@ -1228,6 +1229,42 @@ StoreId StoreSpawn(Store *store, StoreKind kind, int owner, StoreId parent, Stor
     if (store->hooks.spawned)
         store->hooks.spawned(store->hooks.user, id);
     return id;
+}
+
+static void MarkLocal(Store *store, uint32_t index)
+{
+    StoreThing *t = &store->things[index];
+    t->flags |= STORE_THING_LOCAL;
+    for (uint32_t c = t->firstChild; c != STORE_NO_INDEX; c = store->things[c].nextSibling)
+        if (!(store->things[c].flags & STORE_THING_GUEST))
+            MarkLocal(store, c);
+}
+
+bool StoreMarkLocal(Store *store, StoreId id)
+{
+    if (!store || !store->error)
+        return false;
+    StoreThing *t = Thing(store, id);
+    if (!t)
+        return StaleFail(store, id);
+    // Only while its start is pending: before it has run, nothing shared can have seen it.
+    bool pending = false;
+    for (int i = 0; i < store->startCount && !pending; i++)
+        pending = store->starts[i].index == id.index && store->starts[i].generation == id.generation;
+    for (int i = store->queueHead; store->ticking && i < store->queueCount && !pending; i++)
+        pending = store->queue[i].event == SYMBOL_START && store->queue[i].target.index == id.index &&
+                  store->queue[i].target.generation == id.generation;
+    if (!pending)
+        return StoreFail(store, false, "local: %s #%u has started; mark a thing local before its first tick",
+                         KindNameOf(store, t), id.index);
+    MarkLocal(store, id.index);
+    return true;
+}
+
+bool StoreIsLocal(const Store *store, StoreId id)
+{
+    const StoreThing *t = Thing(store, id);
+    return t && (t->flags & STORE_THING_LOCAL);
 }
 
 static void MarkRemoved(Store *store, uint32_t index)
@@ -1507,9 +1544,15 @@ static bool Resolve(const Store *store, StoreId id, int field, Access *a)
     return true;
 }
 
+// Every field of a local thing counts as STORE_LOCAL for the rules.
+static bool LocalAccess(const Access *a)
+{
+    return (a->decl->flags & STORE_LOCAL) || (a->thing->flags & STORE_THING_LOCAL);
+}
+
 static bool CheckRead(const Store *store, const Access *a)
 {
-    if (store->phase == STORE_PHASE_GAMEPLAY && (a->decl->flags & STORE_LOCAL))
+    if (store->phase == STORE_PHASE_GAMEPLAY && LocalAccess(a))
         return StoreFail(store, true,
                          "local-read: %s on %s #%u is a local field; a gameplay handler can't "
                          "read it",
@@ -1520,7 +1563,7 @@ static bool CheckRead(const Store *store, const Access *a)
 static bool CheckWrite(const Store *store, const Access *a)
 {
     unsigned index = (unsigned)(a->thing - store->things);
-    bool local = a->decl->flags & STORE_LOCAL;
+    bool local = LocalAccess(a);
     if (store->phase == STORE_PHASE_PRESENTATION && !local)
         return StoreFail(store, true,
                          "shared-write: %s on %s #%u is shared state; a presentation handler "
@@ -2534,6 +2577,12 @@ static uint64_t HashField(uint64_t h, const Store *store, const StoreFieldDecl *
     }
 }
 
+bool StoreLocalTimer(const Store *store, const StoreTimer *timer)
+{
+    return timer->target.index < store->thingCount &&
+           (store->things[timer->target.index].flags & STORE_THING_LOCAL);
+}
+
 uint64_t StoreHash(const Store *store)
 {
     uint64_t h = 0xCBF29CE484222325ull;
@@ -2542,7 +2591,7 @@ uint64_t StoreHash(const Store *store)
     for (uint32_t i = 0; i < store->thingCount; i++)
     {
         const StoreThing *t = &store->things[i];
-        if (!Visible(t))
+        if (!Visible(t) || (t->flags & STORE_THING_LOCAL))
             continue;
         const StoreKindData *k = store->kinds[t->kind];
         h = HashU32(h, i);
@@ -2560,10 +2609,15 @@ uint64_t StoreHash(const Store *store)
             if (!(k->fields[f].flags & STORE_LOCAL))
                 h = HashField(h, store, &k->fields[f], block + k->offsets[f], k->sizes[f]);
     }
-    h = HashU32(h, (uint32_t)store->timerCount);
+    uint32_t timers = 0;
+    for (int i = 0; i < store->timerCount; i++)
+        timers += !StoreLocalTimer(store, &store->timers[i]);
+    h = HashU32(h, timers);
     for (int i = 0; i < store->timerCount; i++)
     {
         const StoreTimer *timer = &store->timers[i];
+        if (StoreLocalTimer(store, timer))
+            continue;
         h = HashU64(h, timer->due);
         h = HashU32(h, timer->target.index);
         h = HashU32(h, timer->target.generation);
