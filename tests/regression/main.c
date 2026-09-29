@@ -3847,6 +3847,7 @@ int main(int argc, char **argv)
     FpsControllerChecks();
     RigFileChecks();
     failures += HeadlessChecks();
+    failures += DrawPathChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

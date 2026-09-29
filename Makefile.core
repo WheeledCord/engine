@@ -83,13 +83,16 @@ $(BUILD)/$(2)/%.o: $(2)/%.c $(RLSRC)/.exported | boundary
 	mkdir -p $$(@D)
 	$(CC) $(CFLAGS) -I. -I$(RLSRC) -MMD -MP -c $$< -o $$@
 $(BUILD)/$(1): $(patsubst $(2)/%.c,$(BUILD)/$(2)/%.o,$(wildcard $(2)/*.c)) $(BUILD)/libscript.a $(BUILD)/libgameplay.a $(BUILD)/libcore.a $(RLLIB) | boundary
-	$(CC) $$^ $(LDLIBS) -o $$@
+	$(CC) $$^ $$(LDLIBS) -o $$@
 endef
 
 $(eval $(call core_project,core_integration,tests/integration/core))
 $(eval $(call core_project,gameplay_integration,tests/integration/gameplay))
 $(eval $(call core_project,regression_test,tests/regression))
 $(eval $(call core_project,describe_types,tools/describe_types))
+# Go/no-go condition 6: the draw path timed headless through EGL, so it links EGL as well.
+$(eval $(call core_project,draw_bench,tools/draw_bench))
+$(BUILD)/draw_bench: LDLIBS += -lEGL
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
