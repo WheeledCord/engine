@@ -200,6 +200,9 @@ int  StoreCurrentOwner(const Store *);       /* the owner that handler runs for 
 bool StoreSend(Store *, StoreId target, StoreSymbol event, const StoreValue *args, int count);
 bool StoreAfter(Store *, StoreId self, float seconds, StoreSymbol event, const StoreValue *args, int count);
 bool StoreCommand(Store *, StoreId target, StoreSymbol event, const StoreValue *args, int count);
+int  StoreCommandsPending(const Store *, StoreId *targets, StoreSymbol *events,
+                          StoreValue (*args)[STORE_MAX_ARGS], int *counts, int max);  /* copies the
+                          commands queued since the last tick, for the recording (§6.3) */
 void StoreSetLocalOwners(Store *, const int *owners, int count);    /* which owners run here */
 ```
 

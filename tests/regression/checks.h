@@ -21,4 +21,8 @@ int World3DChecks(void);
 /* The store's Scheme frontend: define-kind's code walk, the calls, and the five rule errors. */
 int GameChecks(void);
 
+/* The project runner: a headless bot session recorded and replayed to the same hash, another seed,
+   recordings refused, and the store's pending commands. (main.c's own RunnerChecks is another.) */
+int GameRunnerChecks(void);
+
 #endif
