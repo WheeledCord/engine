@@ -14,6 +14,19 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   comparison, the rules that keep gameplay replayable, per-thing random streams, snapshots, a
   world hash and text saves (`store_save.c`). Headless: no window and no GL. The contract is
   [docs/developer/store.md](../docs/developer/store.md) §2.
+- `store_net`: networking for the things in a store, with no sockets of its own: packets leave
+  through a send callback and arrive through `StoreNetReceive`, so the runner puts ENet under it and
+  the checks an in-memory queue. The host is machine 0 (owners 0 and 1); clients are players 2-16 and
+  talk only to the host, which relays. Things carry network ids (creator machine and a counter).
+  Every third tick each machine captures what it holds and sends each peer the things it should
+  have as a delta against the capture that peer last acknowledged (Quake 3's scheme); a receiver
+  rebuilds the sender's state from its copy of that baseline, applies it before the next tick to
+  things it does not own, and holds registered transform fields 100 ms behind. A message to a thing
+  owned elsewhere (the store's `outgoing` hook) travels reliably in the same packet as its sender's
+  state; the host forwards it, and a client that no longer owns the target bounces it once. Joining
+  checks protocol, game and every kind's declaration; a leaver's roots are removed and the guests
+  under them orphaned. The contract is [docs/developer/store.md](../docs/developer/store.md) §9; the
+  runner does not use it yet (§9.6).
 - `world3d`: the store's built-in 3D kinds (`node`, `model`, `socket`, `camera`, `light`,
   `character`, `solid`, `area`, `tilemap`, `sound`) and the systems behind them, headless and
   deterministic: world matrices cached per frame and interpolated from the previous tick (a

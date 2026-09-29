@@ -24,5 +24,6 @@ int GameChecks(void);
 /* The project runner: a headless bot session recorded and replayed to the same hash, another seed,
    recordings refused, and the store's pending commands. (main.c's own RunnerChecks is another.) */
 int GameRunnerChecks(void);
+int NetChecks(void); /* networking on the store: host and two clients, in-memory and lossy (§9.7) */
 
 #endif

@@ -100,6 +100,11 @@ typedef struct StoreHooks
     void (*orphan)(void *user, StoreId guest);      /* just before a guest is detached */
     void (*spawned)(void *user, StoreId thing);     /* after a thing's blocks exist */
     void (*removed)(void *user, StoreId thing);     /* before its blocks are freed */
+    /* A message or command StoreTick would deliver to a live thing whose owner is not local: the
+       network layer sends it to that owner's machine (docs/developer/store.md §9.3). NULL drops it.
+       Called between handlers (phase NONE); args are only valid during the call. */
+    void (*outgoing)(void *user, StoreId target, StoreSymbol event, const StoreValue *args,
+                     int count);
 } StoreHooks;
 
 /* Private to store.c; declared here only so a Store can be embedded by value. */
@@ -593,8 +598,9 @@ bool StoreAddSystem(Store *store, StoreSystemFn system, void *user);
  * First, the `start` of every thing spawned outside a tick since the last one is delivered, in spawn
  * order (with whatever those handlers send), before commands and timers are queued.
  * Messages are delivered first in, first out, at most 10,000 per tick (the rest are dropped with
- * a warning); a message to a removed thing, or to one no local owner runs, is dropped silently; a
- * message the target's kind does not handle is reported once per kind and event. A thing spawned
+ * a warning); a message to a removed thing is dropped silently, and one to a thing no local owner
+ * runs goes to the outgoing hook (dropped silently when there is none); a message the target's
+ * kind does not handle is reported once per kind and event. A thing spawned
  * during the tick gets `start` at the tail of the queue, so it is delivered in this tick's step 5
  * or 6, before the thing's first `tick` next tick.
  * @param store Store; must not already be inside StoreTick or StoreFrame.

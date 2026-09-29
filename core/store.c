@@ -2126,8 +2126,15 @@ static void Deliver(Store *store)
     {
         StoreMessage m = store->queue[store->queueHead++];
         StoreThing *t = Thing(store, m.target);
-        if (!t || !IsLocalOwner(store, t->owner))
+        if (!t)
             continue;
+        if (!IsLocalOwner(store, t->owner))
+        {
+            // Owned on another machine: the network layer sends it there (§9.3).
+            if (store->hooks.outgoing)
+                store->hooks.outgoing(store->hooks.user, m.target, m.event, m.args, m.count);
+            continue;
+        }
         if (store->deliveries >= DELIVERY_CAP)
         {
             if (!store->dropped)
