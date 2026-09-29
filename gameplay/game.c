@@ -14,6 +14,7 @@
 #include "core/draw_path.h"
 #include "core/engine.h"
 #include "core/file.h"
+#include "core/input_map.h"
 #include "core/particles.h"
 #include "core/replay.h"
 #include "core/shader.h"
@@ -140,6 +141,7 @@ typedef struct Runner
     CoreMouseCapture capture;
     bool captureWanted, cursorReported, overlay;
     Vector2 mouseDelta; /* captured since the last tick */
+    InputMap keys;      /* one action per define-actions entry, in its order: the player's key bindings */
     CoreDebug debug;
     int missingAssets;
     char overlayText[3][128]; /* the overlay's lines on the last drawn frame, shown or not */
@@ -292,55 +294,107 @@ static void PrintHash(void)
 
 /* ---- input ----------------------------------------------------------------------------------- */
 
-// An action's key name as define-actions wrote it: raylib's key code, or a mouse button.
-static int KeyCode(const char *name, bool *mouse)
+// The key names define-actions and rebind! take, besides one letter or digit and Mouse1 to Mouse3.
+static const struct
 {
-    static const struct
-    {
-        const char *name;
-        int code;
-    } keys[] = {{"Space", KEY_SPACE},        {"LeftShift", KEY_LEFT_SHIFT}, {"LeftControl", KEY_LEFT_CONTROL},
-                {"Escape", KEY_ESCAPE},      {"Enter", KEY_ENTER},          {"Tab", KEY_TAB},
-                {"Up", KEY_UP},              {"Down", KEY_DOWN},            {"Left", KEY_LEFT},
+    const char *name;
+    int code;
+} keyNames[] = {{"Space", KEY_SPACE},   {"LeftShift", KEY_LEFT_SHIFT}, {"LeftControl", KEY_LEFT_CONTROL},
+                {"Escape", KEY_ESCAPE}, {"Enter", KEY_ENTER},          {"Tab", KEY_TAB},
+                {"Up", KEY_UP},         {"Down", KEY_DOWN},            {"Left", KEY_LEFT},
                 {"Right", KEY_RIGHT}};
-    *mouse = false;
+static const int mouseButtons[] = {MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE};
+
+// A key name such as "W", "Space" or "Mouse1" as the binding it means; false for a name not known.
+static bool ParseKey(const char *name, InputBinding *out)
+{
     if (!name)
-        return -1;
+        return false;
     if (name[0] && !name[1])
     {
         char c = name[0];
         if (c >= 'a' && c <= 'z')
             c = (char)(c - 'a' + 'A');
         if (c >= 'A' && c <= 'Z')
-            return KEY_A + (c - 'A');
+            return *out = (InputBinding){INPUT_KEY, KEY_A + (c - 'A')}, true;
         if (c >= '0' && c <= '9')
-            return KEY_ZERO + (c - '0');
+            return *out = (InputBinding){INPUT_KEY, KEY_ZERO + (c - '0')}, true;
     }
-    for (size_t i = 0; i < sizeof keys / sizeof keys[0]; i++)
-        if (!strcmp(name, keys[i].name))
-            return keys[i].code;
+    for (size_t i = 0; i < sizeof keyNames / sizeof keyNames[0]; i++)
+        if (!strcmp(name, keyNames[i].name))
+            return *out = (InputBinding){INPUT_KEY, keyNames[i].code}, true;
     if (!strncmp(name, "Mouse", 5) && name[5] >= '1' && name[5] <= '3' && !name[6])
+        return *out = (InputBinding){INPUT_MOUSE_BUTTON, mouseButtons[name[5] - '1']}, true;
+    return false;
+}
+
+// The name ParseKey takes for a binding: a table entry, or buf (2 characters) holding a letter or
+// digit; NULL for a key the table does not name.
+static const char *BindingName(InputBinding binding, char *buf)
+{
+    if (binding.type == INPUT_MOUSE_BUTTON)
     {
-        *mouse = true;
-        static const int buttons[] = {MOUSE_BUTTON_LEFT, MOUSE_BUTTON_RIGHT, MOUSE_BUTTON_MIDDLE};
-        return buttons[name[5] - '1'];
+        static const char *const names[] = {"Mouse1", "Mouse2", "Mouse3"};
+        for (size_t i = 0; i < sizeof mouseButtons / sizeof mouseButtons[0]; i++)
+            if (binding.code == mouseButtons[i])
+                return names[i];
+        return NULL;
     }
-    return -1;
+    if (binding.type != INPUT_KEY)
+        return NULL;
+    if (binding.code >= KEY_A && binding.code <= KEY_Z)
+        return buf[0] = (char)('A' + binding.code - KEY_A), buf[1] = 0, buf;
+    if (binding.code >= KEY_ZERO && binding.code <= KEY_NINE)
+        return buf[0] = (char)('0' + binding.code - KEY_ZERO), buf[1] = 0, buf;
+    for (size_t i = 0; i < sizeof keyNames / sizeof keyNames[0]; i++)
+        if (binding.code == keyNames[i].code)
+            return keyNames[i].name;
+    return NULL;
+}
+
+// The key bindings: one action per define-actions entry with its default key, then the player's
+// changes from the project's input.map when there is one. An entry whose key name is not known has no
+// binding. False when the actions cannot be set up (a name is repeated).
+static bool OpenKeys(void)
+{
+    InputBinding defaults[GAME_S7_MAX_ACTIONS];
+    InputMapDefinition definitions[GAME_S7_MAX_ACTIONS];
+    int count = GameS7ActionCount();
+    for (int i = 0; i < count; i++)
+    {
+        bool known = ParseKey(GameS7ActionKey(i), &defaults[i]);
+        definitions[i] = (InputMapDefinition){GameS7ActionName(i), &defaults[i], known ? 1u : 0u};
+    }
+    if (!InputMapInit(&run.keys, definitions, (size_t)count))
+        return false;
+    char path[sizeof run.dir + 16];
+    snprintf(path, sizeof path, "%s/input.map", run.dir);
+    if (Readable(path) && !InputMapRead(&run.keys, path))
+        fprintf(stderr, "trench: %s does not fit this game's actions, or gives two actions one key; "
+                        "using the default keys\n",
+                path);
+    return true;
 }
 
 static GameInput FromEngine(const EngineInput *in)
 {
     GameInput input = {0};
-    for (int i = 0; in && i < GameS7ActionCount() && i < 32; i++)
+    for (int i = 0; in && i < GameS7ActionCount() && (size_t)i < run.keys.count && i < 32; i++)
     {
-        bool mouse;
-        int code = KeyCode(GameS7ActionKey(i), &mouse);
-        if (code < 0 || (!mouse && code == KEY_ESCAPE)) /* Escape releases the mouse instead */
-            continue;
-        bool down = mouse ? in->mouseDown[code] : code < CORE_KEY_COUNT && in->down[code];
-        bool pressed = mouse ? in->mousePressed[code] : code < CORE_KEY_COUNT && in->pressed[code];
-        input.held |= down ? 1u << i : 0u;
-        input.pressed |= pressed ? 1u << i : 0u;
+        // Held when any of the action's bindings is down, pressed when any was pressed: a binding is
+        // read as InputActionRead reads it, except that Escape releases the mouse instead of acting.
+        const InputMapAction *action = &run.keys.actions[i];
+        for (size_t j = 0; j < action->count; j++)
+        {
+            InputBinding b = action->bindings[j];
+            bool down = false, pressed = false;
+            if (b.type == INPUT_KEY && b.code > KEY_NULL && b.code < CORE_KEY_COUNT && b.code != KEY_ESCAPE)
+                down = in->down[b.code], pressed = in->pressed[b.code];
+            else if (b.type == INPUT_MOUSE_BUTTON && b.code >= 0 && b.code < CORE_MOUSE_BUTTON_COUNT)
+                down = in->mouseDown[b.code], pressed = in->mousePressed[b.code];
+            input.held |= down ? 1u << i : 0u;
+            input.pressed |= pressed ? 1u << i : 0u;
+        }
     }
     // The captured pointer's motion since the last tick, which the first tick of a frame takes.
     input.mouseDx = run.mouseDelta.x;
@@ -1523,6 +1577,70 @@ static s7_pointer SchemeProfileSet(s7_scheme *sc, s7_pointer args)
     return s7_cadr(args);
 }
 
+// An action named by a symbol or string, with its current bindings.
+static bool ActionArg(s7_scheme *sc, s7_pointer p, const char *caller, const char **name, InputAction *out)
+{
+    *name = KeyName(p);
+    if (!*name)
+    {
+        s7_wrong_type_arg_error(sc, caller, 1, p, "an action name");
+        return false;
+    }
+    *out = InputMapActionGet(&run.keys, *name);
+    if (!out->bindings)
+    {
+        char text[192];
+        snprintf(text, sizeof text, "%s: no action named %.40s; declare it with (define-actions (%.40s \"Key\") ...)",
+                 caller, *name, *name);
+        GameS7Error(sc, text);
+        return false;
+    }
+    return true;
+}
+
+// (rebind! 'action "Key") gives the action that key for this player and saves the keys in the project's
+// input.map. Answers #t, or the name of the action that already has the key (nothing changes then).
+static s7_pointer SchemeRebind(s7_scheme *sc, s7_pointer args)
+{
+    const char *name;
+    InputAction action;
+    if (!ActionArg(sc, s7_car(args), "rebind!", &name, &action))
+        return s7_f(sc);
+    if (!s7_is_string(s7_cadr(args)))
+        return s7_wrong_type_arg_error(sc, "rebind!", 2, s7_cadr(args), "a key name");
+    if (!Presentation())
+        return Refuse(sc, "%s is for presentation: gameplay can't change this player's keys", "rebind!");
+    InputBinding binding;
+    if (!ParseKey(s7_string(s7_cadr(args)), &binding))
+    {
+        char text[160];
+        snprintf(text, sizeof text, "rebind!: no key named \"%.40s\"", s7_string(s7_cadr(args)));
+        return GameS7Error(sc, text);
+    }
+    if (action.count == 0)
+        return Refuse(sc, "rebind!: %s has no key to change; its define-actions key is not one the engine knows", name);
+    const char *conflict;
+    if (!InputMapSet(&run.keys, name, 0, binding, &conflict))
+        return conflict ? s7_make_symbol(sc, conflict) : Refuse(sc, "rebind!: could not change %s", name);
+    char path[sizeof run.dir + 16];
+    snprintf(path, sizeof path, "%s/input.map", run.dir);
+    if (!InputMapWrite(&run.keys, path))
+        return GameS7Error(sc, "rebind!: could not write input.map");
+    return s7_t(sc);
+}
+
+// (binding 'action) is the name of the action's key ("W", "Space", "Mouse1"), or #f when it has none.
+static s7_pointer SchemeBinding(s7_scheme *sc, s7_pointer args)
+{
+    const char *name;
+    InputAction action;
+    char letter[2];
+    if (!ActionArg(sc, s7_car(args), "binding", &name, &action))
+        return s7_f(sc);
+    const char *key = action.count ? BindingName(action.bindings[0], letter) : NULL;
+    return key ? s7_make_string(sc, key) : s7_f(sc);
+}
+
 static s7_pointer SchemeRgba(s7_scheme *sc, s7_pointer args)
 {
     // Integers or reals, each rounded and clamped to 0..255: (* 300 hurt) is a fine alpha.
@@ -1569,6 +1687,8 @@ static bool RegisterCalls(void)
         {"burst", SchemeBurst, 1, 0, true, "(burst 'muzzle-flash|'blood|'dust|'sparks :at v)"},
         {"profile-ref", SchemeProfileRef, 1, 1, false, "(profile-ref 'key default)"},
         {"profile-set!", SchemeProfileSet, 2, 0, false, "(profile-set! 'key value)"},
+        {"rebind!", SchemeRebind, 2, 0, false, "(rebind! 'action \"Key\") -> #t, or the action that has the key"},
+        {"binding", SchemeBinding, 1, 0, false, "(binding 'action) -> \"Key\" or #f"},
         {"rgba", SchemeRgba, 3, 1, false, "(rgba r g b [a]) -> #xRRGGBBAA"},
     };
     for (size_t i = 0; i < sizeof calls / sizeof calls[0]; i++)
@@ -1728,6 +1848,8 @@ static bool Init(void *context)
         return Fail("could not register the runner's calls%s", "");
     if (!GameS7LoadGame(run.gameFile))
         return Fail("the game file %s did not load", run.gameFile);
+    if (!OpenKeys())
+        return Fail("could not set up the key bindings of %s (does define-actions repeat a name?)", run.gameFile);
     if (run.loadPath)
     {
         if (!StoreLoad(&run.store, run.loadPath) || !GameS7RestoreLocalChildren())
@@ -1818,6 +1940,7 @@ static void Shutdown(void *context)
     GameS7SetInput(NULL);
     if (run.scriptOpen)
         GameS7Close();
+    InputMapFree(&run.keys);
     if (run.worldOpen)
         World3DFree(&run.world);
     if (run.storeOpen)
