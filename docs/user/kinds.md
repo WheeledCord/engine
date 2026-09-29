@@ -73,6 +73,10 @@ font. `rgba` takes integers or reals, rounded and clamped to 0-255, and every co
 the `draw-*` calls may be a real. `play-sound` plays through the engine's audio, placed when given
 `:at`.
 
+`(rebind! 'action "Key")` (from a `frame` or `draw-hud` handler) gives an action that key and answers `#t`, or the
+name of the action that already has the key. `(binding 'action)` answers the action's key name, or `#f`; the keys
+are saved in the project's `input.map`, which the runner reads at start.
+
 Phase 1 limits: models draw in their rest pose; only one directional light counts.
 
 The calls a game makes, `define-kind`, the built-in kinds and the rules are in

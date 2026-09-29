@@ -7,6 +7,7 @@
 // hash, a different seed reaching a different one, and what must be refused.
 #define _POSIX_C_SOURCE 200809L /* dup, dup2 and fileno, to capture a run's output */
 #include "checks.h"
+#include "core/input_map.h"
 #include "core/replay.h"
 #include "core/store.h"
 #include "gameplay/game.h"
@@ -275,6 +276,84 @@ static void NoDisplayChecks(void)
            "with no display the runner says so");
 }
 
+// The three words of the `rebind:` line a run of the rebind game printed; false when it printed none.
+static bool RebindLine(const char *log, char *was, char *now, char *clash)
+{
+    FILE *file = fopen(log, "r");
+    char line[256];
+    bool found = false;
+    while (file && !found && fgets(line, sizeof line, file))
+        found = sscanf(line, "rebind: %31s %31s %31s", was, now, clash) == 3;
+    if (file)
+        fclose(file);
+    return found;
+}
+
+// rebind! and binding (docs/user/kinds.md): the game's first frame reads fire's key, gives fire the key
+// K and then jump the same key. The first run saves input.map with K for fire and is told fire has K; a
+// second run of the same project starts with K.
+static void RebindChecks(void)
+{
+    char dir[] = "build/core/rebind_XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Expect(false, "a temporary project directory can be made under build/core");
+        return;
+    }
+    char path[300], log[300], want[64];
+    snprintf(path, sizeof path, "%s/engine.project", dir);
+    FILE *file = fopen(path, "w");
+    if (file)
+        fputs("name rebind-check\ngame game.scm\n", file), fclose(file);
+    snprintf(path, sizeof path, "%s/game.scm", dir);
+    file = fopen(path, "w");
+    if (file)
+        fputs("(define-actions (fire \"Space\") (jump \"J\"))\n"
+              "(define-kind game\n"
+              "  (field k0 \"\" :local) (field k1 \"\" :local) (field clash 'none :local) (field done #f :local)\n"
+              "  (on (frame dt)\n"
+              "    (unless done\n"
+              "      (set! done #t) (set! k0 (binding 'fire)) (rebind! 'fire \"K\") (set! k1 (binding 'fire))\n"
+              "      (set! clash (rebind! 'jump \"K\"))\n"
+              "      (format #t \"rebind: ~A ~A ~A~%\" k0 k1 clash)))\n"
+              "  (on (draw-hud) #f))\n",
+              file),
+            fclose(file);
+    snprintf(log, sizeof log, "%s/run.log", dir);
+    char *argv[] = {"trench", "run", dir, "--headless", "--present", "--ticks", "3", NULL};
+    char was[32] = "", now[32] = "", clash[32] = "", second[32] = "", again[32] = "", secondClash[32] = "";
+    Expect(RunLogged(argv, log) == 0 && !FileHasLine(log, "ERROR", false), "the rebind game runs its first time");
+    Expect(RebindLine(log, was, now, clash) && !strcmp(was, "Space") && !strcmp(now, "K"),
+           "rebind! gives fire K, which binding reads back (it began as Space)");
+    snprintf(path, sizeof path, "%s/input.map", dir);
+    snprintf(want, sizeof want, "fire 0 %d %d", INPUT_KEY, KEY_K);
+    char mapLine[64] = "no such line";
+    file = fopen(path, "r");
+    for (char line[128]; file && fgets(line, sizeof line, file);)
+        if (!strncmp(line, "fire ", 5))
+            snprintf(mapLine, sizeof mapLine, "%.*s", (int)strcspn(line, "\r\n"), line);
+    if (file)
+        fclose(file);
+    Expect(!strcmp(mapLine, want), "input.map is saved beside the project with K for fire");
+    snprintf(want, sizeof want, "jump 0 %d %d", INPUT_KEY, KEY_J);
+    Expect(FileHasLine(path, want, false), "the refused rebind left jump on J in input.map");
+    Expect(!strcmp(clash, "fire"), "rebind! answers the action that has the key when another action wants it");
+    Expect(RunLogged(argv, log) == 0 && !FileHasLine(log, "ERROR", false), "the rebind game runs a second time");
+    Expect(RebindLine(log, second, again, secondClash) && !strcmp(second, "K"),
+           "the second run reads input.map: fire is K on the first frame, before any rebind");
+    printf("runner rebind: input.map line \"%s\", second run's first-frame binding of fire %s, rebinding jump to K "
+           "answered %s\n",
+           mapLine, second, clash);
+    snprintf(path, sizeof path, "%s/engine.project", dir);
+    remove(path);
+    snprintf(path, sizeof path, "%s/game.scm", dir);
+    remove(path);
+    snprintf(path, sizeof path, "%s/input.map", dir);
+    remove(path);
+    remove(log);
+    rmdir(dir);
+}
+
 static float Luminance(Color c) { return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b; }
 
 // The built runner in a window of its own: it captures the pointer, reaches tick 240 without an
@@ -378,6 +457,7 @@ int GameRunnerChecks(void)
     remove(wrong);
     PresentChecks();
     FloorChecks();
+    RebindChecks();
     NoDisplayChecks();
     WindowedChecks();
     return failures;
