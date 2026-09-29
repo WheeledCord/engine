@@ -680,3 +680,144 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
   items / 120 draws through the draw path, 600 frames, prints CPU µs per frame p50/p99. Condition 6.
 - `tools/bench_x61.sh LABEL`: builds and runs both benches pinned to the last core and writes
   `bench_LABEL.txt`, for the user's ThinkPad X61.
+
+## 9. Phase 2: networking on the store (`core/store_net.{h,c}`)
+
+This implements proposal B3 (owners, what moves on the wire, change detection by comparison,
+consistency, interpolation, joining and leaving) for things in a store. It knows nothing about
+sockets: it produces and consumes byte packets through two callbacks, so the same code runs over
+ENet in the runner and over an in-memory queue in the checks. It may include `store_internal.h`, as
+`store_save.c` does, to create things with a given kind, parent, child name, owner and spawner.
+
+### 9.1 Machines, owners, network ids
+
+- The host is machine 0 and owns things with owner 0; it also plays as player 1. Clients are players
+  2-16, one machine each; a client's local owners are `{p}`, the host's `{0, 1}` (B3.1).
+- Every replicated thing has a **network id**: `u32 = creator machine << 27 | counter`, the counter
+  per creator starting at 1 and never reused in a session. Each machine keeps both maps (local
+  `StoreId` <-> network id). A thing gets its network id when this machine first sees it (it spawned
+  it, or it arrived). Local things (`StoreMarkLocal`) are never replicated and have none.
+- On the wire, a REF value is its network id (0 for none or a thing the sender has no id for), and a
+  SYMBOL value is its name (u8 length + bytes). Everything else is little-endian raw: INT/FLOAT/BOOL
+  4 bytes, VEC3 12, STRING u8 length + bytes. Collections are the count then each element (map: key
+  then value) translated the same way; a grid is its cells.
+
+### 9.2 What each machine sends (B3.2, B3.3)
+
+- **A capture** is taken at every send tick (every 3rd tick, 20 Hz): for every replicated thing this
+  machine holds, its network id, kind, parent network id, child name symbol, guest flag, root owner,
+  spawner, and a copy of its shared block. Captures go in a ring of 32 keyed by tick.
+- **To each peer**, a state packet holds a delta of the latest capture against the capture at the
+  tick that peer last acknowledged (none: a full state). Per thing: absent in the baseline -> a
+  *spawn* entry (header and every field); present in both -> an *update* entry listing only fields
+  whose bytes differ (a field index count, then index and value per field) and the header when parent
+  or owner changed; present only in the baseline -> a *remove* entry. Which things go to peer `p`:
+  - a client sends the things it owns;
+  - the host sends every thing not owned by `p`, including other clients' things as it last had them
+    (the host relays; the session is a star, as `core/net_session.c` is);
+  - both also send a thing whose ownership moved to `p` until `p` has acknowledged a capture in which
+    it did (the transfer's last write, B3.1).
+- State packets go unreliable-sequenced on channel 1. Header: sender tick (u32), the latest sender
+  tick received from this peer (the ack), the baseline tick used (0 = full).
+- **Receiving** follows Quake 3 [N16]: the receiver keeps a ring of 32 reconstructed states per
+  sender keyed by the sender's tick. A delta is applied to a copy of the named baseline to make the
+  new state; a delta whose baseline is gone is dropped (the ack will fall back to a full state).
+  States older than the newest applied are stored but not applied.
+- **Applying a state** (B2.2 step 1, at the start of the next `StoreTick`): for each thing in it, in
+  network id order, the receiver accepts it only if the thing is new, or its current owner in the
+  receiver's store is **not** a local owner (a client), or **is** the sending peer (the host).
+  Spawns create the thing raw (no declared children, no `start`); updates write the differing fields
+  with `StoreSetEngine`; header changes reparent raw; removes remove it. After a new thing appears the
+  runner is told (`onArrived`), so the Scheme layer can spawn its declared `:local` children.
+- **Interpolation (B3.5).** Of a remote thing, only transform fields registered with
+  `StoreNetInterpolate(net, kind, field)` (the runner registers `node`'s `position` and `rotation`)
+  are held back: each tick they are set to the value interpolated between the two applied states
+  either side of `renderTick = newest sender tick received + ticks since it arrived - 6` (100 ms).
+  A parent change between the two states is a jump (the later value, B3.5). **Every other field
+  applies on arrival**: B3.4 requires a message's carried state to be visible before the message,
+  and a held-back field would be overwritten by an older interpolated one. This refines B3.5.
+
+### 9.3 Messages, commands, effects (B2.4, B3.4)
+
+- The store gains one hook, `StoreHooks.outgoing(user, target, event, args, count)`, called for a
+  message or command whose target is owned by a machine that is not local, instead of dropping it.
+- The net layer sends it reliable on channel 0 **in the same packet as a state delta for that peer**
+  (the packet the next send would produce, sent now and reliably). The receiver applies the state,
+  then delivers the message with `StoreSend` (arguments translated, §9.1).
+- The host, receiving a message for a thing it does not own, forwards it to that thing's owner with
+  its own delta. A client receiving a message for a thing it no longer owns sends it back to the
+  host once (a flag in the packet); the host delivers it to the current owner, or drops it with a
+  warning naming the thing and event after a second miss.
+- **Effects** (`play-sound`, `burst` called from gameplay code) go to every other machine unreliable
+  on channel 2 as `{name, preset/sound, position}`; the host relays clients' effects to the others.
+  Presentation-phase effects stay local.
+
+### 9.4 Joining, leaving, the kinds check (B3.7)
+
+- Hello (client -> host, reliable): engine protocol, game name, `StoreKindsHash`, and each kind's
+  name with a hash of its own declaration. The host refuses a different protocol or game, or a kinds
+  mismatch, with a message listing the kinds that differ (for example `kinds differ: soldier (fields),
+  medkit (missing here)`). Accepted: welcome `{player id, host tick}`; the first state to that peer is
+  full. The client's world is emptied before the first state applies; a joining runner does not
+  spawn `game` itself.
+- On acceptance the host sends `player-joined p` to its `game` root thing (B3.7). On a peer's
+  disconnect the host, between ticks: detaches every guest under things whose spawner is `p` at its
+  world transform and sends each `orphaned`; removes every root whose spawner is `p` (declared
+  children go with it); then sends `player-left p` to `game`. Clients learn all of it from states.
+- The host leaving ends the session on every client with a message; host migration waits (A5).
+
+### 9.5 API
+
+```c
+typedef struct StoreNetConfig {
+    void *user;
+    bool (*send)(void *user, int peer, int channel, bool reliable, const void *data, size_t size);
+    void (*onArrived)(void *user, StoreId thing);            /* a thing appeared from the network */
+    void (*onEffect)(void *user, const char *name, const char *what, Vector3 at);
+    void (*onJoined)(void *user, int player);                 /* client: welcome received */
+    void (*onEnded)(void *user, const char *why);             /* refused, dropped, host left */
+    const char *game;
+} StoreNetConfig;
+bool StoreNetHost(StoreNet *, Store *, const StoreNetConfig *);
+bool StoreNetJoin(StoreNet *, Store *, const StoreNetConfig *);   /* sends hello to peer 0 */
+void StoreNetPeerConnected(StoreNet *, int peer);                 /* host: a transport peer came */
+void StoreNetPeerLeft(StoreNet *, int peer);
+void StoreNetReceive(StoreNet *, int peer, int channel, const void *data, size_t size);
+void StoreNetBeforeTick(StoreNet *);   /* applies received states and messages; interpolates */
+void StoreNetAfterTick(StoreNet *);    /* captures and sends every 3rd tick */
+bool StoreNetEffect(StoreNet *, const char *name, const char *what, Vector3 at);
+bool StoreNetInterpolate(StoreNet *, StoreKind kind, const char *field);
+int  StoreNetPlayer(const StoreNet *);                             /* this machine's player id */
+int  StoreNetPlayers(const StoreNet *, int *out, int max);
+uint64_t StoreNetStateHash(const StoreNet *);   /* shared fields of replicated things, by network id,
+                                                   REFs as network ids and SYMBOLs as names: equal on
+                                                   every machine once the game has been still */
+void StoreNetFree(StoreNet *);
+```
+
+Transport peers are numbered by the caller: on a client the host is peer 0; on the host a client's
+peer number is its player id.
+
+### 9.6 The runner (`gameplay/game.c`)
+
+`--host PORT` and `--join ADDRESS:PORT` (both work headless); `(host-game port)` and
+`(join-game address port)` from Scheme do the same at run time. ENet through `core/network.h`, three
+channels. `local-player` answers `StoreNetPlayer`, `players` the list. Gameplay-phase `play-sound`
+and `burst` also call `StoreNetEffect`. Recording (B4) also records every received packet with its
+arrival tick, channel and peer; replaying feeds them back at the same ticks instead of a socket, so
+a client's or the host's session replays exactly. `--bench` prints bytes per second sent and
+received. The kinds check refusal is printed and the process exits nonzero.
+
+### 9.7 Checks
+
+- `tests/regression/net_checks.c`: three stores in one process joined by an in-memory transport
+  with a fixed 150 ms one-way delay and 5% loss on channel 1 (deterministic from a seed), running a
+  small C kind set (a root kind with position, an int and a symbol; a child kind; a ref field).
+  Assert: spawns, updates and removes reach both clients; `StoreNetStateHash` equal on all three
+  after 60 still ticks; a client's message reaches a host-owned thing and a host message reaches a
+  client-owned thing after its carried state; an attach by the host moves ownership to the client
+  and a detach back; a kinds mismatch is refused with the kind named; a leaver's roots are removed and
+  guests orphaned; bytes per state packet for 300 things with one field changing is under 1 KB.
+- The runner: a headless host and two headless bot clients of SWAT Tower as three processes over
+  loopback for 1,200 ticks, then 120 still ticks; all three print the same `StoreNetStateHash`, and
+  none prints `ERROR`. Replaying the host's recording reproduces its hashes.
