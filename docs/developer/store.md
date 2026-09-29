@@ -858,12 +858,13 @@ peer number is its player id.
 ### 9.6 The runner (`gameplay/game.c`)
 
 `--host PORT` and `--join ADDRESS:PORT` (both work headless); `(host-game port)` and
-`(join-game address port)` from Scheme do the same at run time. ENet through `core/network.h`, three
-channels. `local-player` answers `StoreNetPlayer`, `players` the list. Gameplay-phase `play-sound`
+`(join-game address port)` from Scheme do the same at run time. ENet through the shared link
+(`core/store_net_enet.h`, §9.5b), three channels; recording and replay stay in the runner and read
+the link's tap. `local-player` answers `StoreNetPlayer`, `players` the list. Gameplay-phase `play-sound`
 and `burst` also call `StoreNetEffect`. Recording (B4) also records every received packet with its
 arrival tick, channel and peer; replaying feeds them back at the same ticks instead of a socket, so
 a client's or the host's session replays exactly. `--bench` prints bytes per second sent and
-received. The kinds check refusal is printed and the process exits nonzero.
+received on the wire (the link's ENet totals). The kinds check refusal is printed and the process exits nonzero.
 
 How it is built:
 
@@ -872,8 +873,8 @@ How it is built:
   answers them and `local-player`/`players` through `GameS7SetNetwork` (runner-provided hooks).
 - **Setup.** Hosting: `StoreNetHost` after world3d's hooks and the game are in (so store_net chains
   in front), local owners {0, 1}; `game` is spawned and told `player-joined 1` as in phase 1. Joining:
-  no `game`, no `player-joined`; ENet connects (retried for up to 5 s), `StoreNetJoin` says hello on
-  connect, and until the welcome the runner ticks nothing but the network; the client's tick count
+  no `game`, no `player-joined`; ENet connects (the link retries for up to 5 s), `StoreNetJoin` says
+  hello on connect, and until the welcome the runner ticks nothing but the network; the client's tick count
   (`--ticks`, `--bot-until`) starts at the welcome. store_net sets the local owners to {p} at the
   welcome (`onJoined`), which the runner repeats.
 - **Transport.** On a client the host's ENet peer is peer 0. On the host a connecting ENet peer takes
@@ -913,6 +914,14 @@ How it is built:
   client-owned thing after its carried state; an attach by the host moves ownership to the client
   and a detach back; a kinds mismatch is refused with the kind named; a leaver's roots are removed and
   guests orphaned; bytes per state packet for 300 things with one field changing is under 1 KB.
+  For the §9.2-§9.5 rules: a `look` message's handler reads the sender's position as written in the
+  sending tick; a shell kind (`alive` BOOL, `age` FLOAT registered) whose owner clears `alive` in the
+  tick `age` reaches 1 is never seen spent without `age >= 1` on a receiver; a thing the host
+  attaches under a client's soldier is the client's in the tick the granting state arrives, and
+  dropped within a tick it ends the host's with no parent everywhere; a join to 300 things with 50%
+  of each 1,200-byte fragment on channel 1 lost converges within 120 ticks; a dedicated host is
+  player 0 and its two clients converge with players {2, 3} everywhere. `store_checks.c` checks
+  `StoreFieldOffset` against `StoreSharedBlock` and `StoreOwnedHere` against local owners and attach.
 - The runner (`tests/regression/runner_checks.c`, built): three processes of
   `tests/regression/net_game` (a host and two clients, 1,500 ticks, bots until tick 600) print the
   same `net state hash`, no `ERROR`, and the host counts 3 hellos; the host's and a client's

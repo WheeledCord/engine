@@ -734,6 +734,12 @@ int StoreFieldIndex(const Store *store, StoreKind kind, const char *name)
     return -1;
 }
 
+int StoreFieldOffset(const Store *store, StoreKind kind, int field)
+{
+    const StoreKindData *k = Kind(store, kind);
+    return k && field >= 0 && field < k->fieldCount ? k->offsets[field] : -1;
+}
+
 int StoreFieldCount(const Store *store, StoreKind kind)
 {
     const StoreKindData *k = Kind(store, kind);
@@ -1398,6 +1404,12 @@ int StoreOwner(const Store *store, StoreId id)
 {
     const StoreThing *t = Thing(store, id);
     return t ? t->owner : -1;
+}
+
+bool StoreOwnedHere(const Store *store, StoreId id)
+{
+    const StoreThing *t = Thing(store, id);
+    return t && IsLocalOwner(store, t->owner);
 }
 
 int StoreSpawner(const Store *store, StoreId id)
