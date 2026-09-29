@@ -1,0 +1,662 @@
+# The store, kinds and the game runner (phases 0 and 1)
+
+This is the implementation design for the proposal in `../../../trenchengine-design/proposal.md`
+(Part B is the design; Part D.2 is the plan and the go/no-go). Section numbers there are cited as
+"B3.1" and so on. This document is the contract between the tasks that build it: every module
+below is written against the signatures here, and a task that needs to change a signature says so
+in its report rather than changing it quietly.
+
+Rules that hold for every task:
+
+- Nothing here removes or changes an existing API. Games on the entity, object and net-sync paths
+  (Trenchfoot, Skyrift) build and run unchanged. New code goes in new files.
+- `core/` depends only on core, raylib and system headers; the build checks it. Nothing in `core/`
+  includes `s7.h`.
+- No new file opens a window or touches GL unless it says so here (`draw_path.c` and the
+  presentation side of the runner). The store, the built-in kinds, saving, recording and replay run
+  with no window and no GL, so a headless process links and runs them all.
+- C99, `-Wall -Wextra -Wpedantic -Werror`, MPL header on every new file, doc comments (`/** */`)
+  on public functions in the style of `core/object.h`. `make smoke` passes with zero warnings.
+- Floats are `float` (32-bit) everywhere in the store: one representation for snapshot, compare,
+  save and hash. Determinism is per build (B4), not across machines.
+- Every check is a plain function in `tests/regression/<module>_checks.c` exposed through
+  `tests/regression/checks.h` and called from `main.c`. Checks use the `Check(bool, const char *)`
+  pattern already there (report `FAIL: ...` and count). Success and expected-failure cases both.
+
+## 1. Layout
+
+```
+core/store.h  store.c           things, kinds, fields, tree, ownership, the tick, timers, messages,
+                                 random streams, snapshot/restore, hash          (§2)
+core/store_save.c                save and load of a store as text                (§2.9)
+core/world3d.h  world3d.c        built-in 3D kinds and their systems: node transforms, character
+                                 movement, areas, solids, tilemap geometry and paths, ray casts (§3)
+core/draw_path.h  draw_path.c    draw items -> draw calls: cull, keys, radix sort, lean submit,
+                                 static batching. The only new core file that touches GL       (§4)
+core/replay.h  replay.c          per-tick input recording and replay files       (§6.3)
+core/scheme/kinds.scm            the Scheme prelude: define-kind, states, vec math helpers (§5)
+gameplay/script/game_s7.h game_s7.c   the Scheme side: things as c-objects, handlers, rules (§5)
+gameplay/game.h game.c           the runner: loads a project, runs the loop windowed or headless,
+                                 records, replays, hashes; the presentation glue (models, HUD,
+                                 particles, sound, camera)                        (§6)
+gameplay/game_main.c             EngineApplicationMain for a Scheme-only project (§6.1)
+tools/trench/main.c              the `trench` command: `trench run <dir> [flags]` (§6.1)
+tools/store_bench/main.c         go/no-go condition 3 bench (§8)
+tools/draw_bench/main.c          go/no-go condition 6 bench, headless EGL (§8)
+tests/regression/store_checks.c world3d_checks.c draw_path_checks.c game_checks.c replay_checks.c
+```
+
+`Makefile.core`: `core/scheme` ships with the SDK beside `core/shaders` and `core/fonts`; `trench`
+is a `core_project` target copied into `$(SDK)/bin`; `draw_bench` links `-lEGL` in addition.
+
+## 2. The store (`core/store.h`)
+
+### 2.1 Ids, symbols, values
+
+```c
+typedef struct StoreId { uint32_t index, generation; } StoreId;   /* index UINT32_MAX: none */
+#define STORE_NULL ((StoreId){UINT32_MAX, 0})
+typedef int32_t StoreSymbol;            /* interned name; STORE_NO_SYMBOL is -1 */
+typedef enum StoreType { STORE_NONE, STORE_INT, STORE_FLOAT, STORE_BOOL, STORE_SYMBOL,
+                         STORE_STRING, STORE_VEC3, STORE_REF,
+                         STORE_LIST, STORE_SET, STORE_MAP, STORE_GRID } StoreType;
+#define STORE_STRING_MAX 63
+typedef struct StoreValue {
+    StoreType type;
+    union { int32_t i; float f; bool b; StoreSymbol sym; char str[STORE_STRING_MAX + 1];
+            Vector3 v; StoreId ref; } as;
+} StoreValue;
+```
+
+Symbols are interned per store in first-seen order: `StoreSymbol StoreIntern(Store *, const char *)`
+and `const char *StoreSymbolName(const Store *, StoreSymbol)`. A symbol is never freed. Saves write
+names, not ids, so ids need not match across processes; snapshots are in-process and keep ids.
+
+### 2.2 Kinds and fields
+
+```c
+#define STORE_LOCAL 1u       /* presentation only: not shared, saved, hashed or replayed (B1) */
+#define STORE_ENGINE 2u      /* written by the engine, read-only from scripts (on-floor) */
+#define STORE_HIDDEN 4u      /* not listed by inspect; used for %prev-* fields */
+typedef struct StoreFieldDecl {
+    const char *name;
+    StoreType type;          /* the field's type */
+    StoreType element;       /* LIST/SET/GRID element type or MAP value type; scalar types only,
+                                never STRING, LIST, SET, MAP, GRID */
+    StoreType key;           /* MAP key type: INT, SYMBOL or REF */
+    int max;                 /* capacity of LIST/SET/MAP, width of GRID; 0 for scalars */
+    int height;              /* GRID only */
+    unsigned flags;
+    StoreValue init;         /* scalar default; STORE_NONE means the type's zero */
+} StoreFieldDecl;
+typedef int StoreKind;       /* index; -1 is none */
+StoreKind StoreDeclareKind(Store *, const char *name, StoreKind base,
+                           const StoreFieldDecl *fields, int count, const char **error);
+StoreKind StoreKindNamed(const Store *, const char *name);
+const char *StoreKindName(const Store *, StoreKind);
+StoreKind StoreKindBase(const Store *, StoreKind);
+bool StoreKindIs(const Store *, StoreKind kind, StoreKind base);   /* kind is base or extends it */
+int  StoreFieldIndex(const Store *, StoreKind, const char *name);   /* -1: none */
+int  StoreFieldCount(const Store *, StoreKind);                    /* inherited fields included */
+const StoreFieldDecl *StoreFieldAt(const Store *, StoreKind, int field);
+bool StoreKindSetDefault(Store *, StoreKind, int field, const StoreValue *);   /* override a default */
+bool StoreKindSetDefaultAt(Store *, StoreKind, int field, int index, const StoreValue *key,
+                           const StoreValue *value);   /* collection defaults (:init) */
+```
+
+Layout: a kind's fields are its base's fields first, then its own, so a base field index is the
+same in every derived kind (single inheritance, B1). A derived kind may redeclare a base field only
+to change its default (same type; `error` otherwise). Field names are unique within the chain.
+
+Each kind has two block layouts, **shared** (fields without `STORE_LOCAL`) and **local**, packed in
+declaration order with 4-byte alignment: INT/FLOAT/BOOL/SYMBOL 4 bytes, STRING `max+1` rounded up
+(always 64), VEC3 12, REF 8, LIST/SET `4 + max*element`, MAP `4 + max*(key+value)`, GRID
+`max*height*element`. A kind keeps a template of each block holding the defaults; spawn copies
+them. Elements of SET are kept sorted (ints by value, symbols by name, refs by index then
+generation); MAP is kept sorted by key the same way (B1.1). The store owns per-kind pools: one
+growable array of shared blocks and one of local blocks, each with a free list, so a snapshot of a
+kind's shared state is one `memcpy` per pool (E3).
+
+### 2.3 Things and the tree
+
+```c
+typedef struct Store Store;
+bool StoreInit(Store *, uint64_t seed);
+void StoreFree(Store *);
+StoreId StoreSpawn(Store *, StoreKind, int owner, StoreId parent, StoreSymbol childName);
+bool StoreRemove(Store *, StoreId);        /* takes effect: gone from queries now; freed at tick end */
+bool StoreAlive(const Store *, StoreId);
+StoreKind StoreKindOf(const Store *, StoreId);
+int  StoreOwner(const Store *, StoreId);   /* cached root owner (B3.1) */
+int  StoreSpawner(const Store *, StoreId); /* the player whose leaving removes it (B3.7) */
+StoreId StoreParent(const Store *, StoreId);
+StoreId StoreFirstChild(const Store *, StoreId);
+StoreId StoreNextSibling(const Store *, StoreId);
+StoreId StoreChildNamed(const Store *, StoreId, StoreSymbol name);   /* declared children */
+StoreSymbol StoreChildName(const Store *, StoreId);                  /* STORE_NO_SYMBOL for guests */
+bool StoreIsGuest(const Store *, StoreId);
+bool StoreAttach(Store *, StoreId thing, StoreId parent);   /* becomes a guest; owner follows root */
+bool StoreDetach(Store *, StoreId thing);                   /* becomes a root owned by the host (0) */
+int  StoreThings(const Store *, StoreKind kindOrDerived, StoreId *out, int max); /* id order */
+uint32_t StoreCount(const Store *);
+```
+
+- `owner` on `StoreSpawn` is used only when `parent` is `STORE_NULL` (a root); a child's owner is
+  its root's. `StoreSpawner` of a root is its owner at spawn; of a declared child, its parent's.
+- Sibling order is deterministic: declared children in declaration order (the caller spawns them in
+  that order), then guests in attach order. Removal of a thing removes its declared children
+  (recursively) and detaches its guests at their last world transform: the store cannot compute
+  world transforms, so it calls the `orphan` hook (§2.6) before detaching, and the world3d module
+  writes the world position into the guest's local fields there.
+- Handles never point at freed memory or at a newer thing in the same slot (generation check on
+  every call). Ids are 64 bits so a Scheme c-object can carry one in its value word (§5.1).
+
+### 2.4 Fields
+
+```c
+bool StoreGet(const Store *, StoreId, int field, StoreValue *out);
+bool StoreSet(Store *, StoreId, int field, const StoreValue *);     /* converts INT<->FLOAT; else type error */
+int  StoreCountOf(const Store *, StoreId, int field);               /* elements in LIST/SET/MAP */
+bool StoreGetAt(const Store *, StoreId, int field, int index, StoreValue *key, StoreValue *value);
+bool StoreSetList(Store *, StoreId, int field, const StoreValue *items, int count); /* LIST or SET */
+bool StoreMapGet(const Store *, StoreId, int field, const StoreValue *key, StoreValue *out);
+bool StoreMapSet(Store *, StoreId, int field, const StoreValue *key, const StoreValue *value);
+bool StoreMapRemove(Store *, StoreId, int field, const StoreValue *key);
+bool StoreGridGet(const Store *, StoreId, int field, int x, int y, StoreValue *out);
+bool StoreGridSet(Store *, StoreId, int field, int x, int y, const StoreValue *);
+bool StoreGridFill(Store *, StoreId, int field, int x, int y, int w, int h, const StoreValue *);
+void *StoreSharedBlock(Store *, StoreId);   /* raw column access for native systems (B7) */
+void *StoreLocalBlock(Store *, StoreId);
+const char *StoreLastError(const Store *);  /* why the last call answered false */
+```
+
+Every write goes through the rule check in §2.7. A capacity overflow, a type mismatch, or a
+read of a removed thing answers false with `StoreLastError` set to a sentence a script error can
+carry verbatim, for instance `carried holds 4 items at most`.
+
+### 2.5 The tick and its handlers
+
+```c
+typedef enum StorePhase { STORE_PHASE_NONE, STORE_PHASE_GAMEPLAY, STORE_PHASE_PRESENTATION } StorePhase;
+typedef bool (*StoreHandlerFn)(Store *, StoreId self, StoreSymbol event,
+                               const StoreValue *args, int count, void *user);
+void StoreKindSetHandler(Store *, StoreKind, StoreHandlerFn, void *user);
+void StoreKindHandles(Store *, StoreKind, StoreSymbol event, bool handles);
+bool StoreKindHandlesEvent(const Store *, StoreKind, StoreSymbol event);  /* walks the base chain */
+typedef void (*StoreSystemFn)(Store *, float dt, void *user);
+bool StoreAddSystem(Store *, StoreSystemFn, void *user);     /* step 6: produces events */
+void StoreTick(Store *, float dt);
+void StoreFrame(Store *, float dt);          /* frame handlers, then -changed, then draw-hud */
+uint64_t StoreTickCount(const Store *);
+float StoreTickTime(const Store *);          /* seconds since the world started, ticks * dt */
+StorePhase StorePhaseNow(const Store *);
+StoreId StoreCurrent(const Store *);         /* the thing whose handler is running, or STORE_NULL */
+int  StoreCurrentOwner(const Store *);       /* the owner that handler runs for */
+bool StoreSend(Store *, StoreId target, StoreSymbol event, const StoreValue *args, int count);
+bool StoreAfter(Store *, StoreId self, float seconds, StoreSymbol event, const StoreValue *args, int count);
+bool StoreCommand(Store *, StoreId target, StoreSymbol event, const StoreValue *args, int count);
+void StoreSetLocalOwners(Store *, const int *owners, int count);    /* which owners run here */
+```
+
+`StoreTick` runs B2.2 in order:
+
+1. (network: phase 2; nothing here.)
+2. Player commands queued by `StoreCommand` since the last tick (from presentation code, §5.6) are
+   moved into the message queue, in the order given. The runner records them first (§6.3).
+3. Timers due this tick fire as messages, in due-tick then creation order.
+4. `tick` handlers of things whose owner is local, in id order, with `args = {dt}`.
+5. Messages are delivered first in, first out. Delivery may queue more; after 10,000 deliveries in
+   one tick the rest are dropped with a `TraceLog` warning naming the target and event. A message to
+   a removed thing is dropped silently (B2.2). A message whose kind has no handler for it is reported
+   once per kind and event through `TraceLog(LOG_WARNING, ...)`.
+6. Systems run (`StoreAddSystem`, in registration order) and the events they queue are delivered.
+7. Removals apply: storage of things removed this tick is freed, declared children with them, guests
+   detached (§2.3). Then the store records which shared fields changed since the last `StoreFrame`
+   (compare the shared pools against a shadow copy per kind, only for kinds that registered any
+   `-changed` event; fields are compared per declared field, so a collection is one change).
+   Things spawned this tick get their `start` message delivered at the head of the next tick's queue.
+
+Handlers run with `StoreCurrent` and `StoreCurrentOwner` set, `StorePhaseNow` at GAMEPLAY. A kind's
+`StoreHandlerFn` is called only for events `StoreKindHandlesEvent` answers true for (so a kind
+without a `tick` costs nothing per tick, B9.5); the function is the language's dispatcher and may
+walk the base chain itself.
+
+`StoreFrame` sets PRESENTATION and runs, for every thing (owned anywhere): `frame` with `{dt}`;
+then, for every field with a registered `<field>-changed` event whose value differs from the
+shadow, `<field>-changed` with `{was, now}` (`was` is `STORE_NONE` when the thing appeared since the
+last frame, B2.1); then `draw-hud` with no args; then it refreshes the shadow. A `-changed` event
+symbol is the field name with `-changed` appended, interned by `StoreKindHandles`.
+
+### 2.6 Hooks the runner and world3d install
+
+```c
+typedef struct StoreHooks {
+    void *user;
+    void (*error)(void *user, const char *message);         /* a rule or type error (§2.7) */
+    void (*orphan)(void *user, StoreId guest);              /* just before a guest is detached */
+    void (*spawned)(void *user, StoreId thing);             /* after a thing's blocks exist */
+    void (*removed)(void *user, StoreId thing);             /* before its blocks are freed */
+} StoreHooks;
+void StoreSetHooks(Store *, const StoreHooks *);
+```
+
+### 2.7 Rules (A4)
+
+`StoreSet` and friends refuse, and `StoreGet` refuses, in these cases, each with a fixed message
+prefix the Scheme layer completes with names and positions:
+
+| Rule | Check | `StoreLastError` prefix |
+|---|---|---|
+| 1 read | phase GAMEPLAY and the field has `STORE_LOCAL` | `local-read` |
+| 1 write | phase PRESENTATION and the field lacks `STORE_LOCAL` | `shared-write` |
+| 5 | phase GAMEPLAY and `StoreOwner(target) != StoreCurrentOwner()` and the field lacks `STORE_LOCAL` | `not-owner` |
+| engine | field has `STORE_ENGINE` and the writer is not the engine (`StoreSetEngine` bypasses) | `engine-field` |
+| 4 | value type not convertible to the field's | `type` |
+| capacity | collection full | `capacity` |
+
+Outside any handler (phase NONE: loading, the REPL, the runner setting up) every read and write is
+allowed. `bool StoreSetEngine(Store *, StoreId, int field, const StoreValue *)` is the engine's own
+write path (world3d writing `on-floor`, `velocity` after a slide, `%prev-position`) and skips the
+rules. `StoreAttach`/`StoreDetach` apply rule 5 to the thing being moved (only its owner may attach
+or detach it, B1); `StoreRemove` applies rule 5 too.
+
+### 2.8 Randomness, snapshot, hash
+
+```c
+uint32_t StoreRandom(Store *, StoreId thing, uint32_t n);   /* [0, n) from that thing's stream */
+uint32_t StoreRandomLocal(Store *, uint32_t n);             /* the presentation stream */
+typedef struct StoreSnapshot StoreSnapshot;
+StoreSnapshot *StoreSnapshotTake(const Store *);
+bool StoreSnapshotRestore(Store *, const StoreSnapshot *);
+void StoreSnapshotFree(StoreSnapshot *);
+uint64_t StoreHash(const Store *);
+```
+
+Each thing carries a 64-bit `splitmix64` state seeded from its spawner's stream at spawn (the world
+root from `StoreInit`'s seed), so one thing's draws never shift another's (B4). The stream is part
+of the thing's header, hashed, snapshotted and saved. A snapshot copies the thing table, every
+kind's shared pool and free list, the timers, the tick count and the pending `start`s; the message
+queue is empty at a tick boundary and is not copied. `StoreHash` is FNV-1a over, in id order:
+kind name, parent index, child name, owner, spawner, rng state and the shared block bytes; then
+the timers in order and the tick count. Local blocks are never hashed.
+
+### 2.9 Save and load (`core/store_save.c`)
+
+```c
+bool StoreSave(const Store *, const char *path);   /* atomic, through core/file.h */
+bool StoreLoad(Store *, const char *path);         /* into a store whose kinds are declared */
+```
+
+Text, one thing per stanza:
+
+```
+store 1 tick 4200 seed 1234
+thing 7 gen 3 kind soldier parent 2 name eye owner 1 spawner 1 rng 9182736455
+  health 100
+  carried (pistol shotgun)
+  ammo ((pistol 36) (shotgun 0))
+  position (1.5 0 3)
+  prey #7:3
+timer 12 after 4260 reload-done ()
+```
+
+Loading tolerates changed kinds: a missing field takes its default, an unknown one is skipped
+with one `TraceLog` warning per kind and field (B4). Ids are preserved (index and generation), so
+references stay valid. Local fields are not saved.
+
+## 3. Built-in 3D kinds (`core/world3d.h`)
+
+`bool World3DInit(World3D *, Store *)` declares the kinds below (names as scripts spell them) and
+registers one system (areas). It holds no GL objects: geometry is CPU arrays; §6 uploads them.
+
+| Kind | Base | Fields (type, flags) |
+|---|---|---|
+| `node` | - | `position` VEC3, `rotation` VEC3 (Euler radians X Y Z), `scale` VEC3 (1 1 1), `visible` BOOL #t, `static` BOOL, `cull-distance` FLOAT 0; `%prev-position` VEC3 LOCAL HIDDEN ENGINE, `%prev-rotation` VEC3 LOCAL HIDDEN ENGINE |
+| `model` | node | `mesh` STRING, `animation` SYMBOL, `spin` FLOAT (radians/s about Y, presentation only: the drawn rotation adds `spin * time`), `tint` VEC3 (1 1 1), `for-owner` BOOL, `hidden-for-owner` BOOL, `viewmodel` BOOL |
+| `socket` | node | `bone` STRING, `of` LIST of SYMBOL max 4 |
+| `camera` | node | `fov` FLOAT 75, `for-owner` BOOL |
+| `light` | node | `type` SYMBOL (`ambient` `directional` `point`), `energy` FLOAT 1, `color` VEC3 (1 1 1), `range` FLOAT 10 |
+| `character` | node | `radius` FLOAT 0.4, `height` FLOAT 1.8, `velocity` VEC3, `on-floor` BOOL ENGINE |
+| `solid` | node | `size` VEC3 (1 1 1): an axis-aligned box centred on the node |
+| `area` | node | `radius` FLOAT 1: a sphere; `%inside` LIST of REF max 16 HIDDEN ENGINE (who was overlapping last tick) |
+| `tilemap` | node | `width` INT 16, `depth` INT 16, `cell-size` FLOAT 2, `height` FLOAT 3, `cells` GRID of INT (width x depth, 0 open, 1 solid; declared with max = width, height = depth at the kind level, so the grid is 64 x 64 at most and the tilemap's `width`/`depth` say how much is used), `floor-texture` STRING, `wall-texture` STRING, `ceiling-texture` STRING |
+| `sound` | node | `stream` STRING, `volume` FLOAT 1, `playing` BOOL |
+
+Kind settings in a `(child eye (camera :at v :fov 75 :for-owner #t))` form are just field writes
+after spawn (`:at` is `position`); the Scheme layer does that (§5.3). Settings on `(is character
+:radius 0.35)` are default overrides for the derived kind (`StoreKindSetDefault`).
+
+Functions (all deterministic; no GL; every one refuses a stale id):
+
+```c
+bool World3DWorldMatrix(World3D *, StoreId, Matrix *out);       /* cached, tree order (B9.1) */
+bool World3DWorldPosition(World3D *, StoreId, Vector3 *out);
+void World3DUpdateTransforms(World3D *, float alpha);   /* once per frame: interpolate %prev->now by
+                                                           alpha (a parent change is a jump, B3.5),
+                                                           recompose dirty subtrees parent first */
+void World3DBeginTick(World3D *);                       /* copies position/rotation into %prev-* */
+bool World3DMoveAndSlide(World3D *, StoreId character, float dt);
+bool World3DTeleport(World3D *, StoreId node, Vector3 world);   /* sets %prev too: no interpolation */
+typedef struct World3DHit { bool hit; float distance; Vector3 point, normal; StoreId thing; } World3DHit;
+World3DHit World3DRaycast(World3D *, Vector3 from, Vector3 direction, float maxDistance, StoreId ignore);
+bool World3DLineOfSight(World3D *, Vector3 from, Vector3 to);   /* static geometry only */
+int  World3DOverlapping(World3D *, StoreId area, StoreKind kind, StoreId *out, int max);
+StoreId World3DNearest(World3D *, StoreKind kind, Vector3 point, float maxDistance,
+                       bool (*accept)(StoreId, void *), void *user);
+bool World3DCellToWorld(World3D *, StoreId tilemap, int x, int z, Vector3 *out); /* cell centre, y 0 */
+bool World3DWorldToCell(World3D *, StoreId tilemap, Vector3 world, int *x, int *z);
+bool World3DPathNext(World3D *, StoreId tilemap, Vector3 from, Vector3 to, Vector3 *out);
+int  World3DTilemapChunks(World3D *, StoreId tilemap, World3DChunk *out, int max);
+```
+
+- **Collision world**: tilemap solid cells are boxes `[x*cs, (x+1)*cs] x [0, height] x [z*cs,
+  (z+1)*cs]` in the tilemap's world space (assume the tilemap is unrotated and unscaled: refuse
+  otherwise with a warning); `solid` boxes are `size` centred on the world position; characters
+  are boxes `2r x height x 2r` with the position at the feet. `World3DMoveAndSlide` moves by
+  `velocity * dt` in three axis-separated sweeps (X, then Z, then Y) against every box except its
+  own, resolving each axis to the contact face; when Y is blocked from below, `on-floor` is #t and
+  `velocity.y` is zeroed; the final position is written with `StoreSetEngine`. Deterministic:
+  boxes are tested in id order.
+- **Areas**: the system runs each tick: for every `area`, the set of `character`s whose box
+  intersects the sphere, in id order; a newcomer gets `touched` sent to the area with `{other}`, a
+  leaver `untouched`. `%inside` holds the current set (so a save restores it).
+- **Rays**: 3D DDA over tilemap cells, slab tests on solids and character boxes; nearest hit wins;
+  `ignore` and things under it are skipped. `line-of-sight?` tests tilemap and solids only.
+- **Paths**: breadth-first over open cells from `to`'s cell, 4-connected, cached per tilemap and
+  target cell for the current tick; `World3DPathNext` answers the centre of the next cell toward
+  `to` from `from`'s cell, or `to` itself when adjacent or unreachable.
+- **Chunks**: 8x8 cells; `World3DChunk` carries the chunk's vertex arrays (positions, normals, uvs,
+  as `MB` from `core/mesh_builder.h`), a bounding box, a content hash and which texture: one chunk
+  yields up to three (floor, wall, ceiling). A chunk is rebuilt when its 64 cells' hash changed;
+  the caller (§6) sees `changed` set and re-uploads. Floors are quads at y 0 on open cells, ceilings
+  at `height`, walls on each solid face next to an open cell, UVs in cell units.
+- **Transforms**: `World3DUpdateTransforms` is the cached pass (B9.1): a dirty bit per thing set by
+  the `spawned` hook and by any write to `position`/`rotation`/`scale`/parent (the store exposes a
+  per-tick write bitmap per kind block; simplest: world3d compares the node fields it cached last
+  frame, 3 vec3 compares per node, which E7 shows costs under the budget). Interpolation is between
+  `%prev-*` and the current values by `alpha`, except when the thing's parent changed this tick or
+  `World3DTeleport` was called (then `%prev` equals the current value).
+- **Socket**: its world matrix is its parent model's bone matrix when §6 supplies one (a callback
+  `World3DSetBoneLookup`), otherwise its own local transform. Phase 1 supplies none; the field
+  exists so the carried-item example loads.
+
+## 4. The draw path (`core/draw_path.h`)
+
+```c
+typedef struct DrawItem {
+    uint32_t mesh;        /* DrawPathMesh id */
+    uint32_t material;    /* DrawPathMaterial id: shader, texture, tint */
+    Matrix world;
+    Vector3 center; float radius;   /* world-space bounding sphere */
+    uint8_t layer;        /* 0 opaque, 1 alpha-tested, 2 translucent, 3 viewmodel */
+} DrawItem;
+typedef struct DrawStats { int items, visible, draws, shaderSwitches, textureSwitches;
+                           double cullMicros, sortMicros, submitMicros; } DrawStats;
+bool DrawPathInit(DrawPath *);
+void DrawPathFree(DrawPath *);
+uint32_t DrawPathMesh(DrawPath *, const Mesh *);        /* uploads a copy; 0 on failure */
+uint32_t DrawPathMeshUpdate(DrawPath *, uint32_t id, const Mesh *);   /* re-upload (chunks) */
+uint32_t DrawPathMaterial(DrawPath *, Shader, Texture2D, Color tint, int normalMatrixLoc);
+uint32_t DrawPathStaticBatch(DrawPath *, const DrawItem *items, int count);   /* one merged mesh
+                                                                                 per material, world
+                                                                                 space; returns the
+                                                                                 first new mesh id */
+void DrawPathBegin(DrawPath *, Camera3D camera, int screenWidth, int screenHeight);
+void DrawPathAdd(DrawPath *, const DrawItem *);
+DrawStats DrawPathEnd(DrawPath *);   /* cull, key, sort, submit; inside BeginMode3D */
+```
+
+`DrawPathEnd` does B9.2 exactly: sphere-against-six-planes cull (a `cull-distance` is applied by the
+caller by not adding the item); 64-bit key `layer(2) | shader(8) | material(12) | mesh(12) |
+depth(16)` for layers 0 and 1, and `layer(2) | depth(16, back to front) | shader | material |
+mesh` for layer 2, with the material/mesh part cached per item and only the depth refreshed
+(E9); an 8-bit LSD radix sort on the visible keys; then a submit loop that enables the shader
+only when the key's shader bits change, binds the texture only when it changes, computes MVP on
+the CPU per item and uploads it, uploads the model matrix and the normal matrix only for a
+material whose `normalMatrixLoc >= 0`, and calls `rlDrawVertexArrayElements`. It does not call
+`DrawMesh`. Start from `experiments/e9_cull_sort/e9.c` and `experiments/e6_draw_cost/bench.c` in
+the design repository for the sort and the submit body. Layer 3 (viewmodel) is drawn last with the
+depth buffer cleared and its own projection; phase 1 draws it like layer 0 and notes that.
+
+Static batching (B9.3): items with the same material are merged into one world-space mesh (apply
+each `world` to positions and normals); the result is a mesh id the caller adds as one item with the
+identity matrix and the merged bounding sphere.
+
+## 5. The Scheme layer (`gameplay/script/game_s7.c`, `core/scheme/kinds.scm`)
+
+The existing `script_s7.c` is untouched. `game_s7.c` is a second frontend for the store, with its own
+`s7_scheme`. Read `.claude/skills/s7-embedding/SKILL.md` in the design repository and `vendor/s7/s7.h`
+before writing it.
+
+### 5.1 Things as values
+
+One c-type `thing` whose value word is the `StoreId` packed into a pointer-sized integer
+(`(uintptr_t)index << 32 | generation`); no allocation per access, no GC free, equality by value.
+`ref` makes `(thing 'field)` read a field (or a declared child by name) and `(thing 'method args...)`
+call the methods below; `set` makes `(set! (thing 'field) v)` write. A removed thing prints as
+`#<removed soldier>` and every access to it is an error naming the kind. A REF field that names a
+removed thing reads as `#f` (B1).
+
+Values cross as: INT integer, FLOAT real, BOOL boolean, SYMBOL symbol, STRING string, VEC3 a
+float-vector of 3 (`(vec3 x y z)` makes one; `vx` `vy` `vz` read), REF a thing or `#f`, LIST/SET a
+fresh list, MAP a `map-view` c-object (applicable: `(ammo 'pistol)`, `(set! (ammo 'pistol) 12)`,
+`map-keys`, `map-values`, `map-remove!`, `map-for-each`; assigning an alist to the field replaces
+the map), GRID a `grid-view` c-object (`grid-ref`, `grid-set!`, `grid-fill!`, `grid-fill-rect!`,
+`grid-width`, `grid-height`). Every C function is registered with `s7_define_typed_function`
+where it never calls back into Scheme, and with `s7_define_function` where it does.
+
+### 5.2 `define-kind`
+
+`core/scheme/kinds.scm` defines the macro. It accepts, in any order after the name:
+
+```scheme
+(is base :setting value ...)        ; one base kind; settings override that kind's field defaults
+(field name default [:local #t] [:init v])
+(field name (list-of T :max n) [:init '(...)])   ; also set-of, (map-of K V :max n), (grid-of T w h)
+(field name (ref kind))
+(child name (kind :setting value ...) child...)  ; :at is position; nested children allowed
+(on (event arg ...) body ...)
+(define (helper arg ...) body ...)
+(states initial (name (on ...) ...) ...)
+```
+
+Type of a scalar field from its default: exact integer INT, real FLOAT, boolean BOOL, symbol
+SYMBOL, string STRING, float-vector VEC3, `#f` with `(ref k)` REF. The macro expands to calls on
+`%kind-declare` (name, base, field decls, then children), and for each handler and helper
+`(%kind-handler kind 'event (lambda (self args...) walked-body))`. The **code walk** rewrites, in
+handler and helper bodies, a free reference to a field or declared child name `n` into `(%field
+self i)` / `(%child self i)`, `(set! n v)` into `(%set-field! self i v)`, and a call `(helper
+args)` into `(%helper-name self args)`; it respects shadowing by `lambda`, `let`, `let*`,
+`letrec`, `do`, named `let` and inner `define`, and it does not descend into `quote`. Inherited
+fields and children are in scope too (the base kind's declaration is looked up at expansion).
+`self` is bound in every handler and helper. About 150-200 lines (B5.2); it is the risk named in
+D.3, so it is written first and checked by a Scheme test file `tests/regression/kinds_walk.scm`
+evaluated by the checks.
+
+`states`: adds a hidden SYMBOL field `state` with the initial value, defines `(go 'name)` (records
+the pending state), registers each state's handlers as `state:event`; dispatch tries `state:event`
+first; after a handler returns, a pending `go` runs `exit` for the old state and `enter` for the new
+one (B2.5).
+
+### 5.3 Spawning and children
+
+`(spawn 'kind :at v :owner p :parent thing)` spawns the kind and, in declaration order, every
+declared child recursively, applying each child's settings as field writes, then queues `start`.
+It answers the thing at once. `(remove thing)`, `(attach! thing parent :at v :rotation r)`,
+`(detach! thing :at world-position :up normal :yaw y)` and `(detach! thing :keep-world #t)`,
+`(parent t)`, `(children t)`, `(first-child t)`, `(child t 'name)`, `(is? t 'kind)`, `(kind-of t)`,
+`(things 'kind)`, `(game)` (the root thing of kind `game`), `(local-player)`, `(players)`.
+
+### 5.4 Handlers, messages, timers
+
+`(send thing 'event args...)` from gameplay code queues a message (`StoreSend`); from presentation
+code it is a player command (`StoreCommand`). `(after seconds 'event args...)` sets a timer on
+`self`. Arguments are data: an argument that is a procedure, a hash table, a pair or a port raises
+the rule 4 error. Engine events reach handlers by the same dispatcher: the C `StoreHandlerFn` for
+Scheme kinds looks up `event` in the kind's handler table (an s7 hash table keyed by symbol,
+protected), walks to the base kind if absent, and calls the closure with `self` and the args
+converted by §5.1. Errors raised inside are caught (`s7_call_with_catch`) and reported once as
+`<kind> #<index> <event>: <message> (<file>:<line>)` from the owlet's `error-file`/`error-line`
+when present; the handler is not retried that tick, and the game keeps running.
+
+### 5.5 The five rules, as errors
+
+Each is an s7 error whose message is the sentence in proposal A4's table, with names filled in:
+
+1. `local-read` -> `hurt is a local field (this screen only). The tick handler of soldier can't
+   read it, because other players and replays don't have it. If gameplay needs it, remove :local
+   from its declaration.` and `shared-write` -> `mesh on gun is shared state; a presentation
+   handler can't write it. Declare the field :local, or write it from a gameplay handler.`
+2. Top-level definitions frozen after load (§5.7): s7's own `immutable` error is caught and
+   reworded: `can't set! score: top-level definitions are frozen once the game has loaded, ...`
+   (the full A4 text).
+3. `real-time`, `current-time`, `open-input-file`, `open-output-file`, `load` in a handler ->
+   `real-time is for presentation. Gameplay code runs again on replay and on other machines, where
+   the clock differs. Use (tick-time), seconds since the world started.`
+4. `type` on a procedure/table/port -> `can't store a procedure in on-hit: fields hold data so they
+   can be saved and sent. Store a symbol and dispatch on it: (set! on-hit 'explode) ...`
+5. `not-owner` -> `health on soldier #12 belongs to player 2, and this handler runs for the host,
+   so it can't write it. Send a message instead: (send other 'collect 'medkit), with a matching
+   (on (collect what) ...) in soldier.`
+
+The regression check loads a script per rule headless and asserts the error text's first sentence.
+
+### 5.6 The rest of the surface
+
+Input (read from the tick's `GameInput`, §6.2): `(define-actions (name "Key") ...)`, `(held?
+'action)`, `(pressed? 'action)`, `(input-vector 'left 'right 'forward 'back)` -> vec3 (x, 0, z)
+normalised, `(mouse-motion)` -> vec3 (dx, dy, 0). Vectors: `vec3 vx vy vz v+ v- v* vscale vlength
+vdistance vnormalize vdot vcross rotate-y heading aim spread clamp`. World: `world-position`,
+`raycast` (from dir max :ignore) -> hit or #f, `hit-thing hit-point hit-normal hit-distance`,
+`line-of-sight?`, `nearest` (kind point :max :where), `overlapping` (area kind), `aimed-at` (camera
+kind distance), `path-next` (tilemap from to), `cell->world`, `world->cell`, `move-and-slide!`,
+`teleport!`, `random` (n; from `self`'s stream, or the presentation stream in presentation phase),
+`tick-time`. Presentation: `draw-text` (text x y :size :color :align), `draw-rect` (x y w h :color),
+`draw-ring` (x y r :color), `draw-image` (name x y), `screen-width`, `screen-height`, `rgba`,
+colour symbols `white black red ...`, `play-sound` (name :at), `burst` (preset :at), `profile-ref`,
+`profile-set!` (a per-player key/value file beside the project, presentation only), `format` (s7's).
+Networking: `host-game` and `join-game` exist and raise `networking comes in phase 2`. REPL:
+`(things 'kind)`, `(inspect thing)` prints every field, `(reload)`, `(save-game path)`,
+`(load-game path)`, `(snapshot)`, `(restore s)`.
+
+Every one is a row-like C function in `game_s7.c`; there is no `script_api.def` row for them
+because they take keyword arguments and things, which that table has no types for. State that in
+`gameplay/script/README.md`.
+
+### 5.7 Environment, freeze, reload
+
+Game files load into `(sublet (rootlet))`. After load, the environment and every binding in it,
+and the funclets of every closure reachable from it (E5's `freeze-let!`, in
+`experiments/e5_s7_determinism/traps.c` of the design repository), are made immutable. The clock
+and file functions listed in §5.5 are shadowed in that environment by procedures that raise the
+rule 3 error. `(reload)` loads the game files into a fresh environment, re-registers every kind's
+handlers (kinds keep their ids; a kind whose fields changed is re-declared only if the layout is
+identical, otherwise the reload is refused with a message naming the kind and field: migrating
+fields waits for phase 2), and re-resolves cached closures. The stdin REPL evaluates in that
+environment between frames, as `script_s7.c`'s does, and records each line as a developer command
+in the recording (§6.3).
+
+## 6. The runner (`gameplay/game.c`)
+
+### 6.1 Projects and entry points
+
+A Scheme-only project has an `engine.project` with `game <file.scm>` and no `source` line. The
+engine-side `EngineApplicationMain` in `gameplay/game_main.c` reads the manifest beside the
+executable (engine-build copies it) or the directory given as the first argument, and runs it.
+`tools/trench/main.c` is the same entry for developers: `trench run <dir> [flags]`. Flags:
+
+```
+--headless           no window, no GL, no audio; ticks as fast as the CPU allows
+--ticks N            stop after N ticks (headless), or after N ticks in a window
+--seed S             world seed (default: from the clock; always written to the recording)
+--record FILE        record this session (§6.3)
+--replay FILE        replay FILE's inputs; with --headless nothing is drawn
+--hash-every N       print "tick T hash H" every N ticks (and at the end)
+--bot                headless only: synthesize input from the seed each tick (a random walk over
+                     the actions and mouse), for a recording nobody had to play
+--bench              print per-tick and per-frame timing at exit (p50/p99 in microseconds, and the
+                     draw stats), as tools/store_bench does
+--save FILE / --load FILE
+```
+
+### 6.2 The loop
+
+Per tick (`Update`): build the tick's `GameInput` (action bit set, pressed edges, mouse delta) from
+`EngineInput` and the actions declared by `define-actions`, or from the replay file; append it to
+the recording; `World3DBeginTick`; `StoreTick(dt)`. Per frame (`Draw`): `World3DUpdateTransforms(alpha)`;
+`StoreFrame(dt)`; upload changed tilemap chunks and new models; build draw items from every visible
+`model` (one per mesh of its file; `for-owner`/`hidden-for-owner` decide per machine; layer from
+the material) and every tilemap chunk; `DrawPathBegin/Add/End` with the local player's `for-owner`
+camera (or a default camera when none); particles through `CoreParticlesDraw`; then the HUD calls
+queued by `draw-hud` are drawn in order; REPL poll. Headless skips the frame entirely (B2.2).
+
+Models: `mesh` names resolve through the project's data root; `.glb`, `.obj` and `.iqm` load
+through raylib once per name; a missing file gets a 0.5 m cube and one warning naming the file, so a
+game runs before its art exists. `animation` selects a clip by name from the file's animations
+(`UpdateModelAnimation`, CPU skinning; B9.3 notes the bone limit); no clip of that name holds the
+rest pose. Sounds: `play-sound` loads a `.wav`/`.ogg` once per name; missing is one warning.
+`burst` presets: `muzzle-flash`, `blood`, `dust`, `sparks`, as `CoreParticles` emits with fixed
+parameters. Lighting: one GLSL 120 pair `core/shaders/world.vs` / `world.fs`: ambient plus one
+directional light from the first `light` of type `directional` (default from above), distance fog,
+a diffuse texture, `tint`.
+
+The window path is built and checked for build and for draw statistics only. It is not verified in
+play by this work; the user does that on their hardware.
+
+### 6.3 Recording and replay (`core/replay.h`)
+
+```c
+typedef struct ReplayTick { uint32_t actions; uint32_t pressed; float mouseDx, mouseDy;
+                            uint16_t commandCount; /* commands follow in the file */ } ReplayTick;
+bool ReplayOpenWrite(Replay *, const char *path, uint64_t seed, const char *engineRevision, uint64_t kindsHash);
+bool ReplayWriteTick(Replay *, const ReplayTick *, const ReplayCommand *commands);
+bool ReplayOpenRead(Replay *, const char *path, uint64_t *seed, uint64_t *kindsHash);
+bool ReplayReadTick(Replay *, ReplayTick *, ReplayCommand *commands, int max);
+void ReplayClose(Replay *);
+```
+
+A command is `{StoreId target; char event[32]; StoreValue args[4]; int count}`, written as text
+inside a binary stream is fine; simplest is a small binary format with a magic and a version.
+Replay refuses a file whose kinds hash differs from the loaded game's (`StoreKindsHash(store)`: FNV
+over every kind's name and field declarations) with a message naming the mismatch. A replay in a
+fresh process with the same build, seed and file reaches the same `StoreHash` at every tick; the
+`--hash-every` output is what the go/no-go compares across three processes.
+
+## 7. Phase 0 (in `core/engine.h`, `core/diagnostics.h`, `core/net_session.h`)
+
+- `EngineConfig.headless` (bool) and `EngineConfig.maxTicks` (uint64, 0 = unlimited). Headless:
+  no `InitWindow`, no capability check, no audio, no `Draw`, no `BuildUi`; the loop runs `Update`
+  with `fixed_dt` and a zero `EngineInput` until it returns false or `maxTicks` is reached, with
+  no sleeping; `CoreSetDataRoot` still runs. `EngineRunningConfig` works.
+- `CoreDiagnostics` gains `double tickMicrosLast, tickMicrosMax, tickMicrosTotal; uint64_t ticks;
+  double frameMicrosLast, frameMicrosMax, frameMicrosTotal;` filled in both modes with
+  `clock_gettime(CLOCK_MONOTONIC)`.
+- `CoreNetSession` gains `uint64_t bytesSent, bytesReceived;` (cumulative, from ENet's
+  `totalSentData`/`totalReceivedData` at each `CoreNetSessionStep`) and `double sendRate,
+  receiveRate;` (bytes per second over the last whole second).
+- Regression checks: a headless run of 100 ticks through `EngineRunApplication` (no window is
+  created; the check asserts `ticks == 100` and that `tickMicrosTotal > 0`); a loopback session
+  step showing the counters rise.
+
+## 8. Checks and benches
+
+- `tests/regression/store_checks.c`: kinds and inheritance; every field type and collection incl.
+  capacity refusal and sorted order; spawn/remove/children/guests/attach/detach and owner
+  following the root; the tick order (a script-free C kind whose handler logs events; asserts the
+  B2.2 order and that `remove` drops queued messages); timers; rules 1, 5, engine-field, type;
+  snapshot/restore/hash equality; save/load round trip and a changed-kind load.
+- `tests/regression/world3d_checks.c`: collide-and-slide into a wall and onto a floor; area
+  touched/untouched; raycast against a cell and a character; line of sight; path-next around a
+  wall; chunk rebuild on a cell change; transform caching (a child under a moved parent moves, a
+  child under an unmoved parent's matrix is bit-identical to last frame's).
+- `tests/regression/draw_path_checks.c`: key order for opaque and translucent items; radix sort
+  equals qsort order; cull counts; static batch vertex count. GL-dependent parts run under the
+  hidden window the suite already opens.
+- `tests/regression/game_checks.c`: `define-kind` walk (from `kinds_walk.scm`); the five rule
+  errors; a headless bot session of 600 ticks recorded then replayed to the same hash.
+- `tools/store_bench`: 1,000 things of a 12-field kind all changing every tick, 3,600 ticks: prints
+  µs per tick p50/p99, snapshot, hash. Condition 3.
+- `tools/draw_bench`: E6's method (EGL surfaceless, geometry clipped, `glFinish` per frame): 400
+  items / 120 draws through the draw path, 600 frames, prints CPU µs per frame p50/p99. Condition 6.
+- `tools/bench_x61.sh LABEL`: builds and runs both benches pinned to the last core and writes
+  `bench_LABEL.txt`, for the user's ThinkPad X61.
