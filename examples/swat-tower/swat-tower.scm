@@ -69,8 +69,9 @@
                 (map-keys roster) (map-values roster))))
 
   (define (populate room)                            ; a helper; like a handler, it sees the fields
-    (do ((i 0 (+ i 1))) ((= i (+ 1 (random (min 3 floor)))))
-      (spawn (if (< (random 100) (* 12 floor)) 'shooter 'rusher) :at (random-spot room)))
+    (let ((n (+ 1 (random (min 3 floor)))))
+      (do ((i 0 (+ i 1))) ((= i n))
+        (spawn (if (< (random 100) (* 12 floor)) 'shooter 'rusher) :at (random-spot room))))
     (when (< (random 100) 60)
       (spawn (list-ref '(medkit ammo-box shotgun-crate) (random 3)) :at (random-spot room))))
 

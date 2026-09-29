@@ -20,8 +20,17 @@ trench run mygame [flags]
 The runner declares the built-in 3D kinds, loads the game file, then spawns a `game` if the file did
 not spawn one itself (a file with no `game` kind is refused). A game usually spawns its players from
 `game`'s `start` handler; the local player is owner 1. Models, textures, sounds and images are named
-relative to the project directory; a model file that is missing draws as a magenta 0.25 m cube and
-a missing texture as mid-grey, each with one warning.
+relative to the project directory; a model file that is missing draws as a magenta 0.25 m cube
+standing on the model's origin (on a character, an upright 0.5 x 1.6 x 0.5 m box standing on its
+feet), and a missing texture as mid-grey, each with one warning.
+
+A handler that runs longer than 50 ms is stopped, and the error names it and its `(on ...)` line:
+`the tick handler of rusher #34 ran for over 50 ms and was stopped; the loop at swat-tower.scm:212
+may never end`. What it did before it was stopped stays done. The clock is checked when the handler
+calls a procedure of its own or an engine function; a loop that calls neither (only Scheme's
+built-ins such as `+`) is not caught. `--no-time-limit` turns the limit off, for a debugging session.
+**Ctrl+C** in the terminal ends the run as closing the window does (the recording is closed and
+`--save` written); a second Ctrl+C kills the process at once.
 
 The window opens at 80% of the monitor at 16:9, with vsync. It captures the mouse while it has
 focus; **Escape releases the mouse** (and captures it again), and never reaches the game as an
@@ -43,6 +52,10 @@ screen for five seconds, prefixed `game:`, besides being printed.
 | `--present` | with `--headless` only: also run the `frame`, `-changed` and `draw-hud` handlers each tick, drawing nothing; `--bench` then prints the HUD calls per frame |
 | `--shot-every N` | in a window only: save a screenshot every N ticks, printing `shot T PATH` |
 | `--shot-dir DIR` | where the screenshots go, as `DIR/shot_<tick>.png` (default: the current directory) |
+| `--no-time-limit` | let handlers run as long as they take (by default one running over 50 ms is stopped) |
+
+With no display (over ssh, say) a windowed run exits at once with `Engine: no display; run with
+--headless or under a display`.
 
 A recording replayed in a fresh process with the same build reaches the same hash at every tick:
 

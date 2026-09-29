@@ -597,7 +597,21 @@ executable (engine-build copies it) or the directory given as the first argument
 --shot-every N       windowed only: after drawing, every N ticks, save DIR/shot_<tick>.png and print
                      "shot T PATH"
 --shot-dir DIR       where --shot-every writes (default: the current directory)
+--no-time-limit      GameS7SetHandlerLimit(0): no handler is stopped (default 0.05 s)
 ```
+
+A handler that runs past the limit (proposal B2.6, 50 ms) is stopped: `Run` in game_s7.c arms the
+limit around the dispatcher's `s7_call`; s7's begin hook, and `GameS7LimitCheck` at the entry of the
+engine's field, thing, number and vec3 argument helpers, read the clock every 256th call, then set
+`all_done` or raise `handler-time-limit`. The report is `the <event> handler of <kind> #<n> ran for
+over 50 ms and was stopped; the loop at <file>:<line> may never end`, with the handler's `(on ...)`
+line, throttled like other handler errors. Its effects so far stay. A loop that enters no body and
+calls no engine function is not seen. SIGINT (Ctrl+C) sets a flag (sigaction, no SA_RESTART): the
+same checks stop the running handler, `Update` returns false, `run: interrupted (press Ctrl+C again
+to kill)` is printed once, and `Shutdown` runs as usual; a second SIGINT restores the default
+disposition and re-raises. With no display, `EngineRunApplication` starts GLFW once to ask before
+`InitWindow` (which in raylib 5.5 carries on into OpenGL after a failed start and crashes) and
+returns 1 with `Engine: no display; run with --headless or under a display`.
 
 ### 6.2 The loop
 
