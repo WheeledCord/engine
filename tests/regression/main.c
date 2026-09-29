@@ -3852,6 +3852,7 @@ int main(int argc, char **argv)
     UiFree(&ui);
     CloseWindow();
     failures += StoreChecks();
+    failures += World3DChecks();
     printf("REGRESSION TEST failures=%d checks=%d\n", failures, checks);
     return failures ? 1 : 0;
 }

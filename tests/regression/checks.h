@@ -16,4 +16,7 @@ int DrawPathChecks(void);
 /* The store: kinds, fields, the tree, the tick order, rules, snapshot, hash, save and load. */
 int StoreChecks(void);
 
+/* The built-in 3D kinds: slide, areas, rays, paths, chunks, cached transforms, determinism. */
+int World3DChecks(void);
+
 #endif

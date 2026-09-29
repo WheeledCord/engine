@@ -14,6 +14,15 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   comparison, the rules that keep gameplay replayable, per-thing random streams, snapshots, a
   world hash and text saves (`store_save.c`). Headless: no window and no GL. The contract is
   [docs/developer/store.md](../docs/developer/store.md) §2.
+- `world3d`: the store's built-in 3D kinds (`node`, `model`, `socket`, `camera`, `light`,
+  `character`, `solid`, `area`, `tilemap`, `sound`) and the systems behind them, headless and
+  deterministic: world matrices cached per frame and interpolated from the previous tick (a
+  teleport, spawn or parent change jumps), character collide-and-slide against axis-aligned boxes
+  (tilemap solid cells, solids, other characters) in X, Z, then Y sweeps, areas that send
+  `touched`/`untouched`, ray casts (a DDA over tilemap cells, slab tests on boxes) and line of
+  sight, breadth-first paths over tilemap cells cached per tick, and tilemap floor, wall and
+  ceiling geometry in 8x8-cell chunks of CPU vertex arrays, rebuilt when their cells change. The
+  contract is [docs/developer/store.md](../docs/developer/store.md) §3.
 - `node`: a `node3d` object with a local position, rotation and scale and an optional parent, whose
   world transform is its parent's world transform times its own, as in Godot's Node3D.
 - `network`, `net_clock`, `net_sync`, `net_session`: multiplayer. `network` is the ENet transport;
