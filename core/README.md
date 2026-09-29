@@ -36,6 +36,14 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   without the units fails the declaration instead of sampling something else.
 - `render_target`: colour/depth FBO construction and destruction.
 - `world_draw`: model-instance drawing with optional shader override across material slots.
+- `draw_path`: flat draw items (mesh id, material id, world matrix, world bounding sphere, layer)
+  turned into draw calls without `DrawMesh`: a sphere-against-frustum cull, a cached 64-bit sort key
+  (opaque by shader, material, mesh, then near to far; translucent far to near), an 8-bit radix sort,
+  and a submit that switches shader and texture only when they change and uploads one MVP per item.
+  It owns copies of the meshes it uploads, and merges items of one material into world-space meshes
+  for static batching. The viewmodel layer is drawn last without depth testing, phase 1's stand-in
+  for its own depth clear and projection. Nothing in the engine draws through it yet; see
+  `docs/developer/store.md` section 4.
 - `mesh_builder`: explicit position/normal/UV emission, quad helpers and directional mapping math.
 - `skeleton`: hierarchy, local/global pose conversion, posed-pivot rotations, chain collapse and raymath skin matrices.
 - `animation`: per-instance playback, explicit FPS, frame sampling, quaternion pose blending, aim and GPU pose upload.

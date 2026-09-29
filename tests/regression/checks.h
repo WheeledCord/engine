@@ -10,4 +10,7 @@
 /* A headless engine run (no window), and the network byte counters over loopback. */
 int HeadlessChecks(void);
 
+/* The draw path: keys, sort, cull, static batching, and a submit under the hidden window. */
+int DrawPathChecks(void);
+
 #endif
