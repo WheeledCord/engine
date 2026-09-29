@@ -15,10 +15,12 @@
 #include "core/engine.h"
 #include "core/file.h"
 #include "core/input_map.h"
+#include "core/network.h"
 #include "core/particles.h"
 #include "core/replay.h"
 #include "core/shader.h"
 #include "core/store.h"
+#include "core/store_net.h"
 #include "core/world3d.h"
 #include "gameplay/script/game_s7.h"
 #include "raymath.h"
@@ -169,6 +171,29 @@ typedef struct Runner
     ProfileEntry profile[MAX_PROFILE];
     int profileCount;
     bool profileRead;
+    // Networking (docs/developer/store.md §9.6).
+    int hostPort, joinPort;  /* --host PORT, --join ADDRESS:PORT; 0 when not given */
+    char joinAddress[256];
+    uint64_t botUntil;       /* --bot-until N: no bot input after tick N; 0 for none */
+    const char *printKind, *printField, *countKind; /* --print-field KIND FIELD, --print-count KIND */
+    bool selfStop;           /* the runner counts its ticks itself: in a window, or in a live session */
+    bool lastTicked;         /* the last Update ran a tick (a client waiting for its welcome does not) */
+    StoreNet net;
+    StoreNetConfig netConfig;
+    bool netOpen;            /* run.net is in use */
+    bool netLive;            /* ENet under it; false when replaying, when packets come from the file */
+    bool hosting, connected, arrived, failed;
+    char netWhy[256];        /* why the session ended */
+    CoreNetEndpoint endpoint;
+    CoreNetPeer hostPeer;                       /* a client's ENet peer for the host */
+    CoreNetPeer peerOf[STORE_NET_PLAYERS + 1];  /* the host's ENet peer of each player */
+    int playerOf[STORE_NET_PLAYERS];            /* the player of each of the host's ENet peers */
+    double netStarted, paceStart, sleptMicros;
+    uint64_t paceCount, bytesSent, bytesReceived;
+    ReplayPacket *pending;   /* arrived since the last recorded tick, for the recording */
+    int pendingCount, pendingCapacity;
+    ReplayCommand captured[MAX_COMMANDS]; /* commands queued for the next tick from outside it */
+    int capturedCount;
 } Runner;
 
 static Runner run;
@@ -418,13 +443,374 @@ static GameInput FromBot(void)
     return input;
 }
 
-static void RecordTick(const GameInput *input)
+/* ---- networking (docs/developer/store.md §9.6) ---------------------------------------------- */
+
+#define NET_CHANNELS 3        /* 0 reliable, 1 unreliable sequenced (state), 2 unreliable (effects) */
+#define NET_JOIN_SECONDS 5.0  /* a client with no welcome by then gives up */
+#define NET_LINGER_SECONDS 5.0
+
+static bool PlaySoundHere(const char *name, bool placed, Vector3 at);
+static int PresetNamed(const char *name);
+static bool BurstHere(int which, Vector3 at);
+
+static double Now(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
+}
+
+static int LocalPlayer(void) { return run.netOpen && run.net.player ? run.net.player : 1; }
+
+// Keeps a packet or transport event for the recording, which writes it with the next tick.
+static void Note(int peer, int channel, const void *data, size_t size)
+{
+    if (!run.recording)
+        return;
+    if (run.pendingCount == run.pendingCapacity)
+    {
+        int capacity = run.pendingCapacity ? run.pendingCapacity * 2 : 64;
+        ReplayPacket *grown = realloc(run.pending, (size_t)capacity * sizeof *grown);
+        if (!grown)
+            return;
+        run.pending = grown;
+        run.pendingCapacity = capacity;
+    }
+    ReplayPacket *p = &run.pending[run.pendingCount];
+    p->data = size ? malloc(size) : NULL;
+    if (size && !p->data)
+        return;
+    if (size)
+        memcpy(p->data, data, size);
+    p->peer = peer;
+    p->channel = channel;
+    p->size = size;
+    run.pendingCount++;
+}
+
+static void ClearPending(void)
+{
+    for (int i = 0; i < run.pendingCount; i++)
+        free(run.pending[i].data);
+    run.pendingCount = 0;
+}
+
+// store_net's packets leave here: to the host (peer 0) from a client, to a player's ENet peer from
+// the host. Replaying, they are dropped: the recording holds what came back.
+static bool NetSend(void *user, int peer, int channel, bool reliable, const void *data, size_t size)
+{
+    (void)user;
+    if (!run.netLive)
+        return true;
+    CoreNetPeer to = CORE_NET_PEER_NONE;
+    if (run.hosting && peer >= 2 && peer <= STORE_NET_PLAYERS)
+        to = run.peerOf[peer];
+    else if (!run.hosting && peer == 0)
+        to = run.hostPeer;
+    if (to == CORE_NET_PEER_NONE || !CoreNetSend(&run.endpoint, to, (uint8_t)channel, data, size, reliable))
+        return false;
+    run.bytesSent += size;
+    return true;
+}
+
+static void NetArrived(void *user, StoreId thing)
+{
+    (void)user;
+    (void)thing;
+    run.arrived = true; // their :local children are spawned after StoreNetBeforeTick
+}
+
+// Another machine's gameplay effect: shown here in a window; headless shows nothing.
+static void NetEffect(void *user, const char *name, const char *what, Vector3 at)
+{
+    (void)user;
+    if (!strcmp(name, "play-sound"))
+        PlaySoundHere(what, !isnan(at.x), at);
+    else if (!strcmp(name, "burst"))
+        BurstHere(PresetNamed(what), at);
+}
+
+static void NetJoined(void *user, int player)
+{
+    (void)user;
+    int owners[1] = {player};
+    StoreSetLocalOwners(&run.store, owners, 1); /* store_net set these; the runner's view is the same */
+    if (run.recording && run.record.role == REPLAY_ROLE_CLIENT)
+        ReplaySetRole(&run.record, REPLAY_ROLE_CLIENT, player);
+    printf("net: joined as player %d\n", player);
+    fflush(stdout);
+}
+
+static void NetEnded(void *user, const char *why)
+{
+    (void)user;
+    snprintf(run.netWhy, sizeof run.netWhy, "%s", why ? why : "the session ended");
+}
+
+// The runner registers node's position and rotation for interpolation (§9.2).
+static void NetInterpolate(void)
+{
+    StoreNetInterpolate(&run.net, run.world.node, "position");
+    StoreNetInterpolate(&run.net, run.world.node, "rotation");
+}
+
+/* Starts a session: from --host/--join (atStart, before the first tick), from (host-game) or
+   (join-game), or from a recording's header or event. Replaying opens no socket. A live client
+   says hello once ENet has connected (NetPoll). */
+static bool NetStart(bool host, const char *address, int port, bool atStart, char *why, size_t size)
+{
+    if (run.netOpen)
+        return snprintf(why, size, "a session is open already"), false;
+    bool live = !run.replaying;
+    for (int p = 0; p <= STORE_NET_PLAYERS; p++)
+        run.peerOf[p] = CORE_NET_PEER_NONE;
+    memset(run.playerOf, 0, sizeof run.playerOf);
+    run.hostPeer = CORE_NET_PEER_NONE;
+    if (live && host && !CoreNetOpenServer(&run.endpoint, (uint16_t)port, STORE_NET_PLAYERS - 1, NET_CHANNELS))
+        return snprintf(why, size, "could not open UDP port %d", port), false;
+    if (live && !host)
+    {
+        if (!CoreNetOpenClient(&run.endpoint, NET_CHANNELS))
+            return snprintf(why, size, "could not open a UDP socket"), false;
+        run.hostPeer = CoreNetConnect(&run.endpoint, address, (uint16_t)port);
+        if (run.hostPeer == CORE_NET_PEER_NONE)
+        {
+            CoreNetClose(&run.endpoint);
+            return snprintf(why, size, "could not resolve %s", address), false;
+        }
+    }
+    run.netConfig = (StoreNetConfig){NULL, NetSend, NetArrived, NetEffect, NetJoined, NetEnded, run.title};
+    memset(&run.net, 0, sizeof run.net);
+    bool ok = host ? StoreNetHost(&run.net, &run.store, &run.netConfig)
+                   : live || StoreNetJoin(&run.net, &run.store, &run.netConfig);
+    if (!ok)
+    {
+        StoreNetFree(&run.net);
+        CoreNetClose(&run.endpoint);
+        return snprintf(why, size, "the store could not start networking"), false;
+    }
+    if (host || !live)
+        NetInterpolate();
+    run.netOpen = true;
+    run.netLive = live;
+    run.hosting = host;
+    run.connected = false;
+    run.netWhy[0] = 0;
+    run.netStarted = Now();
+    if (!atStart)
+        Note(0, host ? REPLAY_NET_HOSTED : REPLAY_NET_JOINED, NULL, 0);
+    if (live && host)
+        printf("net: hosting on UDP port %d\n", port);
+    else if (live)
+        printf("net: joining %s:%d\n", address, port);
+    fflush(stdout);
+    return true;
+}
+
+// Delivers one packet or transport event to store_net, live or from a recording.
+static void NetDeliver(int peer, int channel, const void *data, size_t size)
+{
+    char why[256];
+    if (channel == REPLAY_NET_HOSTED || channel == REPLAY_NET_JOINED)
+    {
+        if (!NetStart(channel == REPLAY_NET_HOSTED, NULL, 0, false, why, sizeof why))
+            TraceLog(LOG_WARNING, "RUN: the recording's session could not start: %s", why);
+    }
+    else if (channel == REPLAY_PEER_CONNECTED)
+        StoreNetPeerConnected(&run.net, peer);
+    else if (channel == REPLAY_PEER_LEFT)
+        StoreNetPeerLeft(&run.net, peer);
+    else
+        StoreNetReceive(&run.net, peer, channel, data, size);
+}
+
+// Every ENet event since the last tick, handed to store_net and kept for the recording.
+static void NetPoll(void)
+{
+    CoreNetEvent e;
+    while (CoreNetPoll(&run.endpoint, 0, &e))
+    {
+        int player = 0;
+        bool known = e.peer < STORE_NET_PLAYERS;
+        if (e.type == CORE_NET_EVENT_ERROR)
+        {
+            CoreNetEventFree(&e);
+            break;
+        }
+        if (run.hosting && e.type == CORE_NET_EVENT_CONNECTED && known)
+        {
+            // A client's player id is the lowest free one from 2 (store_net.h: its peer number).
+            for (int p = 2; p <= STORE_NET_PLAYERS && !player; p++)
+                if (run.peerOf[p] == CORE_NET_PEER_NONE)
+                    player = p;
+            if (!player)
+                CoreNetDisconnect(&run.endpoint, e.peer, false);
+            else
+            {
+                run.peerOf[player] = e.peer;
+                run.playerOf[e.peer] = player;
+                Note(player, REPLAY_PEER_CONNECTED, NULL, 0);
+                NetDeliver(player, REPLAY_PEER_CONNECTED, NULL, 0);
+            }
+        }
+        else if (run.hosting && e.type == CORE_NET_EVENT_DISCONNECTED && known && run.playerOf[e.peer])
+        {
+            player = run.playerOf[e.peer];
+            run.playerOf[e.peer] = 0;
+            run.peerOf[player] = CORE_NET_PEER_NONE;
+            Note(player, REPLAY_PEER_LEFT, NULL, 0);
+            NetDeliver(player, REPLAY_PEER_LEFT, NULL, 0);
+            printf("net: player %d left\n", player);
+        }
+        else if (run.hosting && e.type == CORE_NET_EVENT_RECEIVED && known && run.playerOf[e.peer])
+        {
+            run.bytesReceived += e.size;
+            Note(run.playerOf[e.peer], e.channel, e.data, e.size);
+            NetDeliver(run.playerOf[e.peer], e.channel, e.data, e.size);
+        }
+        else if (!run.hosting && e.type == CORE_NET_EVENT_CONNECTED && e.peer == run.hostPeer)
+        {
+            run.connected = true;
+            if (!StoreNetJoin(&run.net, &run.store, &run.netConfig))
+                snprintf(run.netWhy, sizeof run.netWhy, "could not say hello to the host"), run.failed = true;
+            else
+                NetInterpolate();
+        }
+        else if (!run.hosting && e.type == CORE_NET_EVENT_DISCONNECTED && e.peer == run.hostPeer)
+        {
+            if (!run.connected && Now() - run.netStarted < NET_JOIN_SECONDS)
+                run.hostPeer = CoreNetConnect(&run.endpoint, run.joinAddress, (uint16_t)run.joinPort); // again
+            else if (run.connected)
+            {
+                run.connected = false;
+                StoreNetPeerLeft(&run.net, 0); // ends the session: the host left
+                if (!run.net.ended)
+                    snprintf(run.netWhy, sizeof run.netWhy, "the host closed the connection"), run.failed = true;
+            }
+        }
+        else if (!run.hosting && e.type == CORE_NET_EVENT_RECEIVED && e.peer == run.hostPeer)
+        {
+            run.bytesReceived += e.size;
+            Note(0, e.channel, e.data, e.size);
+            NetDeliver(0, e.channel, e.data, e.size);
+        }
+        CoreNetEventFree(&e);
+    }
+}
+
+// A live session run headless keeps to the tick rate, so that machines meet: headless otherwise
+// ticks as fast as it can. The sleep is left out of --bench's tick times.
+static void Pace(void)
+{
+    double now = Now();
+    if (!run.paceCount || now - (run.paceStart + (double)run.paceCount * RUN_DT) > 0.25)
+        run.paceStart = now - (double)run.paceCount * RUN_DT; // started, or fell behind: no catching up
+    double due = run.paceStart + (double)run.paceCount++ * RUN_DT;
+    run.sleptMicros = 0;
+    if (due > now)
+    {
+        struct timespec wait = {(time_t)(due - now), (long)((due - now - (double)(time_t)(due - now)) * 1e9)};
+        nanosleep(&wait, NULL);
+        run.sleptMicros = (Now() - now) * 1e6;
+    }
+}
+
+// Ends the session: disconnects cleanly (a headless host at the end of its --ticks first waits up to
+// 5 s for its clients to finish theirs) and puts the store's hooks back.
+static void NetClose(void)
+{
+    if (run.netLive && run.endpoint.host)
+    {
+        CoreNetEvent e;
+        int connected = 0;
+        for (int p = 2; p <= STORE_NET_PLAYERS; p++)
+            connected += run.peerOf[p] != CORE_NET_PEER_NONE;
+        bool linger = run.hosting && run.headless && run.ended;
+        for (double end = Now() + NET_LINGER_SECONDS; linger && connected > 0 && Now() < end;)
+            if (CoreNetPoll(&run.endpoint, 10, &e))
+            {
+                if (e.type == CORE_NET_EVENT_DISCONNECTED && e.peer < STORE_NET_PLAYERS && run.playerOf[e.peer])
+                {
+                    run.peerOf[run.playerOf[e.peer]] = CORE_NET_PEER_NONE;
+                    run.playerOf[e.peer] = 0;
+                    connected--;
+                }
+                CoreNetEventFree(&e);
+            }
+        int waiting = 0;
+        for (int p = 2; run.hosting && p <= STORE_NET_PLAYERS; p++)
+            if (run.peerOf[p] != CORE_NET_PEER_NONE)
+                CoreNetDisconnect(&run.endpoint, run.peerOf[p], false), waiting++;
+        if (!run.hosting && run.hostPeer != CORE_NET_PEER_NONE && run.connected)
+            CoreNetDisconnect(&run.endpoint, run.hostPeer, false), waiting++;
+        for (double end = Now() + 1.0; waiting > 0 && Now() < end;)
+            if (CoreNetPoll(&run.endpoint, 10, &e))
+            {
+                waiting -= e.type == CORE_NET_EVENT_DISCONNECTED;
+                CoreNetEventFree(&e);
+            }
+        CoreNetClose(&run.endpoint);
+    }
+    if (run.netOpen)
+        StoreNetFree(&run.net);
+    run.netOpen = run.netLive = false;
+    ClearPending();
+    free(run.pending);
+    run.pending = NULL;
+    run.pendingCapacity = 0;
+}
+
+// Why the session ended, once, and the process will exit nonzero.
+static bool NetEndedRun(void)
+{
+    printf("run: the session ended: %s\n", run.netWhy[0] ? run.netWhy : "the host left the game");
+    fflush(stdout);
+    run.failed = true;
+    return false;
+}
+
+// The calls game_s7.c answers local-player, players, host-game and join-game from.
+static int NetPlayer(void *user)
+{
+    (void)user;
+    return LocalPlayer();
+}
+
+static int NetPlayers(void *user, int *out, int max)
+{
+    (void)user;
+    if (run.netOpen && run.net.joined)
+        return StoreNetPlayers(&run.net, out, max);
+    if (max > 0)
+        out[0] = 1;
+    return 1;
+}
+
+static bool NetHostCall(void *user, int port, char *why, size_t size)
+{
+    (void)user;
+    return NetStart(true, NULL, port, false, why, size);
+}
+
+static bool NetJoinCall(void *user, const char *address, int port, char *why, size_t size)
+{
+    (void)user;
+    snprintf(run.joinAddress, sizeof run.joinAddress, "%s", address);
+    run.joinPort = port;
+    return NetStart(false, run.joinAddress, port, false, why, size);
+}
+
+/* ---- the tick -------------------------------------------------------------------------------- */
+
+// The commands queued for the next tick from outside it (the REPL, a key press, setup), taken
+// before the network adds its own: those come back from the recorded packets on replay.
+static void CaptureCommands(void)
 {
     static StoreId targets[MAX_COMMANDS];
     static StoreSymbol events[MAX_COMMANDS];
     static StoreValue args[MAX_COMMANDS][STORE_MAX_ARGS];
     static int counts[MAX_COMMANDS];
-    static ReplayCommand out[MAX_COMMANDS];
+    ReplayCommand *out = run.captured;
     int n = StoreCommandsPending(&run.store, targets, events, args, counts, MAX_COMMANDS);
     if (n > MAX_COMMANDS)
     {
@@ -446,13 +832,24 @@ static void RecordTick(const GameInput *input)
         }
         memcpy(out[k].args, args[i], (size_t)out[k].count * sizeof args[i][0]);
     }
-    run.skipCommands = 0;
-    ReplayTick tick = {input->held, input->pressed, input->mouseDx, input->mouseDy, (uint16_t)k};
-    if (!ReplayWriteTick(&run.record, &tick, out))
-        TraceLog(LOG_WARNING, "RUN: could not write tick %" PRIu64 " to %s", StoreTickCount(&run.store),
-                 run.recordPath);
+    run.capturedCount = k;
 }
 
+static void RecordTick(const GameInput *input)
+{
+    int packets = run.pendingCount < 65535 ? run.pendingCount : 65535;
+    if (packets < run.pendingCount)
+        TraceLog(LOG_WARNING, "RUN: %d packets in one tick; recording the first 65535", run.pendingCount);
+    ReplayTick tick = {input->held, input->pressed, input->mouseDx, input->mouseDy, (uint16_t)run.capturedCount,
+                       (uint16_t)packets};
+    if (!ReplayWriteTick(&run.record, &tick, run.captured, run.pending))
+        TraceLog(LOG_WARNING, "RUN: could not write tick %" PRIu64 " to %s", StoreTickCount(&run.store),
+                 run.recordPath);
+    run.skipCommands = 0;
+    ClearPending();
+}
+
+// The next recorded tick: its input, its commands queued again, its packets handed to store_net.
 static bool ReplayInput(GameInput *input)
 {
     static ReplayCommand commands[MAX_COMMANDS];
@@ -467,6 +864,14 @@ static bool ReplayInput(GameInput *input)
         if (!StoreCommand(&run.store, c->target, StoreIntern(&run.store, c->event), c->args, c->count))
             TraceLog(LOG_WARNING, "RUN: replayed command %s refused: %s", c->event, StoreLastError(&run.store));
     }
+    for (int i = 0; i < tick.packetCount; i++)
+    {
+        ReplayPacket p;
+        if (!ReplayReadPacket(&run.replay, &p))
+            return false;
+        NetDeliver(p.peer, p.channel, p.data, p.size);
+        free(p.data);
+    }
     return true;
 }
 
@@ -480,22 +885,31 @@ static void PresentHeadless(float dt)
     run.hudCount = 0;
 }
 
+/* One tick (§6.2, §9.6): poll the network -> StoreNetBeforeTick -> input, World3DBeginTick,
+   StoreTick -> StoreNetAfterTick -> flush. A client ticks nothing but the network until its welcome,
+   and its tick count starts there. */
 static bool Update(void *context, double dt, const EngineInput *in)
 {
     (void)context;
     const CoreDiagnostics *d = CoreDiagnosticsCurrent();
-    if (run.bench && run.updates > 0 && d)
-        Push(&run.ticks, d->tickMicrosLast);
+    if (run.bench && run.lastTicked && d)
+        Push(&run.ticks, d->tickMicrosLast - run.sleptMicros);
+    run.lastTicked = false;
+    run.sleptMicros = 0;
     if (Interrupted())
         return false;
-    // Windowed, the runner stops the run itself, a call after the last tick, so that tick is drawn.
-    if (!run.headless && run.maxTicks && run.updates >= run.maxTicks)
+    // Windowed, the runner stops the run itself, a call after the last tick, so that tick is drawn;
+    // in a live session too, since a client's ticks start at its welcome.
+    if (run.selfStop && run.maxTicks && run.updates >= run.maxTicks)
     {
         run.ended = true;
         return false;
     }
-    run.updates++;
-    GameInput input;
+    if (run.netLive && run.headless)
+        Pace();
+    if (run.recording)
+        CaptureCommands();
+    GameInput input = {0};
     if (run.replaying)
     {
         if (!ReplayInput(&input))
@@ -504,6 +918,32 @@ static bool Update(void *context, double dt, const EngineInput *in)
             return false;
         }
     }
+    else if (run.netLive)
+        NetPoll();
+    if (run.netOpen && (run.net.ended || run.failed))
+        return NetEndedRun();
+    if (run.netOpen && !run.net.joined)
+    {
+        if (run.netLive && Now() - run.netStarted > NET_JOIN_SECONDS)
+        {
+            snprintf(run.netWhy, sizeof run.netWhy, "no welcome from %.200s:%d within %.0f s", run.joinAddress,
+                     run.joinPort, NET_JOIN_SECONDS);
+            return NetEndedRun();
+        }
+        return !Interrupted();
+    }
+    run.updates++;
+    if (run.netOpen)
+        StoreNetBeforeTick(&run.net);
+    if (run.arrived)
+    {
+        run.arrived = false;
+        GameS7RestoreLocalChildren();
+    }
+    if (run.replaying)
+        ;
+    else if (run.bot && run.botUntil && run.updates > run.botUntil)
+        input = (GameInput){0};
     else if (run.bot)
         input = FromBot();
     else
@@ -514,6 +954,11 @@ static bool Update(void *context, double dt, const EngineInput *in)
     GameS7SetInput(&run.input);
     World3DBeginTick(&run.world);
     StoreTick(&run.store, (float)dt);
+    if (run.netOpen)
+        StoreNetAfterTick(&run.net);
+    if (run.netLive)
+        CoreNetFlush(&run.endpoint);
+    run.lastTicked = true;
     if (run.present)
         PresentHeadless((float)dt);
     if (run.hashEvery && StoreTickCount(&run.store) % run.hashEvery == 0)
@@ -710,7 +1155,7 @@ static void AddModels(Camera3D camera)
     for (int i = 0; ids && i < count; i++)
     {
         StoreId id = ids[i];
-        bool mine = StoreOwner(&run.store, id) == 1;
+        bool mine = StoreOwner(&run.store, id) == LocalPlayer();
         if (!FieldTrue(id, "visible") || (FieldTrue(id, "for-owner") && !mine) ||
             (FieldTrue(id, "hidden-for-owner") && mine))
             continue;
@@ -768,7 +1213,7 @@ static Camera3D ChooseCamera(void)
     for (int i = 0; ids && i < count; i++)
     {
         Matrix m;
-        if (StoreOwner(&run.store, ids[i]) != 1 || !FieldTrue(ids[i], "for-owner") ||
+        if (StoreOwner(&run.store, ids[i]) != LocalPlayer() || !FieldTrue(ids[i], "for-owner") ||
             !World3DWorldMatrix(&run.world, ids[i], &m))
             continue;
         Vector3 at = {m.m12, m.m13, m.m14};
@@ -1396,17 +1841,11 @@ static s7_pointer SchemeScreenHeight(s7_scheme *sc, s7_pointer args)
     return s7_make_integer(sc, run.gl ? GetScreenHeight() : 720);
 }
 
-static s7_pointer SchemePlaySound(s7_scheme *sc, s7_pointer args)
+// Plays a sound here, at a place or not; false when there is no audio or no such sound.
+static bool PlaySoundHere(const char *name, bool placed, Vector3 at)
 {
-    if (!s7_is_string(s7_car(args)))
-        return s7_wrong_type_arg_error(sc, "play-sound", 1, s7_car(args), "a file name");
-    Vector3 at = {0, 0, 0};
-    s7_pointer where = GameS7KeywordArg(sc, args, "at");
-    if (where && !VecArg(sc, where, "play-sound", 2, &at))
-        return s7_f(sc);
     if (!run.gl || !run.audioReady)
-        return s7_f(sc);
-    const char *name = s7_string(s7_car(args));
+        return false;
     SoundEntry *e = NULL;
     for (int i = 0; i < run.soundCount && !e; i++)
         if (!strcmp(run.sounds[i].name, name))
@@ -1433,42 +1872,60 @@ static s7_pointer SchemePlaySound(s7_scheme *sc, s7_pointer args)
         }
     }
     if (!e || !e->loaded)
+        return false;
+    return placed ? CoreAudioPlaySoundAt(&run.audio, e->path, "game", at, 40.0f, 1.0f)
+                  : CoreAudioPlaySound(&run.audio, e->path, "game");
+}
+
+// Gameplay code's effects are shown on every machine (§9.3): a sound without :at travels with a NaN x.
+static void ShareEffect(const char *name, const char *what, Vector3 at)
+{
+    if (run.netOpen && StorePhaseNow(&run.store) == STORE_PHASE_GAMEPLAY)
+        StoreNetEffect(&run.net, name, what, at);
+}
+
+static s7_pointer SchemePlaySound(s7_scheme *sc, s7_pointer args)
+{
+    if (!s7_is_string(s7_car(args)))
+        return s7_wrong_type_arg_error(sc, "play-sound", 1, s7_car(args), "a file name");
+    Vector3 at = {0, 0, 0};
+    s7_pointer where = GameS7KeywordArg(sc, args, "at");
+    if (where && !VecArg(sc, where, "play-sound", 2, &at))
         return s7_f(sc);
-    bool played = where ? CoreAudioPlaySoundAt(&run.audio, e->path, "game", at, 40.0f, 1.0f)
-                        : CoreAudioPlaySound(&run.audio, e->path, "game");
-    return s7_make_boolean(sc, played);
+    const char *name = s7_string(s7_car(args));
+    ShareEffect("play-sound", name, where ? at : (Vector3){NAN, 0, 0});
+    return s7_make_boolean(sc, PlaySoundHere(name, where != NULL, at));
 }
 
 static float FxUnit(void) { return (float)(SplitMix(&run.fxState) >> 40) / (float)(1u << 24); }
 
-static s7_pointer SchemeBurst(s7_scheme *sc, s7_pointer args)
+static const struct
 {
-    static const struct
-    {
-        const char *name;
-        int count;
-        float life, speed, size0, size1, gravity, drag;
-        Color color0, color1;
-        CoreParticleBlend blend;
-    } presets[] = {
+    const char *name;
+    int count;
+    float life, speed, size0, size1, gravity, drag;
+    Color color0, color1;
+    CoreParticleBlend blend;
+} presets[] = {
         {"muzzle-flash", 12, 0.1f, 2.0f, 0.25f, 0.05f, 0.0f, 4.0f, {255, 220, 120, 255}, {255, 120, 0, 0}, CORE_PARTICLE_ADDITIVE},
         {"blood", 24, 0.5f, 3.0f, 0.08f, 0.04f, 9.8f, 1.0f, {160, 0, 0, 255}, {90, 0, 0, 0}, CORE_PARTICLE_ALPHA},
         {"dust", 16, 1.0f, 0.8f, 0.2f, 0.6f, -0.3f, 1.5f, {160, 150, 130, 160}, {160, 150, 130, 0}, CORE_PARTICLE_ALPHA},
         {"sparks", 20, 0.4f, 6.0f, 0.05f, 0.02f, 9.8f, 0.5f, {255, 230, 150, 255}, {255, 120, 0, 0}, CORE_PARTICLE_ADDITIVE},
-    };
-    s7_pointer name = s7_car(args);
-    int which = -1;
-    for (int i = 0; s7_is_symbol(name) && i < 4; i++)
-        if (!strcmp(s7_symbol_name(name), presets[i].name))
-            which = i;
-    if (which < 0)
-        return s7_wrong_type_arg_error(sc, "burst", 1, name, "one of muzzle-flash blood dust sparks");
-    Vector3 at = {0, 0, 0};
-    s7_pointer p = GameS7KeywordArg(sc, args, "at");
-    if (p && !VecArg(sc, p, "burst", 2, &at))
-        return s7_f(sc);
-    if (!run.gl)
-        return s7_f(sc);
+};
+
+static int PresetNamed(const char *name)
+{
+    for (int i = 0; name && i < (int)(sizeof presets / sizeof presets[0]); i++)
+        if (!strcmp(name, presets[i].name))
+            return i;
+    return -1;
+}
+
+// Emits a preset's particles here; false without a window.
+static bool BurstHere(int which, Vector3 at)
+{
+    if (!run.gl || which < 0)
+        return false;
     for (int i = 0; i < presets[which].count; i++)
     {
         Vector3 dir = Vector3Normalize((Vector3){FxUnit() * 2 - 1, FxUnit() * 2 - 1, FxUnit() * 2 - 1});
@@ -1486,7 +1943,21 @@ static s7_pointer SchemeBurst(s7_scheme *sc, s7_pointer args)
         particle.blend = presets[which].blend;
         CoreParticleEmit(&run.particles, &particle);
     }
-    return s7_t(sc);
+    return true;
+}
+
+static s7_pointer SchemeBurst(s7_scheme *sc, s7_pointer args)
+{
+    s7_pointer name = s7_car(args);
+    int which = s7_is_symbol(name) ? PresetNamed(s7_symbol_name(name)) : -1;
+    if (which < 0)
+        return s7_wrong_type_arg_error(sc, "burst", 1, name, "one of muzzle-flash blood dust sparks");
+    Vector3 at = {0, 0, 0};
+    s7_pointer p = GameS7KeywordArg(sc, args, "at");
+    if (p && !VecArg(sc, p, "burst", 2, &at))
+        return s7_f(sc);
+    ShareEffect("burst", presets[which].name, at);
+    return BurstHere(which, at) ? s7_t(sc) : s7_f(sc);
 }
 
 static void ProfilePath(char *buf, size_t size) { snprintf(buf, size, "%s/profile.txt", run.dir); }
@@ -1844,6 +2315,8 @@ static bool Init(void *context)
     if (!GameS7Open(&run.store, run.prelude))
         return Fail("could not start Scheme with %s", run.prelude);
     run.scriptOpen = true;
+    GameS7Network network = {NULL, NetPlayer, NetPlayers, NetHostCall, NetJoinCall};
+    GameS7SetNetwork(&network);
     if (!RegisterCalls())
         return Fail("could not register the runner's calls%s", "");
     if (!GameS7LoadGame(run.gameFile))
@@ -1858,7 +2331,20 @@ static bool Init(void *context)
     StoreKind game = StoreKindNamed(&run.store, "game");
     if (game < 0)
         return Fail("%s declares no kind named game", run.gameFile);
-    if (StoreThings(&run.store, game, NULL, 0) == 0)
+    // The session: from the flags, or replaying, from the recording's header.
+    if (run.replaying && (run.hostPort || run.joinPort))
+        printf("run: --host and --join are ignored while replaying; the recording says %s\n",
+               run.replay.role == REPLAY_ROLE_HOST     ? "it hosted"
+               : run.replay.role == REPLAY_ROLE_CLIENT ? "it joined"
+                                                       : "it was not networked");
+    ReplayRole role = run.replaying ? run.replay.role
+                      : run.hostPort ? REPLAY_ROLE_HOST
+                      : run.joinPort ? REPLAY_ROLE_CLIENT
+                                     : REPLAY_ROLE_NONE;
+    if (run.replaying && role == REPLAY_ROLE_CLIENT)
+        printf("run: replaying player %d's side of a session\n", run.replay.player);
+    // A joining runner spawns no game of its own: the world is the host's (§9.4).
+    if (role != REPLAY_ROLE_CLIENT && StoreThings(&run.store, game, NULL, 0) == 0)
     {
         char *answer = NULL;
         bool ok = GameS7Eval("(spawn 'game)", &answer);
@@ -1891,15 +2377,55 @@ static bool Init(void *context)
     }
     if (run.recordPath)
     {
-        if (!ReplayOpenWrite(&run.record, run.recordPath, run.seed, "trench phase 1", kinds))
+        if (!ReplayOpenWrite(&run.record, run.recordPath, run.seed, "trench phase 2", kinds) ||
+            (role != REPLAY_ROLE_NONE && !ReplaySetRole(&run.record, role, role == REPLAY_ROLE_HOST ? 1 : 0)))
             return Fail("could not write %s", run.recordPath);
         run.recording = true;
     }
     run.skipCommands = StoreCommandsPending(&run.store, NULL, NULL, NULL, NULL, 0);
+    // Last, so that store_net's hooks go in front of world3d's (StoreNetHost, StoreNetJoin).
+    char why[256];
+    if (role != REPLAY_ROLE_NONE &&
+        !NetStart(role == REPLAY_ROLE_HOST, run.joinAddress,
+                  role == REPLAY_ROLE_HOST ? run.hostPort : run.joinPort, true, why, sizeof why))
+        return Fail("%s", why);
     if (!run.headless && !InitPresentation())
         return false;
     run.ready = true;
     return true;
+}
+
+// --print-field KIND FIELD and --print-count KIND, at the end: `field KIND FIELD VALUE` for the first
+// thing of that kind (or `field KIND FIELD none`), and `count KIND N`, derived kinds included.
+static void PrintAsked(void)
+{
+    if (run.printKind)
+    {
+        StoreKind kind = StoreKindNamed(&run.store, run.printKind);
+        StoreId first[1];
+        StoreValue v;
+        char text[160] = "none";
+        if (kind >= 0 && StoreThings(&run.store, kind, first, 1) >= 1 && Field(first[0], run.printField, &v))
+            switch (v.type)
+            {
+            case STORE_INT: snprintf(text, sizeof text, "%d", (int)v.as.i); break;
+            case STORE_FLOAT: snprintf(text, sizeof text, "%g", (double)v.as.f); break;
+            case STORE_BOOL: snprintf(text, sizeof text, "%s", v.as.b ? "#t" : "#f"); break;
+            case STORE_SYMBOL: snprintf(text, sizeof text, "%s", StoreSymbolName(&run.store, v.as.sym)); break;
+            case STORE_STRING: snprintf(text, sizeof text, "\"%s\"", v.as.str); break;
+            case STORE_VEC3:
+                snprintf(text, sizeof text, "%g %g %g", (double)v.as.v.x, (double)v.as.v.y, (double)v.as.v.z);
+                break;
+            default: snprintf(text, sizeof text, "(a %d)", (int)v.type); break;
+            }
+        printf("field %s %s %s\n", run.printKind, run.printField, text);
+    }
+    if (run.countKind)
+    {
+        StoreKind kind = StoreKindNamed(&run.store, run.countKind);
+        printf("count %s %d\n", run.countKind, kind >= 0 ? StoreThings(&run.store, kind, NULL, 0) : 0);
+    }
+    fflush(stdout);
 }
 
 static void Shutdown(void *context)
@@ -1908,12 +2434,15 @@ static void Shutdown(void *context)
     const CoreDiagnostics *d = CoreDiagnosticsCurrent();
     if (run.ready)
     {
-        if (run.bench && run.updates > 0 && !run.ended && d)
-            Push(&run.ticks, d->tickMicrosLast);
+        if (run.bench && run.lastTicked && d)
+            Push(&run.ticks, d->tickMicrosLast - run.sleptMicros);
         if (run.savePath && !StoreSave(&run.store, run.savePath))
             fprintf(stderr, "trench: could not save %s: %s\n", run.savePath, StoreLastError(&run.store));
         if (!run.printedAny || run.lastPrinted != StoreTickCount(&run.store))
             PrintHash();
+        if (run.netOpen)
+            printf("net state hash %016" PRIx64 "\n", StoreNetStateHash(&run.net));
+        PrintAsked();
         if (run.bench)
         {
             PrintSamples("tick", &run.ticks);
@@ -1926,6 +2455,10 @@ static void Shutdown(void *context)
                 for (int i = 0; i < 3; i++) /* as the overlay read on the last drawn frame */
                     printf("overlay: %s\n", run.overlayText[i]);
             }
+            double seconds = Now() - run.netStarted;
+            if (run.netLive && seconds > 0)
+                printf("net sent %.0f B/s received %.0f B/s over %.1f s\n", (double)run.bytesSent / seconds,
+                       (double)run.bytesReceived / seconds, seconds);
             if (run.hudCalls.count)
             {
                 qsort(run.hudCalls.items, run.hudCalls.count, sizeof *run.hudCalls.items, CompareDoubles);
@@ -1934,6 +2467,8 @@ static void Shutdown(void *context)
             fflush(stdout);
         }
     }
+    NetClose(); /* before the store and world3d go: it puts their hooks back */
+    GameS7SetNetwork(NULL);
     if (run.gl)
         FreePresentation();
     GameS7SetErrorSink(NULL);
@@ -1963,7 +2498,8 @@ static int Usage(const char *problem)
         fprintf(stderr, "trench: %s\n", problem);
     fprintf(stderr, "usage: trench run <dir> [--headless] [--ticks N] [--seed S] [--record FILE] "
                     "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] "
-                    "[--present] [--shot-every N] [--shot-dir DIR] [--no-time-limit]\n");
+                    "[--present] [--shot-every N] [--shot-dir DIR] [--no-time-limit] [--host PORT] "
+                    "[--join ADDRESS:PORT] [--bot-until N] [--print-field KIND FIELD] [--print-count KIND]\n");
     return 2;
 }
 
@@ -2044,10 +2580,44 @@ int GameRun(int argc, char **argv)
             handlerLimit = 0, takes = false;
         else if (strcmp(flag, "--ticks") && strcmp(flag, "--seed") && strcmp(flag, "--hash-every") &&
                  strcmp(flag, "--record") && strcmp(flag, "--replay") && strcmp(flag, "--save") &&
-                 strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir"))
+                 strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir") &&
+                 strcmp(flag, "--host") && strcmp(flag, "--join") && strcmp(flag, "--bot-until") &&
+                 strcmp(flag, "--print-field") && strcmp(flag, "--print-count"))
             return Usage("unknown flag");
         else if (!value)
             return Usage("a flag is missing its value");
+        else if (!strcmp(flag, "--host"))
+        {
+            uint64_t port;
+            if (!Count(value, &port) || port < 1 || port > 65535)
+                return Usage("--host takes a UDP port from 1 to 65535");
+            run.hostPort = (int)port;
+        }
+        else if (!strcmp(flag, "--join"))
+        {
+            const char *colon = strrchr(value, ':');
+            uint64_t port = 0;
+            if (!colon || colon == value || (size_t)(colon - value) >= sizeof run.joinAddress ||
+                !Count(colon + 1, &port) || port < 1 || port > 65535)
+                return Usage("--join takes ADDRESS:PORT, such as 127.0.0.1:7777");
+            snprintf(run.joinAddress, sizeof run.joinAddress, "%.*s", (int)(colon - value), value);
+            run.joinPort = (int)port;
+        }
+        else if (!strcmp(flag, "--bot-until"))
+        {
+            if (!Count(value, &run.botUntil))
+                return Usage("--bot-until takes a number");
+        }
+        else if (!strcmp(flag, "--print-field"))
+        {
+            if (i + 2 >= argc)
+                return Usage("--print-field takes a kind and a field");
+            run.printKind = value;
+            run.printField = argv[i + 2];
+            i++;
+        }
+        else if (!strcmp(flag, "--print-count"))
+            run.countKind = value;
         else if (!strcmp(flag, "--ticks"))
         {
             if (!Count(value, &run.maxTicks))
@@ -2087,6 +2657,11 @@ int GameRun(int argc, char **argv)
         return Usage("--shot-every and --shot-dir need a window");
     if (run.shotEvery && !run.shotDir)
         run.shotDir = ".";
+    if (run.hostPort && run.joinPort)
+        return Usage("--host and --join: a machine hosts or joins, not both");
+    // A live session stops itself: a client's ticks start at its welcome, which the engine's own
+    // count would not know.
+    run.selfStop = !run.headless || ((run.hostPort || run.joinPort) && !run.replayPath);
     if (!ReadProject())
         return 1;
     EngineApplication app = EngineApplicationDefault();
@@ -2097,7 +2672,7 @@ int GameRun(int argc, char **argv)
     app.config.windowFlags = FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT;
     app.config.fixed_dt = RUN_DT;
     app.config.headless = run.headless;
-    app.config.maxTicks = run.headless ? run.maxTicks : 0; /* windowed, Update stops after the last tick is drawn */
+    app.config.maxTicks = run.selfStop ? 0 : run.maxTicks; /* windowed, Update stops after the last tick is drawn */
     run.captureWanted = true;
     app.callbacks = (EngineProject){Init, FrameInput, Update, Draw, Shutdown};
     app.clearColor = (Color){30, 32, 36, 255};
@@ -2113,5 +2688,5 @@ int GameRun(int argc, char **argv)
     int result = EngineRunApplication(&app);
     sigaction(SIGINT, &previous, NULL);
     GameS7SetHandlerLimit(0);
-    return result ? 1 : 0;
+    return result || run.failed ? 1 : 0;
 }

@@ -8,13 +8,17 @@
 #define _POSIX_C_SOURCE 200809L /* dup, dup2 and fileno, to capture a run's output */
 #include "checks.h"
 #include "core/input_map.h"
+#include "core/network.h"
 #include "core/replay.h"
 #include "core/store.h"
+#include "core/store_net.h"
+#include "core/world3d.h"
 #include "gameplay/game.h"
 #include "raylib.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -67,8 +71,8 @@ static void FileChecks(const char *path)
 {
     Replay replay;
     ReplayCommand command = {{3, 2}, "poke", {{STORE_INT, {.i = -7}}, {STORE_VEC3, {.v = {1, 2, 3}}}}, 2};
-    ReplayTick tick = {5, 1, 1.5f, -2.0f, 1};
-    Expect(ReplayOpenWrite(&replay, path, 99, "test", 1234) && ReplayWriteTick(&replay, &tick, &command),
+    ReplayTick tick = {5, 1, 1.5f, -2.0f, 1, 0};
+    Expect(ReplayOpenWrite(&replay, path, 99, "test", 1234) && ReplayWriteTick(&replay, &tick, &command, NULL),
            "a recording is written");
     ReplayClose(&replay);
     uint64_t seed = 0, kinds = 0;
@@ -82,6 +86,41 @@ static void FileChecks(const char *path)
                read.count == 2 && read.args[0].as.i == -7 && read.args[1].as.v.z == 3.0f,
            "a tick and its command read back as written");
     Expect(!ReplayReadTick(&replay, &back, &read, 1), "the end of the file ends the replay");
+    ReplayClose(&replay);
+
+    // Version 2: the role in the header, and a tick's packets after its commands.
+    unsigned char bytes[3] = {7, 8, 9};
+    ReplayPacket packets[2] = {{2, 1, 3, bytes}, {3, REPLAY_PEER_LEFT, 0, NULL}};
+    ReplayTick netTick = {1, 0, 0, 0, 1, 2};
+    Expect(ReplayOpenWrite(&replay, path, 5, "test", 6) && ReplaySetRole(&replay, REPLAY_ROLE_CLIENT, 0) &&
+               ReplayWriteTick(&replay, &netTick, &command, packets) && ReplaySetRole(&replay, REPLAY_ROLE_CLIENT, 4) &&
+               ReplayWriteTick(&replay, &tick, &command, NULL),
+           "a recording with packets is written, its player set after the first tick");
+    ReplayClose(&replay);
+    ReplayPacket got = {0};
+    bool opened = ReplayOpenRead(&replay, path, &seed, &kinds);
+    Expect(opened && replay.version == 2 && replay.role == REPLAY_ROLE_CLIENT && replay.player == 4,
+           "the header gives back the role and the player");
+    Expect(ReplayReadTick(&replay, &back, &read, 1) && back.packetCount == 2 && ReplayReadPacket(&replay, &got) &&
+               got.peer == 2 && got.channel == 1 && got.size == 3 && got.data && got.data[2] == 9,
+           "a tick's packet reads back with its peer, channel and bytes");
+    free(got.data);
+    Expect(ReplayReadTick(&replay, &back, &read, 1) && back.actions == 5 && back.packetCount == 0 &&
+               !ReplayReadPacket(&replay, &got),
+           "a packet left unread is skipped by the next tick");
+    ReplayClose(&replay);
+
+    // Version 1 files, from before packets, still read: no role, no packets.
+    FILE *old = fopen(path, "wb");
+    unsigned char header[96] = "TRENCHREPLAY", head[18] = {3, 0, 0, 0};
+    header[12] = 1;
+    header[16] = 42;
+    if (old)
+        fwrite(header, 1, sizeof header, old), fwrite(head, 1, sizeof head, old), fclose(old);
+    Expect(ReplayOpenRead(&replay, path, &seed, &kinds) && seed == 42 && replay.role == REPLAY_ROLE_NONE &&
+               ReplayReadTick(&replay, &back, &read, 1) && back.actions == 3 && back.packetCount == 0 &&
+               !ReplayReadTick(&replay, &back, &read, 1),
+           "a version 1 recording still reads, as a session with no packets");
     ReplayClose(&replay);
     FILE *junk = fopen(path, "wb");
     if (junk)
@@ -420,6 +459,364 @@ static void WindowedChecks(void)
     UnloadImage(image);
 }
 
+/* ---- networking (docs/developer/store.md §9.6) ------------------------------------------------ */
+
+// Things store_net creates on a client reach world3d's spawned hook (and the runner's behind it),
+// so their transforms are cached and they draw: a host and a client store with world3d each, joined
+// by a queue in memory.
+typedef struct HookSide
+{
+    Store store;
+    World3D world;
+    StoreNet net;
+    int spawned; /* calls of the hook chained behind world3d's */
+} HookSide;
+
+static HookSide sides[2];
+static struct
+{
+    int to, channel;
+    size_t size;
+    unsigned char data[4096];
+} queued[64];
+static int queuedCount;
+
+static bool QueueSend(void *user, int peer, int channel, bool reliable, const void *data, size_t size)
+{
+    (void)reliable;
+    (void)peer;
+    int from = (int)((HookSide *)user - sides);
+    if (queuedCount == 64 || size > sizeof queued[0].data)
+        return false;
+    queued[queuedCount].to = 1 - from;
+    queued[queuedCount].channel = channel;
+    queued[queuedCount].size = size;
+    memcpy(queued[queuedCount++].data, data, size);
+    return true;
+}
+
+static void CountSpawned(void *user, StoreId thing)
+{
+    (void)thing;
+    ((HookSide *)user)->spawned++;
+}
+
+static void NetHookChecks(void)
+{
+    memset(sides, 0, sizeof sides);
+    queuedCount = 0;
+    for (int i = 0; i < 2; i++)
+    {
+        StoreInit(&sides[i].store, 5);
+        World3DInit(&sides[i].world, &sides[i].store);
+        StoreHooks hooks = {0};
+        hooks.user = &sides[i];
+        hooks.spawned = CountSpawned;
+        World3DHooks(&sides[i].world, &hooks);
+        StoreSetHooks(&sides[i].store, &hooks);
+    }
+    StoreNetConfig config = {0};
+    config.send = QueueSend;
+    config.game = "hook-check";
+    config.user = &sides[0];
+    bool hosting = StoreNetHost(&sides[0].net, &sides[0].store, &config);
+    config.user = &sides[1];
+    bool joining = StoreNetJoin(&sides[1].net, &sides[1].store, &config);
+    StoreId node = StoreSpawn(&sides[0].store, sides[0].world.node, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreValue at = {STORE_VEC3, {.v = {3, 4, 5}}};
+    StoreSetEngine(&sides[0].store, node, sides[0].world.position, &at);
+    StoreNetPeerConnected(&sides[0].net, 2);
+    int before = sides[1].spawned;
+    for (int tick = 0; tick < 12; tick++)
+    {
+        int n = queuedCount;
+        queuedCount = 0;
+        for (int i = 0; i < n; i++)
+            StoreNetReceive(&sides[queued[i].to].net, queued[i].to == 0 ? 2 : 0, queued[i].channel,
+                            queued[i].data, queued[i].size);
+        for (int i = 0; i < 2; i++)
+        {
+            StoreNetBeforeTick(&sides[i].net);
+            World3DBeginTick(&sides[i].world);
+            StoreTick(&sides[i].store, 1.0f / 60.0f);
+            StoreNetAfterTick(&sides[i].net);
+        }
+    }
+    StoreId arrived[4];
+    int count = StoreThings(&sides[1].store, sides[1].world.node, arrived, 4);
+    Matrix m = {0};
+    World3DUpdateTransforms(&sides[1].world, 1.0f);
+    bool placed = count == 1 && World3DWorldMatrix(&sides[1].world, arrived[0], &m) && m.m12 == 3 && m.m13 == 4 &&
+                  m.m14 == 5;
+    printf("runner net hooks: the client holds %d node(s); the hook behind world3d's ran %d time(s) for them; "
+           "drawn at %.0f %.0f %.0f\n",
+           count, sides[1].spawned - before, m.m12, m.m13, m.m14);
+    Expect(hosting && joining && sides[1].net.joined, "an in-memory host and client join");
+    Expect(sides[1].spawned - before == 1, "a thing the network creates goes through world3d's spawned hook");
+    Expect(placed, "world3d draws the arrived node where the host put it");
+    for (int i = 1; i >= 0; i--)
+    {
+        StoreNetFree(&sides[i].net);
+        World3DFree(&sides[i].world);
+        StoreFree(&sides[i].store);
+    }
+}
+
+// The value after prefix on the last line of log that starts with it, or "" when none does.
+static const char *LineValue(const char *log, const char *prefix, char *out, size_t size)
+{
+    FILE *file = fopen(log, "r");
+    char line[512];
+    out[0] = 0;
+    while (file && fgets(line, sizeof line, file))
+        if (!strncmp(line, prefix, strlen(prefix)))
+            snprintf(out, size, "%.*s", (int)strcspn(line + strlen(prefix), "\r\n"), line + strlen(prefix));
+    if (file)
+        fclose(file);
+    return out;
+}
+
+// The exit status a process of the three wrote, or -1.
+static int Status(const char *dir, const char *name)
+{
+    char path[512];
+    int status = -1;
+    snprintf(path, sizeof path, "%s/%s.status", dir, name);
+    FILE *file = fopen(path, "r");
+    if (file && fscanf(file, "%d", &status) != 1)
+        status = -1;
+    if (file)
+        fclose(file);
+    return status;
+}
+
+/* A host and two clients of project as three processes over loopback: the host starts, the clients
+   0.2 s later. Each writes DIR/<h|c2|c3>.log, its pid to .pid and its exit status to .status. */
+static void RunThree(const char *dir, const char *project, int port, const char *flags)
+{
+    char script[4096];
+    snprintf(script, sizeof script,
+             "D=%s; T='timeout 120 ./build/core/trench run %s --headless'; F='%s';"
+             "( $T --host %d --seed 1 --record $D/H.rec $F > $D/h.log 2>&1; echo $? > $D/h.status ) &"
+             " echo $! > $D/h.pid; sleep 0.2;"
+             "( $T --join 127.0.0.1:%d --seed 2 --record $D/C2.rec $F > $D/c2.log 2>&1; echo $? > $D/c2.status ) &"
+             " echo $! > $D/c2.pid;"
+             "( $T --join 127.0.0.1:%d --seed 3 --record $D/C3.rec $F > $D/c3.log 2>&1; echo $? > $D/c3.status ) &"
+             " echo $! > $D/c3.pid; wait",
+             dir, project, flags, port, port, port);
+    fflush(stdout);
+    if (system(script) == -1)
+        Expect(false, "the three processes start");
+}
+
+static void NetRunChecks(void)
+{
+    int port = 20000 + (int)(getpid() % 20000);
+    CoreNetEndpoint probe = {0};
+    if (!CoreNetOpenServer(&probe, (uint16_t)port, 1, 3))
+    {
+        printf("note: runner: ENet cannot bind UDP port %d on this machine; the networked runner checks are "
+               "skipped\n",
+               port);
+        return;
+    }
+    CoreNetClose(&probe);
+    char dir[] = "build/core/net_XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Expect(false, "a temporary directory can be made under build/core");
+        return;
+    }
+    static const char *const names[3] = {"h", "c2", "c3"};
+    char log[3][300], value[256];
+    for (int i = 0; i < 3; i++)
+        snprintf(log[i], sizeof log[i], "%s/%s.log", dir, names[i]);
+
+    // The net test game: 1500 ticks, bots for the first 600, then still.
+    RunThree(dir, "tests/regression/net_game", port,
+             "--ticks 1500 --bot --bot-until 600 --hash-every 1500 --print-field game hellos --bench");
+    char netHash[3][64], liveHash[3][64], hellos[3][32];
+    bool clean = true, exited = true;
+    for (int i = 0; i < 3; i++)
+    {
+        LineValue(log[i], "net state hash ", netHash[i], sizeof netHash[i]);
+        LineValue(log[i], "tick 1500 hash ", liveHash[i], sizeof liveHash[i]);
+        LineValue(log[i], "field game hellos ", hellos[i], sizeof hellos[i]);
+        clean = clean && !FileHasLine(log[i], "ERROR", true);
+        exited = exited && Status(dir, names[i]) == 0;
+    }
+    printf("runner net: net state hashes host %s client 2 %s client 3 %s; hellos on the host %s; "
+           "exits %d %d %d; host %s\n",
+           netHash[0], netHash[1], netHash[2], hellos[0], Status(dir, "h"), Status(dir, "c2"), Status(dir, "c3"),
+           LineValue(log[0], "net sent ", value, sizeof value));
+    Expect(netHash[0][0] && !strcmp(netHash[0], netHash[1]) && !strcmp(netHash[0], netHash[2]),
+           "a host and two clients of net_game end with the same net state hash");
+    Expect(clean, "no process of the net_game session prints ERROR");
+    Expect(exited, "the three processes of the net_game session exit 0");
+    Expect(!strcmp(hellos[0], "3"), "the host counts three hellos: its walker's and one from each client");
+
+    // Each side's recording replays, with no socket, to its live run's tick 1500 hash.
+    static const char *const recordings[2] = {"H.rec", "C2.rec"};
+    for (int i = 0; i < 2; i++)
+    {
+        char path[300], replayLog[300], replayed[64];
+        snprintf(path, sizeof path, "%s/%s", dir, recordings[i]);
+        snprintf(replayLog, sizeof replayLog, "%s/replay_%s.log", dir, names[i]);
+        char *argv[] = {"trench", "run", "tests/regression/net_game", "--headless", "--replay", path,
+                        "--hash-every", "1500", i ? "--join" : "--host", i ? "127.0.0.1:1" : "1", NULL};
+        int result = RunLogged(argv, replayLog);
+        LineValue(replayLog, "tick 1500 hash ", replayed, sizeof replayed);
+        printf("runner net replay: %s live tick 1500 hash %s, replayed %s (exit %d)\n", recordings[i], liveHash[i],
+               replayed, result);
+        Expect(result == 0 && liveHash[i][0] && !strcmp(replayed, liveHash[i]),
+               i ? "the client's recording replays to its live tick 1500 hash"
+                 : "the host's recording replays to its live tick 1500 hash");
+        Expect(FileHasLine(replayLog, "run: --host and --join are ignored while replaying", false),
+               "replaying says the --host and --join flags are ignored");
+    }
+
+    // SWAT Tower in co-op: bots throughout, 1200 ticks; every machine holds three soldiers.
+    RunThree(dir, "examples/swat-tower", port + 1, "--ticks 1200 --bot --print-count soldier --bench");
+    char soldiers[3][32], sent[256];
+    clean = true;
+    exited = true;
+    for (int i = 0; i < 3; i++)
+    {
+        LineValue(log[i], "count soldier ", soldiers[i], sizeof soldiers[i]);
+        clean = clean && !FileHasLine(log[i], "ERROR", true);
+        exited = exited && Status(dir, names[i]) == 0;
+    }
+    double up = 0, down = 0;
+    LineValue(log[0], "net sent ", sent, sizeof sent);
+    sscanf(sent, "%lf B/s received %lf", &up, &down);
+    printf("runner net swat-tower: soldiers host %s client 2 %s client 3 %s; host sends %.0f B/s per client, "
+           "receives %.0f B/s per client; exits %d %d %d\n",
+           soldiers[0], soldiers[1], soldiers[2], up / 2, down / 2, Status(dir, "h"), Status(dir, "c2"),
+           Status(dir, "c3"));
+    Expect(!strcmp(soldiers[0], "3") && !strcmp(soldiers[1], "3") && !strcmp(soldiers[2], "3"),
+           "every machine of a three-player swat-tower session ends with three soldiers");
+    Expect(clean, "no process of the swat-tower session prints ERROR");
+    Expect(exited, "the three processes of the swat-tower session exit 0");
+    Expect(up > 0, "the host's --bench prints the bytes it sent per second");
+    if (!FileHasLine("examples/swat-tower/profile.txt", "", true))
+        remove("examples/swat-tower/profile.txt");
+
+    // What must fail: a join nobody answers, and a client whose kinds differ from the host's.
+    char failLog[300];
+    snprintf(failLog, sizeof failLog, "%s/nohost.log", dir);
+    char joinTo[64];
+    snprintf(joinTo, sizeof joinTo, "127.0.0.1:%d", port + 2);
+    char *lonely[] = {"trench", "run", "tests/regression/net_game", "--headless", "--join", joinTo, "--ticks", "60", NULL};
+    Expect(RunLogged(lonely, failLog) == 1 && FileHasLine(failLog, "run: the session ended: no welcome from", false),
+           "a join nobody answers gives up after 5 s, says so and exits 1");
+    char project[64], path[300];
+    snprintf(project, sizeof project, "%s/other", dir);
+    mkdir(project, 0755);
+    snprintf(path, sizeof path, "%s/engine.project", project);
+    FILE *file = fopen(path, "w");
+    if (file)
+        fputs("name net-game\ngame net_game.scm\n", file), fclose(file);
+    snprintf(path, sizeof path, "%s/net_game.scm", project);
+    FILE *in = fopen("tests/regression/net_game/net_game.scm", "r");
+    file = fopen(path, "w");
+    for (int c; in && file && (c = fgetc(in)) != EOF;)
+        fputc(c, file);
+    if (file)
+        fputs("(define-kind crate (is node) (field weight 1))\n", file), fclose(file);
+    if (in)
+        fclose(in);
+    char script[1024];
+    snprintf(script, sizeof script,
+             "timeout 60 ./build/core/trench run tests/regression/net_game --headless --host %d --ticks 120 > "
+             "%s/refuse_host.log 2>&1 & sleep 0.2; timeout 60 ./build/core/trench run %s --headless --join "
+             "127.0.0.1:%d --ticks 60 > %s/refused.log 2>&1; echo $? > %s/refused.status; wait",
+             port + 3, dir, project, port + 3, dir, dir);
+    fflush(stdout);
+    if (system(script) == -1)
+        Expect(false, "the refused client runs");
+    snprintf(failLog, sizeof failLog, "%s/refused.log", dir);
+    LineValue(failLog, "run: the session ended: ", value, sizeof value);
+    printf("runner net refused: \"%s\" (exit %d)\n", value, Status(dir, "refused"));
+    Expect(Status(dir, "refused") == 1 && strstr(value, "kinds differ:") && strstr(value, "crate"),
+           "a client whose kinds differ is refused, names the kind and exits 1");
+
+    // Ctrl+C on a client leaves cleanly (the host hears at once); a client outlives a host that
+    // ends, is told the host left and exits 1.
+    snprintf(script, sizeof script,
+             "D=%s; T='timeout 60 ./build/core/trench run tests/regression/net_game --headless';"
+             "$T --host %d --ticks 300 > $D/int_host.log 2>&1 & sleep 0.2;"
+             "$T --join 127.0.0.1:%d --ticks 3000 > $D/int.log 2>&1 & C=$!; sleep 2; kill -INT $C;"
+             "wait $C; echo $? > $D/int.status;"
+             "$T --host %d --ticks 60 > $D/gone_host.log 2>&1 & sleep 0.2;"
+             "$T --join 127.0.0.1:%d --ticks 3000 > $D/gone.log 2>&1; echo $? > $D/gone.status; wait",
+             dir, port + 4, port + 4, port + 5, port + 5);
+    fflush(stdout);
+    if (system(script) == -1)
+        Expect(false, "the Ctrl+C and host-leaving runs start");
+    snprintf(failLog, sizeof failLog, "%s/int_host.log", dir);
+    char intLog[300], goneLog[300];
+    snprintf(intLog, sizeof intLog, "%s/int.log", dir);
+    snprintf(goneLog, sizeof goneLog, "%s/gone.log", dir);
+    printf("runner net leaving: Ctrl+C'd client exit %d, host saw it leave: %s; client of an ending host exit %d\n",
+           Status(dir, "int"), FileHasLine(failLog, "net: player 2 left", false) ? "yes" : "no", Status(dir, "gone"));
+    Expect(Status(dir, "int") == 0 && FileHasLine(intLog, "run: interrupted", false) &&
+               FileHasLine(failLog, "net: player 2 left", false),
+           "Ctrl+C on a client ends it cleanly and the host hears it leave");
+    Expect(Status(dir, "gone") == 1 && FileHasLine(goneLog, "run: the session ended: the host left the game", false),
+           "a client whose host ends says the host left and exits 1");
+    snprintf(script, sizeof script, "rm -rf %s", dir);
+    if (system(script) == -1)
+        printf("note: runner: could not remove %s\n", dir);
+}
+
+// (host-game port) from a frame handler hosts at run time; local-player and players answer for the
+// host; the recording notes where the session began and replays to the same hash.
+static void RuntimeHostChecks(void)
+{
+    char dir[] = "build/core/hostcall_XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Expect(false, "a temporary project directory can be made under build/core");
+        return;
+    }
+    int port = 20000 + (int)((getpid() + 7) % 20000);
+    char path[300], log[300], recording[300], text[512];
+    snprintf(path, sizeof path, "%s/engine.project", dir);
+    FILE *file = fopen(path, "w");
+    if (file)
+        fputs("name host-call\ngame game.scm\n", file), fclose(file);
+    snprintf(path, sizeof path, "%s/game.scm", dir);
+    snprintf(text, sizeof text,
+             "(define-kind game\n"
+             "  (field n 0) (field hosted #f :local)\n"
+             "  (on (tick dt) (set! n (+ n 1)))\n"
+             "  (on (frame dt)\n"
+             "    (unless hosted\n"
+             "      (set! hosted #t)\n"
+             "      (format #t \"host-game: ~A local-player ~A players ~A~%%\" (host-game %d) (local-player) (players)))))\n",
+             port);
+    file = fopen(path, "w");
+    if (file)
+        fputs(text, file), fclose(file);
+    snprintf(log, sizeof log, "%s/run.log", dir);
+    snprintf(recording, sizeof recording, "%s/run.rec", dir);
+    char *argv[] = {"trench", "run", dir, "--headless", "--present", "--ticks", "30", "--record", recording, NULL};
+    int result = RunLogged(argv, log);
+    uint64_t live = GameLastHash();
+    char said[128];
+    LineValue(log, "host-game: ", said, sizeof said);
+    printf("runner host-game: \"%s\" (exit %d)\n", said, result);
+    Expect(result == 0 && !strcmp(said, "#t local-player 1 players (1)") &&
+               FileHasLine(log, "net: hosting on UDP port", false),
+           "(host-game port) from a frame handler hosts; local-player is 1 and players (1)");
+    char *again[] = {"trench", "run", dir, "--headless", "--replay", recording, NULL};
+    Expect(RunLogged(again, log) == 0 && live && GameLastHash() == live && !FileHasLine(log, "ERROR", true),
+           "a recording that began hosting mid-run replays to the same hash");
+    snprintf(text, sizeof text, "rm -rf %s", dir);
+    if (system(text) == -1)
+        printf("note: runner: could not remove %s\n", dir);
+}
+
 int GameRunnerChecks(void)
 {
     failures = 0;
@@ -444,7 +841,7 @@ int GameRunnerChecks(void)
 
     Replay file;
     ReplayTick tick = {0};
-    Expect(ReplayOpenWrite(&file, wrong, 7, "test", 0x1234) && ReplayWriteTick(&file, &tick, NULL),
+    Expect(ReplayOpenWrite(&file, wrong, 7, "test", 0x1234) && ReplayWriteTick(&file, &tick, NULL, NULL),
            "a recording against other kinds is written");
     ReplayClose(&file);
     char *mismatch[] = {"trench", "run", "tests/regression", "--headless", "--replay", (char *)wrong, NULL};
@@ -460,5 +857,8 @@ int GameRunnerChecks(void)
     RebindChecks();
     NoDisplayChecks();
     WindowedChecks();
+    NetHookChecks();
+    RuntimeHostChecks();
+    NetRunChecks();
     return failures;
 }

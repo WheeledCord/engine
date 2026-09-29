@@ -219,7 +219,10 @@ static void WalkChecks(void)
                "a list longer than its capacity is refused");
         Expect(Refused("(set! limit 4)", "can't set! limit: top-level definitions are frozen"),
                "top-level definitions are frozen after load");
-        Expect(Refused("(host-game 7777)", "networking comes in phase 2"), "host-game says when");
+        Expect(Refused("(host-game 7777)", "host-game needs the runner") &&
+                   Refused("(join-game \"127.0.0.1\" 7777)", "join-game needs the runner") &&
+                   Refused("(host-game 0)", "a port from 1 to 65535"),
+               "without the runner host-game and join-game say they need it; a bad port is refused");
         Expect(Refused("(define-kind probe (is body) (field label \"\") (field power 0) (field extra 1))",
                        "changed field extra"),
                "declaring a kind again with other fields is refused, naming the field");
@@ -274,6 +277,7 @@ static void RuleChecks(void)
          "soldier #0 tick: can't set! score: top-level definitions are frozen once the game has "
          "loaded, because they aren't saved, sent to other players or replayed."},
         {"tests/regression/rules/rule3.scm", "soldier #0 tick: real-time is for presentation."},
+        {"tests/regression/rules/host_in_gameplay.scm", "soldier #0 tick: host-game is for presentation"},
         {"tests/regression/rules/rule4.scm",
          "grenade #0 tick: can't store a procedure in on-hit: fields hold data so they can be saved "
          "and sent."},

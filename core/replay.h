@@ -9,17 +9,34 @@
 #include <stdint.h>
 #include <stdio.h>
 
-/* A recording of a session (docs/developer/store.md §6.3): the world seed, the hash of the kinds
-   the game declared and the engine revision, then per tick the input and the player commands
-   queued for it. Replaying it into the same build and game reaches the same StoreHash every tick.
+/* A recording of a session (docs/developer/store.md §6.3, §9.6): the world seed, the hash of the
+   kinds the game declared, the engine revision and the network role, then per tick the input, the
+   player commands queued for it and the packets that arrived for it. Replaying it into the same
+   build and game reaches the same StoreHash every tick.
 
    The file is binary and little-endian: a 16-byte header (the 12 bytes "TRENCHREPLAY" and a u32
-   version), the seed (u64), the kinds hash (u64), the revision (64 bytes, NUL-padded); then per
-   tick the held and pressed action bits (u32 each), the mouse delta (two f32), the command count
-   (u16) and that many commands: target index and generation (u32 each), event name (32 bytes),
-   argument count (u32) and four argument slots, each a u32 type and 64 bytes of value. */
+   version), the seed (u64), the kinds hash (u64), the revision (64 bytes, NUL-padded), and from
+   version 2 the role (u32, a ReplayRole) and the player id (u32); then per tick the held and
+   pressed action bits (u32 each), the mouse delta (two f32), the command count (u16), from version
+   2 the packet count (u16), that many commands: target index and generation (u32 each), event name
+   (32 bytes), argument count (u32) and four argument slots, each a u32 type and 64 bytes of value;
+   then that many packets: transport peer (u32), channel (u8), byte count (u32) and the bytes.
+   Version 1 files (no role, no packets) still read, as single-player sessions. */
 
 #define REPLAY_MAX_ARGS 4 /* arguments a recorded command keeps; later ones are dropped */
+
+/* A packet's channel above the transport's three names a transport event instead, with no bytes. */
+#define REPLAY_PEER_CONNECTED 255 /* the host: peer (a player id) connected */
+#define REPLAY_PEER_LEFT 254      /* peer went away */
+#define REPLAY_NET_HOSTED 253     /* networking began at this tick: the recorder hosted */
+#define REPLAY_NET_JOINED 252     /* networking began at this tick: the recorder joined */
+
+typedef enum ReplayRole
+{
+    REPLAY_ROLE_NONE,   /* single player, or networking began mid-run (see REPLAY_NET_*) */
+    REPLAY_ROLE_HOST,   /* hosted from the first tick */
+    REPLAY_ROLE_CLIENT  /* joined from the first tick; the ticks start at the welcome */
+} ReplayRole;
 
 typedef struct ReplayTick
 {
@@ -27,6 +44,7 @@ typedef struct ReplayTick
     uint32_t pressed;       /* actions that went down this tick */
     float mouseDx, mouseDy;
     uint16_t commandCount;  /* commands follow in the file */
+    uint16_t packetCount;   /* packets follow the commands */
 } ReplayTick;
 
 typedef struct ReplayCommand
@@ -37,12 +55,25 @@ typedef struct ReplayCommand
     int count;
 } ReplayCommand;
 
+/* One packet (or transport event) that arrived for a tick. */
+typedef struct ReplayPacket
+{
+    int peer;            /* the store_net peer number (docs/developer/store.md §9.5) */
+    int channel;         /* 0-2, or a REPLAY_PEER_* / REPLAY_NET_* event */
+    size_t size;
+    unsigned char *data; /* written: borrowed; read: malloced, release with free */
+} ReplayPacket;
+
 /* One open recording, for writing or for reading. Zero it or open it; release with ReplayClose. */
 typedef struct Replay
 {
     FILE *file;
     bool writing;
-    uint64_t ticks; /* ticks written or read so far */
+    uint64_t ticks;   /* ticks written or read so far */
+    uint32_t version; /* of the file */
+    ReplayRole role;  /* from the header */
+    int player;       /* from the header: 1 for a host, the welcome's id for a client */
+    int unread;       /* packets of the last tick read that ReplayReadPacket has not taken */
 } Replay;
 
 /** @brief Creates a recording and writes its header.
@@ -55,29 +86,48 @@ typedef struct Replay
 bool ReplayOpenWrite(Replay *replay, const char *path, uint64_t seed, const char *engineRevision,
                      uint64_t kindsHash);
 
-/** @brief Appends one tick and its commands.
+/** @brief Rewrites the role and player id in a recording's header, where the file is now.
  * @param replay Replay open for writing.
- * @param tick The tick's input; its commandCount says how many commands follow.
- * @param commands tick->commandCount commands; may be NULL when there are none.
+ * @param role Role.
+ * @param player Player id (0 while a client waits for its welcome).
  * @return True when written. */
-bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand *commands);
+bool ReplaySetRole(Replay *replay, ReplayRole role, int player);
 
-/** @brief Opens a recording and reads its header. The caller compares the kinds hash with
- * StoreKindsHash of the loaded game and refuses a mismatch.
+/** @brief Appends one tick, its commands and its packets.
+ * @param replay Replay open for writing.
+ * @param tick The tick's input; its commandCount and packetCount say what follows.
+ * @param commands tick->commandCount commands; may be NULL when there are none.
+ * @param packets tick->packetCount packets; may be NULL when there are none.
+ * @return True when written. */
+bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand *commands,
+                     const ReplayPacket *packets);
+
+/** @brief Opens a recording and reads its header (version 1 or 2); the role and player land in
+ * replay. The caller compares the kinds hash with StoreKindsHash of the loaded game and refuses a
+ * mismatch.
  * @param replay Replay to open.
  * @param path Recording.
  * @param seed Receives the world seed; may be NULL.
  * @param kindsHash Receives the recorded kinds hash; may be NULL.
- * @return True when the file is a recording of this version; false leaves replay closed. */
+ * @return True when the file is a recording of a version this build reads; false leaves replay
+ * closed. */
 bool ReplayOpenRead(Replay *replay, const char *path, uint64_t *seed, uint64_t *kindsHash);
 
-/** @brief Reads the next tick and its commands.
+/** @brief Reads the next tick and its commands; its packets follow through ReplayReadPacket.
+ *
+ * Packets of the previous tick that were not read are skipped first.
  * @param replay Replay open for reading.
- * @param tick Receives the tick; commandCount is how many were recorded.
+ * @param tick Receives the tick; commandCount and packetCount are what was recorded.
  * @param commands Receives up to max commands; later ones are skipped. May be NULL when max is 0.
  * @param max Room in commands.
  * @return True when a whole tick was read; false at the end of the file or on a short read. */
 bool ReplayReadTick(Replay *replay, ReplayTick *tick, ReplayCommand *commands, int max);
+
+/** @brief Reads the next packet of the tick ReplayReadTick last read.
+ * @param replay Replay open for reading.
+ * @param packet Receives the packet; its data is malloced (NULL for none), release with free.
+ * @return True when read; false when the tick has no more, or on a short read. */
+bool ReplayReadPacket(Replay *replay, ReplayPacket *packet);
 
 /** @brief Closes the file, flushing a recording, and zeroes replay.
  * @param replay Replay; NULL or closed is allowed.

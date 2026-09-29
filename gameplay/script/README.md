@@ -153,7 +153,10 @@ when a kind's fields changed; `GameS7Eval` is the REPL.
   `players`, `send`, `after`, `go`, `random`, `tick-time`, `held?`, `pressed?`, `input-vector`,
   `mouse-motion`, the vec3 calls (`vec3 vx vy vz v+ v- v* vscale vlength vdistance vnormalize vdot
   vcross rotate-y heading aim spread`), and at the REPL `inspect`, `reload`, `save-game`,
-  `load-game`, `snapshot`, `restore`. `host-game` and `join-game` say networking comes in phase 2.
+  `load-game`, `snapshot`, `restore`. `local-player`, `players`, `host-game` and `join-game` answer
+  from the runner's network (`GameS7SetNetwork`; without it: player 1, `(1)`, and host-game and
+  join-game raise that they need the runner); host-game and join-game are refused in gameplay
+  handlers.
 - A handler that raises is reported as `<kind> #<index> <event>: <message> (<file>:<line>)` at most
   once per kind and event per second, and the game carries on. The five rules' messages are
   proposal A4's.

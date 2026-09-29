@@ -6,6 +6,7 @@
 
 #include "core/store.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* The store's Scheme frontend (docs/developer/store.md §5): things as s7 values, define-kind and its
@@ -66,6 +67,24 @@ bool GameS7Eval(const char *text, char **answer);
  * itself, and a runner that calls StoreLoad directly calls it next.
  * @return True when every missing local child was spawned; false with the reason reported. */
 bool GameS7RestoreLocalChildren(void);
+
+/* The runner's networking, which local-player, players, host-game and join-game answer from
+   (docs/developer/store.md §9.6). Without it the game is one machine: player 1, players (1), and
+   host-game and join-game raise that they need the runner. */
+typedef struct GameS7Network
+{
+    void *user;
+    int (*player)(void *user);                     /* this machine's player */
+    int (*players)(void *user, int *out, int max); /* the players, ascending; the count */
+    /* Start a session; false with why filled when it can't. */
+    bool (*host)(void *user, int port, char *why, size_t size);
+    bool (*join)(void *user, const char *address, int port, char *why, size_t size);
+} GameS7Network;
+
+/** @brief Gives the calls their network; it survives GameS7Close.
+ * @param network Copied; NULL goes back to one machine.
+ * @return No value. */
+void GameS7SetNetwork(const GameS7Network *network);
 
 /** @brief Frees the interpreter; the store is left as it is.
  * @return No value. */

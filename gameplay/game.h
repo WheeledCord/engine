@@ -11,14 +11,15 @@
    recording, replay, a bot, hashes and timing on request. Flags are listed in docs/user/kinds.md. */
 
 /** @brief Runs a project: `[run] <dir> [--headless] [--ticks N] [--seed S] [--record FILE]
- * [--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE]`.
+ * [--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] [--host PORT]
+ * [--join ADDRESS:PORT] [--bot-until N] [--print-field KIND FIELD] [--print-count KIND]`.
  *
- * Prints `tick T hash H` at the end (and every N ticks with --hash-every). Tears everything down
- * before returning, so a process may call it again.
+ * Prints `tick T hash H` at the end (and every N ticks with --hash-every), and in a session `net
+ * state hash H`. Tears everything down before returning, so a process may call it again.
  * @param argc Argument count, argv[0] being the program.
  * @param argv Arguments; borrowed for the call.
- * @return 0 after a normal run; 1 when the project, the game or a recording is refused; 2 for bad
- * arguments. */
+ * @return 0 after a normal run; 1 when the project, the game or a recording is refused, or a
+ * session ended early (refused, no welcome, the host left); 2 for bad arguments. */
 int GameRun(int argc, char **argv);
 
 /** @brief Answers the store hash the last GameRun printed at its end.
