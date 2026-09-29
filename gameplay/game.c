@@ -15,12 +15,12 @@
 #include "core/engine.h"
 #include "core/file.h"
 #include "core/input_map.h"
-#include "core/network.h"
 #include "core/particles.h"
 #include "core/replay.h"
 #include "core/shader.h"
 #include "core/store.h"
 #include "core/store_net.h"
+#include "core/store_net_enet.h"
 #include "core/world3d.h"
 #include "gameplay/script/game_s7.h"
 #include "raymath.h"
@@ -178,18 +178,14 @@ typedef struct Runner
     const char *printKind, *printField, *countKind; /* --print-field KIND FIELD, --print-count KIND */
     bool selfStop;           /* the runner counts its ticks itself: in a window, or in a live session */
     bool lastTicked;         /* the last Update ran a tick (a client waiting for its welcome does not) */
-    StoreNet net;
+    StoreNetLink link;       /* the session: link.net, over ENet (core/store_net_enet.h) when live */
     StoreNetConfig netConfig;
-    bool netOpen;            /* run.net is in use */
+    bool netOpen;            /* run.link.net is in use */
     bool netLive;            /* ENet under it; false when replaying, when packets come from the file */
-    bool hosting, connected, arrived, failed;
+    bool arrived, failed;
     char netWhy[256];        /* why the session ended */
-    CoreNetEndpoint endpoint;
-    CoreNetPeer hostPeer;                       /* a client's ENet peer for the host */
-    CoreNetPeer peerOf[STORE_NET_PLAYERS + 1];  /* the host's ENet peer of each player */
-    int playerOf[STORE_NET_PLAYERS];            /* the player of each of the host's ENet peers */
     double netStarted, paceStart, sleptMicros;
-    uint64_t paceCount, bytesSent, bytesReceived;
+    uint64_t paceCount;
     ReplayPacket *pending;   /* arrived since the last recorded tick, for the recording */
     int pendingCount, pendingCapacity;
     ReplayCommand captured[MAX_COMMANDS]; /* commands queued for the next tick from outside it */
@@ -445,9 +441,7 @@ static GameInput FromBot(void)
 
 /* ---- networking (docs/developer/store.md §9.6) ---------------------------------------------- */
 
-#define NET_CHANNELS 3        /* 0 reliable, 1 unreliable sequenced (state), 2 unreliable (effects) */
-#define NET_JOIN_SECONDS 5.0  /* a client with no welcome by then gives up */
-#define NET_LINGER_SECONDS 5.0
+#define NET_LINGER_SECONDS 5.0 /* a headless host that finished waits this long for its clients */
 
 static bool PlaySoundHere(const char *name, bool placed, Vector3 at);
 static int PresetNamed(const char *name);
@@ -460,56 +454,12 @@ static double Now(void)
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
-static int LocalPlayer(void) { return run.netOpen && run.net.player ? run.net.player : 1; }
+static int LocalPlayer(void) { return run.netOpen && run.link.net.player ? run.link.net.player : 1; }
 
-// Keeps a packet or transport event for the recording, which writes it with the next tick.
-static void Note(int peer, int channel, const void *data, size_t size)
+// Replaying, store_net's packets are dropped: the recording holds what came back. Live, the link sends.
+static bool NetDrop(void *user, int peer, int channel, bool reliable, const void *data, size_t size)
 {
-    if (!run.recording)
-        return;
-    if (run.pendingCount == run.pendingCapacity)
-    {
-        int capacity = run.pendingCapacity ? run.pendingCapacity * 2 : 64;
-        ReplayPacket *grown = realloc(run.pending, (size_t)capacity * sizeof *grown);
-        if (!grown)
-            return;
-        run.pending = grown;
-        run.pendingCapacity = capacity;
-    }
-    ReplayPacket *p = &run.pending[run.pendingCount];
-    p->data = size ? malloc(size) : NULL;
-    if (size && !p->data)
-        return;
-    if (size)
-        memcpy(p->data, data, size);
-    p->peer = peer;
-    p->channel = channel;
-    p->size = size;
-    run.pendingCount++;
-}
-
-static void ClearPending(void)
-{
-    for (int i = 0; i < run.pendingCount; i++)
-        free(run.pending[i].data);
-    run.pendingCount = 0;
-}
-
-// store_net's packets leave here: to the host (peer 0) from a client, to a player's ENet peer from
-// the host. Replaying, they are dropped: the recording holds what came back.
-static bool NetSend(void *user, int peer, int channel, bool reliable, const void *data, size_t size)
-{
-    (void)user;
-    if (!run.netLive)
-        return true;
-    CoreNetPeer to = CORE_NET_PEER_NONE;
-    if (run.hosting && peer >= 2 && peer <= STORE_NET_PLAYERS)
-        to = run.peerOf[peer];
-    else if (!run.hosting && peer == 0)
-        to = run.hostPeer;
-    if (to == CORE_NET_PEER_NONE || !CoreNetSend(&run.endpoint, to, (uint8_t)channel, data, size, reliable))
-        return false;
-    run.bytesSent += size;
+    (void)user, (void)peer, (void)channel, (void)reliable, (void)data, (void)size;
     return true;
 }
 
@@ -550,51 +500,63 @@ static void NetEnded(void *user, const char *why)
 // The runner registers node's position and rotation for interpolation (§9.2).
 static void NetInterpolate(void)
 {
-    StoreNetInterpolate(&run.net, run.world.node, "position");
-    StoreNetInterpolate(&run.net, run.world.node, "rotation");
+    if (run.netLive)
+    {
+        StoreNetLinkInterpolate(&run.link, run.world.node, "position");
+        StoreNetLinkInterpolate(&run.link, run.world.node, "rotation");
+        return;
+    }
+    StoreNetInterpolate(&run.link.net, run.world.node, "position");
+    StoreNetInterpolate(&run.link.net, run.world.node, "rotation");
+}
+
+static void Note(int peer, int channel, const void *data, size_t size);
+
+// Every packet and transport event the link receives, kept for the recording.
+static void NetTap(void *user, int peer, int channel, const void *data, size_t size)
+{
+    (void)user;
+    Note(peer, channel, data, size);
+    if (channel == REPLAY_PEER_LEFT)
+        printf("net: player %d left\n", peer);
 }
 
 /* Starts a session: from --host/--join (atStart, before the first tick), from (host-game) or
-   (join-game), or from a recording's header or event. Replaying opens no socket. A live client
-   says hello once ENet has connected (NetPoll). */
+   (join-game), or from a recording's header or event. Live, core/store_net_enet.h opens ENet under it;
+   replaying opens no socket. A live client says hello once ENet has connected (the link does). */
 static bool NetStart(bool host, const char *address, int port, bool atStart, char *why, size_t size)
 {
     if (run.netOpen)
         return snprintf(why, size, "a session is open already"), false;
     bool live = !run.replaying;
-    for (int p = 0; p <= STORE_NET_PLAYERS; p++)
-        run.peerOf[p] = CORE_NET_PEER_NONE;
-    memset(run.playerOf, 0, sizeof run.playerOf);
-    run.hostPeer = CORE_NET_PEER_NONE;
-    if (live && host && !CoreNetOpenServer(&run.endpoint, (uint16_t)port, STORE_NET_PLAYERS - 1, NET_CHANNELS))
-        return snprintf(why, size, "could not open UDP port %d", port), false;
-    if (live && !host)
+    run.netConfig = (StoreNetConfig){NULL, NetDrop, NetArrived, NetEffect, NetJoined, NetEnded, run.title, false};
+    bool ok;
+    if (live)
     {
-        if (!CoreNetOpenClient(&run.endpoint, NET_CHANNELS))
-            return snprintf(why, size, "could not open a UDP socket"), false;
-        run.hostPeer = CoreNetConnect(&run.endpoint, address, (uint16_t)port);
-        if (run.hostPeer == CORE_NET_PEER_NONE)
+        ok = host ? StoreNetLinkHost(&run.link, &run.store, &run.netConfig, (uint16_t)port)
+                  : StoreNetLinkJoin(&run.link, &run.store, &run.netConfig, address, (uint16_t)port);
+        if (!ok)
         {
-            CoreNetClose(&run.endpoint);
-            return snprintf(why, size, "could not resolve %s", address), false;
+            snprintf(why, size, "%s", StoreNetLinkEnded(&run.link));
+            StoreNetLinkClose(&run.link, 0);
+            return false;
+        }
+        StoreNetLinkSetTap(&run.link, NetTap, NULL);
+    }
+    else
+    {
+        memset(&run.link, 0, sizeof run.link);
+        ok = host ? StoreNetHost(&run.link.net, &run.store, &run.netConfig)
+                  : StoreNetJoin(&run.link.net, &run.store, &run.netConfig);
+        if (!ok)
+        {
+            StoreNetFree(&run.link.net);
+            return snprintf(why, size, "the store could not start networking"), false;
         }
     }
-    run.netConfig = (StoreNetConfig){NULL, NetSend, NetArrived, NetEffect, NetJoined, NetEnded, run.title};
-    memset(&run.net, 0, sizeof run.net);
-    bool ok = host ? StoreNetHost(&run.net, &run.store, &run.netConfig)
-                   : live || StoreNetJoin(&run.net, &run.store, &run.netConfig);
-    if (!ok)
-    {
-        StoreNetFree(&run.net);
-        CoreNetClose(&run.endpoint);
-        return snprintf(why, size, "the store could not start networking"), false;
-    }
-    if (host || !live)
-        NetInterpolate();
     run.netOpen = true;
     run.netLive = live;
-    run.hosting = host;
-    run.connected = false;
+    NetInterpolate();
     run.netWhy[0] = 0;
     run.netStarted = Now();
     if (!atStart)
@@ -607,7 +569,40 @@ static bool NetStart(bool host, const char *address, int port, bool atStart, cha
     return true;
 }
 
-// Delivers one packet or transport event to store_net, live or from a recording.
+// Keeps a packet or transport event for the recording, which writes it with the next tick.
+static void Note(int peer, int channel, const void *data, size_t size)
+{
+    if (!run.recording)
+        return;
+    if (run.pendingCount == run.pendingCapacity)
+    {
+        int capacity = run.pendingCapacity ? run.pendingCapacity * 2 : 64;
+        ReplayPacket *grown = realloc(run.pending, (size_t)capacity * sizeof *grown);
+        if (!grown)
+            return;
+        run.pending = grown;
+        run.pendingCapacity = capacity;
+    }
+    ReplayPacket *p = &run.pending[run.pendingCount];
+    p->data = size ? malloc(size) : NULL;
+    if (size && !p->data)
+        return;
+    if (size)
+        memcpy(p->data, data, size);
+    p->peer = peer;
+    p->channel = channel;
+    p->size = size;
+    run.pendingCount++;
+}
+
+static void ClearPending(void)
+{
+    for (int i = 0; i < run.pendingCount; i++)
+        free(run.pending[i].data);
+    run.pendingCount = 0;
+}
+
+// Delivers one packet or transport event from a recording to store_net.
 static void NetDeliver(int peer, int channel, const void *data, size_t size)
 {
     char why[256];
@@ -617,85 +612,11 @@ static void NetDeliver(int peer, int channel, const void *data, size_t size)
             TraceLog(LOG_WARNING, "RUN: the recording's session could not start: %s", why);
     }
     else if (channel == REPLAY_PEER_CONNECTED)
-        StoreNetPeerConnected(&run.net, peer);
+        StoreNetPeerConnected(&run.link.net, peer);
     else if (channel == REPLAY_PEER_LEFT)
-        StoreNetPeerLeft(&run.net, peer);
+        StoreNetPeerLeft(&run.link.net, peer);
     else
-        StoreNetReceive(&run.net, peer, channel, data, size);
-}
-
-// Every ENet event since the last tick, handed to store_net and kept for the recording.
-static void NetPoll(void)
-{
-    CoreNetEvent e;
-    while (CoreNetPoll(&run.endpoint, 0, &e))
-    {
-        int player = 0;
-        bool known = e.peer < STORE_NET_PLAYERS;
-        if (e.type == CORE_NET_EVENT_ERROR)
-        {
-            CoreNetEventFree(&e);
-            break;
-        }
-        if (run.hosting && e.type == CORE_NET_EVENT_CONNECTED && known)
-        {
-            // A client's player id is the lowest free one from 2 (store_net.h: its peer number).
-            for (int p = 2; p <= STORE_NET_PLAYERS && !player; p++)
-                if (run.peerOf[p] == CORE_NET_PEER_NONE)
-                    player = p;
-            if (!player)
-                CoreNetDisconnect(&run.endpoint, e.peer, false);
-            else
-            {
-                run.peerOf[player] = e.peer;
-                run.playerOf[e.peer] = player;
-                Note(player, REPLAY_PEER_CONNECTED, NULL, 0);
-                NetDeliver(player, REPLAY_PEER_CONNECTED, NULL, 0);
-            }
-        }
-        else if (run.hosting && e.type == CORE_NET_EVENT_DISCONNECTED && known && run.playerOf[e.peer])
-        {
-            player = run.playerOf[e.peer];
-            run.playerOf[e.peer] = 0;
-            run.peerOf[player] = CORE_NET_PEER_NONE;
-            Note(player, REPLAY_PEER_LEFT, NULL, 0);
-            NetDeliver(player, REPLAY_PEER_LEFT, NULL, 0);
-            printf("net: player %d left\n", player);
-        }
-        else if (run.hosting && e.type == CORE_NET_EVENT_RECEIVED && known && run.playerOf[e.peer])
-        {
-            run.bytesReceived += e.size;
-            Note(run.playerOf[e.peer], e.channel, e.data, e.size);
-            NetDeliver(run.playerOf[e.peer], e.channel, e.data, e.size);
-        }
-        else if (!run.hosting && e.type == CORE_NET_EVENT_CONNECTED && e.peer == run.hostPeer)
-        {
-            run.connected = true;
-            if (!StoreNetJoin(&run.net, &run.store, &run.netConfig))
-                snprintf(run.netWhy, sizeof run.netWhy, "could not say hello to the host"), run.failed = true;
-            else
-                NetInterpolate();
-        }
-        else if (!run.hosting && e.type == CORE_NET_EVENT_DISCONNECTED && e.peer == run.hostPeer)
-        {
-            if (!run.connected && Now() - run.netStarted < NET_JOIN_SECONDS)
-                run.hostPeer = CoreNetConnect(&run.endpoint, run.joinAddress, (uint16_t)run.joinPort); // again
-            else if (run.connected)
-            {
-                run.connected = false;
-                StoreNetPeerLeft(&run.net, 0); // ends the session: the host left
-                if (!run.net.ended)
-                    snprintf(run.netWhy, sizeof run.netWhy, "the host closed the connection"), run.failed = true;
-            }
-        }
-        else if (!run.hosting && e.type == CORE_NET_EVENT_RECEIVED && e.peer == run.hostPeer)
-        {
-            run.bytesReceived += e.size;
-            Note(0, e.channel, e.data, e.size);
-            NetDeliver(0, e.channel, e.data, e.size);
-        }
-        CoreNetEventFree(&e);
-    }
+        StoreNetReceive(&run.link.net, peer, channel, data, size);
 }
 
 // A live session run headless keeps to the tick rate, so that machines meet: headless otherwise
@@ -719,40 +640,10 @@ static void Pace(void)
 // 5 s for its clients to finish theirs) and puts the store's hooks back.
 static void NetClose(void)
 {
-    if (run.netLive && run.endpoint.host)
-    {
-        CoreNetEvent e;
-        int connected = 0;
-        for (int p = 2; p <= STORE_NET_PLAYERS; p++)
-            connected += run.peerOf[p] != CORE_NET_PEER_NONE;
-        bool linger = run.hosting && run.headless && run.ended;
-        for (double end = Now() + NET_LINGER_SECONDS; linger && connected > 0 && Now() < end;)
-            if (CoreNetPoll(&run.endpoint, 10, &e))
-            {
-                if (e.type == CORE_NET_EVENT_DISCONNECTED && e.peer < STORE_NET_PLAYERS && run.playerOf[e.peer])
-                {
-                    run.peerOf[run.playerOf[e.peer]] = CORE_NET_PEER_NONE;
-                    run.playerOf[e.peer] = 0;
-                    connected--;
-                }
-                CoreNetEventFree(&e);
-            }
-        int waiting = 0;
-        for (int p = 2; run.hosting && p <= STORE_NET_PLAYERS; p++)
-            if (run.peerOf[p] != CORE_NET_PEER_NONE)
-                CoreNetDisconnect(&run.endpoint, run.peerOf[p], false), waiting++;
-        if (!run.hosting && run.hostPeer != CORE_NET_PEER_NONE && run.connected)
-            CoreNetDisconnect(&run.endpoint, run.hostPeer, false), waiting++;
-        for (double end = Now() + 1.0; waiting > 0 && Now() < end;)
-            if (CoreNetPoll(&run.endpoint, 10, &e))
-            {
-                waiting -= e.type == CORE_NET_EVENT_DISCONNECTED;
-                CoreNetEventFree(&e);
-            }
-        CoreNetClose(&run.endpoint);
-    }
-    if (run.netOpen)
-        StoreNetFree(&run.net);
+    if (run.netLive)
+        StoreNetLinkClose(&run.link, run.headless && run.ended ? NET_LINGER_SECONDS : 0.0);
+    else if (run.netOpen)
+        StoreNetFree(&run.link.net);
     run.netOpen = run.netLive = false;
     ClearPending();
     free(run.pending);
@@ -779,8 +670,8 @@ static int NetPlayer(void *user)
 static int NetPlayers(void *user, int *out, int max)
 {
     (void)user;
-    if (run.netOpen && run.net.joined)
-        return StoreNetPlayers(&run.net, out, max);
+    if (run.netOpen && run.link.net.joined)
+        return StoreNetPlayers(&run.link.net, out, max);
     if (max > 0)
         out[0] = 1;
     return 1;
@@ -919,22 +810,18 @@ static bool Update(void *context, double dt, const EngineInput *in)
         }
     }
     else if (run.netLive)
-        NetPoll();
-    if (run.netOpen && (run.net.ended || run.failed))
-        return NetEndedRun();
-    if (run.netOpen && !run.net.joined)
     {
-        if (run.netLive && Now() - run.netStarted > NET_JOIN_SECONDS)
-        {
-            snprintf(run.netWhy, sizeof run.netWhy, "no welcome from %.200s:%d within %.0f s", run.joinAddress,
-                     run.joinPort, NET_JOIN_SECONDS);
-            return NetEndedRun();
-        }
-        return !Interrupted();
+        StoreNetLinkPoll(&run.link, 0); // refused, no welcome in 5 s, or the host left: the link says why
+        if (StoreNetLinkEnded(&run.link))
+            snprintf(run.netWhy, sizeof run.netWhy, "%s", StoreNetLinkEnded(&run.link)), run.failed = true;
     }
+    if (run.netOpen && (run.link.net.ended || run.failed))
+        return NetEndedRun();
+    if (run.netOpen && !run.link.net.joined)
+        return !Interrupted();
     run.updates++;
     if (run.netOpen)
-        StoreNetBeforeTick(&run.net);
+        StoreNetBeforeTick(&run.link.net);
     if (run.arrived)
     {
         run.arrived = false;
@@ -955,9 +842,9 @@ static bool Update(void *context, double dt, const EngineInput *in)
     World3DBeginTick(&run.world);
     StoreTick(&run.store, (float)dt);
     if (run.netOpen)
-        StoreNetAfterTick(&run.net);
+        StoreNetAfterTick(&run.link.net);
     if (run.netLive)
-        CoreNetFlush(&run.endpoint);
+        StoreNetLinkFlush(&run.link);
     run.lastTicked = true;
     if (run.present)
         PresentHeadless((float)dt);
@@ -1881,7 +1768,7 @@ static bool PlaySoundHere(const char *name, bool placed, Vector3 at)
 static void ShareEffect(const char *name, const char *what, Vector3 at)
 {
     if (run.netOpen && StorePhaseNow(&run.store) == STORE_PHASE_GAMEPLAY)
-        StoreNetEffect(&run.net, name, what, at);
+        StoreNetEffect(&run.link.net, name, what, at);
 }
 
 static s7_pointer SchemePlaySound(s7_scheme *sc, s7_pointer args)
@@ -2441,7 +2328,7 @@ static void Shutdown(void *context)
         if (!run.printedAny || run.lastPrinted != StoreTickCount(&run.store))
             PrintHash();
         if (run.netOpen)
-            printf("net state hash %016" PRIx64 "\n", StoreNetStateHash(&run.net));
+            printf("net state hash %016" PRIx64 "\n", StoreNetStateHash(&run.link.net));
         PrintAsked();
         if (run.bench)
         {
@@ -2457,8 +2344,8 @@ static void Shutdown(void *context)
             }
             double seconds = Now() - run.netStarted;
             if (run.netLive && seconds > 0)
-                printf("net sent %.0f B/s received %.0f B/s over %.1f s\n", (double)run.bytesSent / seconds,
-                       (double)run.bytesReceived / seconds, seconds);
+                printf("net sent %.0f B/s received %.0f B/s over %.1f s\n", (double)run.link.wireSent / seconds,
+                       (double)run.link.wireReceived / seconds, seconds); /* ENet's wire bytes */
             if (run.hudCalls.count)
             {
                 qsort(run.hudCalls.items, run.hudCalls.count, sizeof *run.hudCalls.items, CompareDoubles);

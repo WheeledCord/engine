@@ -214,6 +214,15 @@ bool StoreKindIs(const Store *store, StoreKind kind, StoreKind base);
  * @return The field index, the same in every kind derived from the one declaring it, or -1. */
 int StoreFieldIndex(const Store *store, StoreKind kind, const char *name);
 
+/** @brief Returns where a field sits in its thing's block, so a native mirror struct can be checked
+ * against the layout and copied whole (B7).
+ * @param store Store.
+ * @param kind Kind.
+ * @param field Field index, as StoreFieldIndex returns.
+ * @return Byte offset in the shared block (StoreSharedBlock), or in the local block
+ * (StoreLocalBlock) for a :local field; -1 for an unknown kind or field. */
+int StoreFieldOffset(const Store *store, StoreKind kind, int field);
+
 /** @brief Counts a kind's fields, inherited fields included.
  * @param store Store.
  * @param kind Kind.
@@ -333,6 +342,13 @@ StoreKind StoreKindOf(const Store *store, StoreId id);
  * @param id Thing.
  * @return The owner, or -1 for a stale id. */
 int StoreOwner(const Store *store, StoreId id);
+
+/** @brief Says whether a thing is run on this machine, for native systems outside handlers (B7).
+ * @param store Store.
+ * @param id Thing.
+ * @return True when its root owner is one of this machine's local owners (StoreSetLocalOwners);
+ * false for a stale id. */
+bool StoreOwnedHere(const Store *store, StoreId id);
 
 /** @brief Returns the player whose leaving removes a thing (B3.7).
  * @param store Store.

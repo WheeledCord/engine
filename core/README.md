@@ -16,17 +16,22 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   [docs/developer/store.md](../docs/developer/store.md) §2.
 - `store_net`: networking for the things in a store, with no sockets of its own: packets leave
   through a send callback and arrive through `StoreNetReceive`, so the runner puts ENet under it and
-  the checks an in-memory queue. The host is machine 0 (owners 0 and 1); clients are players 2-16 and
-  talk only to the host, which relays. Things carry network ids (creator machine and a counter).
-  Every third tick each machine captures what it holds and sends each peer the things it should
-  have as a delta against the capture that peer last acknowledged (Quake 3's scheme); a receiver
-  rebuilds the sender's state from its copy of that baseline, applies it before the next tick to
-  things it does not own, and holds registered transform fields 100 ms behind. A message to a thing
-  owned elsewhere (the store's `outgoing` hook) travels reliably in the same packet as its sender's
-  state; the host forwards it, and a client that no longer owns the target bounces it once. Joining
-  checks protocol, game and every kind's declaration; a leaver's roots are removed and the guests
-  under them orphaned. The contract is [docs/developer/store.md](../docs/developer/store.md) §9; the
-  runner does not use it yet (§9.6).
+  the checks an in-memory queue. The host is machine 0 (owners 0 and 1, or only 0 when dedicated);
+  clients are players 2-16 and talk only to the host, which relays. Things carry network ids
+  (creator machine and a counter). Every third tick each machine captures what it holds and sends
+  each peer the things it should have as a delta against the capture that peer last acknowledged
+  (Quake 3's scheme), reliably when the packet is over 1,200 bytes; a receiver rebuilds the sender's
+  state from its copy of that baseline and each tick writes the sender's things as they stood 100 ms
+  behind, every field from one tick (registered FLOAT and VEC3 fields blended), except a thing that
+  has just become its own, which applies on arrival. A message to a thing owned elsewhere (the
+  store's `outgoing` hook) travels reliably in the same packet as its sender's state and is
+  delivered when that tick is shown; the host forwards it, and a client that no longer owns the
+  target bounces it once. Joining checks protocol, game and every kind's declaration; a leaver's
+  roots are removed and the guests under them orphaned. The contract is
+  [docs/developer/store.md](../docs/developer/store.md) §9.
+- `store_net_enet`: store_net over ENet, shared by the runner and C games: hosting and joining (a
+  join retried for 5 s), peer numbering, polling into store_net with a tap for recordings, flushing,
+  closing with linger, and ENet's own wire byte totals (store.md §9.5b).
 - `world3d`: the store's built-in 3D kinds (`node`, `model`, `socket`, `camera`, `light`,
   `character`, `solid`, `area`, `tilemap`, `sound`) and the systems behind them, headless and
   deterministic: world matrices cached per frame and interpolated from the previous tick (a

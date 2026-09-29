@@ -12,14 +12,16 @@
 /* Networking on the store, docs/developer/store.md §9. Every few ticks a machine captures what it
    holds (each thing's network id, header and shared block) into a ring. To each peer it sends the
    latest capture as a delta against the capture that peer last acknowledged, as Quake 3 does [N16];
-   the receiver rebuilds the sender's full state from its copy of that baseline and applies the
-   difference from the last state it applied. Per peer the sender remembers which things each sent
-   state held, and whether the peer's copy of each is current or was left behind because the peer
-   owns it; a thing coming back into a peer's view is sent whole.
+   the receiver rebuilds the sender's full state from its copy of that baseline, keeps it, and each
+   tick writes the sender's things as they stood 100 ms behind the newest (renderTick): the
+   difference from the last state written, with registered fields blended towards the next. Per
+   peer the sender remembers which things each sent state held, and whether the peer's copy of each
+   is current or was left behind because the peer owns it; a thing coming back into a peer's view is
+   sent whole.
 
    Wire format, little-endian, every packet starting with its type byte:
      hello    protocol u32, game text, kinds hash u64, kind count u16, (name text, hash u64)...
-     welcome  player u8, host tick u32
+     welcome  player u8, host tick u32, players u32
      refused  why (u16 length + bytes)
      state    tick u32, ack u32, baseline tick u32 (0: full), players u32 (host only),
               message count u16, messages..., entry count u32, entries... in network id order
@@ -32,7 +34,8 @@
 
 #define RING 32                        /* captures, frames and rebuilt states kept */
 #define SEND_EVERY 3                   /* a state every third tick: 20 Hz */
-#define DELAY_TICKS 6                  /* other machines' transforms run 100 ms behind */
+#define DELAY_TICKS 6                  /* other machines' things are shown 100 ms behind */
+#define LARGE_STATE 1200               /* a state packet over this goes reliable (B3.2) */
 #define PEERS (STORE_NET_PLAYERS + 1)  /* transport peers 0 to 16 */
 #define TEXT_MAX 255
 #define FNV_OFFSET 0xCBF29CE484222325ull
@@ -54,7 +57,7 @@ typedef struct Entry
 typedef struct State
 {
     uint32_t tick; /* 0: unused */
-    bool applied;
+    uint32_t ack;  /* a received state: the newest of our captures its sender had rebuilt */
     Entry *entries; /* in network id order */
     int count, capacity;
     unsigned char *bytes;
@@ -72,7 +75,8 @@ typedef struct Frame
 
 typedef struct Message
 {
-    int peer; /* where it goes, or where it came from */
+    int peer;      /* where it goes, or where it came from */
+    uint32_t tick; /* received: the sender tick of the state it came with */
     uint32_t target;
     StoreSymbol event;
     uint8_t bounced;
@@ -86,7 +90,9 @@ typedef struct Peer
     uint32_t acked;   /* newest of our states it has rebuilt */
     uint32_t newest;  /* newest of its states we have rebuilt */
     uint64_t arrival; /* our tick count when that one arrived */
-    uint32_t applied; /* newest of its states applied */
+    uint32_t seen;    /* newest of its states looked at on arrival for things becoming ours */
+    uint32_t applied; /* the state last written (the earlier one at renderTick) */
+    int64_t render;   /* renderTick last used; it never goes back */
     unsigned frameNext;
     Frame frames[RING];
     State states[RING];
@@ -97,6 +103,12 @@ typedef struct Lerp
     StoreKind kind;
     int field;
 } Lerp;
+
+/* A thing this machine stopped owning by its own write, with the first capture that shows it. */
+typedef struct Release
+{
+    uint32_t netId, tick;
+} Release;
 
 typedef struct Pair
 {
@@ -147,6 +159,14 @@ struct StoreNetData
     int actionCapacity;
     StoreId *created;
     int createdCapacity;
+    const Entry **taken; /* scratch: entries being written, with whether each was created */
+    int takenCapacity;
+    bool *fresh;
+    int freshCapacity;
+    Release *releases;
+    int releaseCount, releaseCapacity;
+    uint32_t *owned; /* thing index -> its generation + 1 while owned here, as last looked */
+    int ownedCapacity;
 };
 
 // ---- small helpers ----------------------------------------------------------------------------
@@ -828,7 +848,7 @@ static const Entry *FindEntry(const State *s, uint32_t netId)
 static void ClearState(State *s, uint32_t tick)
 {
     s->tick = tick;
-    s->applied = false;
+    s->ack = 0;
     s->count = 0;
     s->used = 0;
 }
@@ -902,27 +922,31 @@ static int CompareEntries(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
-static bool IsLerp(const StoreNet *net, StoreKind kind, int field);
-
-/* The host relays a client's thing as it last received it: its held-back fields come from the
-   newest state applied from that client, not from the store's copy running 100 ms behind, so the
-   other clients see it 100 ms behind its owner and not 200 (B3.5). */
-static void RelayReceived(StoreNet *net, State *c, const Entry *e)
+/* The host relays a client's thing as it last received it, whole (header and every field from the
+   newest state from that client), not the store's copy running 100 ms behind: the other clients see
+   it 100 ms behind its owner and not 200 (B3.5), and still from one tick. A thing that state does
+   not hold yet (just given to the client) goes as the store has it. */
+static void RelayReceived(StoreNet *net, State *c, Entry *e)
 {
     const Peer *peer = &net->data->peers[e->owner];
-    const State *applied = NULL;
-    for (int i = 0; i < RING && peer->applied; i++)
-        if (peer->states[i].tick == peer->applied)
-            applied = &peer->states[i];
-    const Entry *received = applied ? FindEntry(applied, e->netId) : NULL;
+    const State *newest = NULL;
+    for (int i = 0; i < RING && peer->newest; i++)
+        if (peer->states[i].tick == peer->newest)
+            newest = &peer->states[i];
+    const Entry *received = newest ? FindEntry(newest, e->netId) : NULL;
     if (!received || received->kind != e->kind)
         return;
+    e->parent = received->parent;
+    e->name = received->name;
+    e->guest = received->guest;
+    e->owner = received->owner;
+    e->spawner = received->spawner;
     const StoreKindData *k = KindData(net->store, e->kind);
     for (int f = 0; f < k->fieldCount; f++)
-        if (IsLerp(net, e->kind, f))
+        if (Shared(k, f))
         {
             unsigned char *slot = c->bytes + e->block + k->offsets[f];
-            memcpy(slot, applied->bytes + received->block + k->offsets[f], (size_t)k->sizes[f]);
+            memcpy(slot, newest->bytes + received->block + k->offsets[f], (size_t)k->sizes[f]);
             RefsToLocal(net, &k->fields[f], slot); // back to this store's own form
         }
 }
@@ -971,12 +995,24 @@ static const State *Capture(StoreNet *net)
 // ---- sending states ---------------------------------------------------------------------------
 static bool LocalOwner(const StoreNet *net, int owner)
 {
-    return net->host ? owner == 0 || owner == 1 : owner == net->player;
+    return net->host ? owner == 0 || (owner == 1 && !net->config.dedicated) : owner == net->player;
+}
+
+// The first capture of ours that shows this machine letting go of a thing (§9.2); 0 for none known.
+static uint32_t ReleasedAt(const StoreNetData *d, uint32_t netId)
+{
+    for (int i = 0; i < d->releaseCount; i++)
+        if (d->releases[i].netId == netId)
+            return d->releases[i].tick;
+    return 0;
 }
 
 /* Whether a thing goes to a peer (§9.2): the host sends what the peer does not own, a client what
    it owns; both keep sending a thing whose ownership moved until the peer has acknowledged a state
-   showing the move. seen is the thing's view in the baseline, base its entry there. */
+   showing the move. A client letting go of a thing so soon that the host never acknowledged a
+   capture where it held it counts: the thing goes until the host has a capture showing it let go
+   (else the host, rebuilding from a baseline without it, would read its absence as a removal).
+   seen is the thing's view in the baseline, base its entry there. */
 static bool Include(const StoreNet *net, int peer, const Entry *e, const Entry *base, int seen)
 {
     if (net->host)
@@ -988,6 +1024,9 @@ static bool Include(const StoreNet *net, int peer, const Entry *e, const Entry *
         return seen == 0 && (e->netId >> 27) != (uint32_t)peer; // made elsewhere, given to it
     }
     if (e->owner == net->player)
+        return true;
+    uint32_t released = ReleasedAt(net->data, e->netId);
+    if (released && net->data->peers[peer].acked < released)
         return true;
     if (seen == 1)
         return base->owner == net->player;
@@ -1110,7 +1149,7 @@ static void SendState(StoreNet *net, int peerNumber, const State *c)
         b->data[countAt + (size_t)i] = (unsigned char)(entries >> (8 * i));
     frame->tick = c->tick;
     peer->frameNext++;
-    Send(net, peerNumber, messages ? 0 : 1, b);
+    Send(net, peerNumber, messages || b->size > LARGE_STATE ? 0 : 1, b); // large: reliable (B3.2)
 }
 
 // ---- receiving states -------------------------------------------------------------------------
@@ -1191,6 +1230,7 @@ static void ReceiveState(StoreNet *net, int from, Reader *r)
         if (!GetMessage(net, r, &m))
             return;
         m.peer = from;
+        m.tick = tick; // delivered when renderTick reaches it (§9.3)
         Queue(net, false, &m);
     }
     if (FindState(peer->states, tick))
@@ -1209,6 +1249,7 @@ static void ReceiveState(StoreNet *net, int from, Reader *r)
         return;
     }
     st->tick = tick;
+    st->ack = ack;
     if (tick > peer->newest)
     {
         peer->newest = tick;
@@ -1348,20 +1389,182 @@ static void Reparent(StoreNet *net, StoreId id, const Entry *e)
         StoreAttach(s, id, to);
 }
 
-// Applies what changed from the state last applied from a peer to the next, in network id order.
+// ---- letting go (§9.2) ------------------------------------------------------------------------
+/* Whether a state says nothing this machine should take about a thing: it let go of the thing by its
+   own write at its tick D, and the state's sender had not yet rebuilt a capture of ours from D on.
+   Such a state was made before its sender knew, and would give the thing back (§20 item 4). */
+static bool Ignored(const StoreNet *net, uint32_t netId, const State *st)
+{
+    return st->ack < ReleasedAt(net->data, netId);
+}
+
+/* Looks at which replicated things this machine owns. With release set, a thing owned here at the
+   last look, alive and owned elsewhere now was let go by this machine's own write since then, and
+   the first capture that can show it is at tick release. With 0, it only looks (after the net's own
+   writes, which are not letting go). */
+static void LookAtOwners(StoreNet *net, uint32_t release)
+{
+    StoreNetData *d = net->data;
+    Store *s = net->store;
+    if ((int)s->thingCount > d->ownedCapacity)
+    {
+        int cap = d->ownedCapacity ? d->ownedCapacity : 256;
+        while (cap < (int)s->thingCount)
+            cap *= 2;
+        uint32_t *grown = realloc(d->owned, (size_t)cap * sizeof *grown);
+        if (!grown)
+            return;
+        memset(grown + d->ownedCapacity, 0, (size_t)(cap - d->ownedCapacity) * sizeof *grown);
+        d->owned = grown;
+        d->ownedCapacity = cap;
+    }
+    for (uint32_t i = 0; i < s->thingCount; i++)
+    {
+        StoreId id = {i, s->things[i].generation};
+        bool replicated = Replicated(s, id), here = replicated && LocalOwner(net, StoreOwner(s, id));
+        uint32_t netId = NetIdOf(net, id);
+        if (release && replicated && !here && netId && d->owned[i] == id.generation + 1)
+        {
+            int at = 0;
+            while (at < d->releaseCount && d->releases[at].netId != netId)
+                at++;
+            if (at == d->releaseCount)
+            {
+                Release *grown = Grow(d->releases, &d->releaseCapacity, at + 1, sizeof *grown);
+                if (!grown)
+                    continue;
+                d->releases = grown;
+                d->releaseCount++;
+            }
+            d->releases[at] = (Release){netId, release};
+        }
+        d->owned[i] = here ? id.generation + 1 : 0;
+    }
+}
+
+// Whether every sender's state written here was made after it had rebuilt our capture at tick.
+static bool SeenByAll(const StoreNet *net, uint32_t tick)
+{
+    for (int p = 0; p < PEERS; p++)
+    {
+        const Peer *peer = &net->data->peers[p];
+        if (!peer->accepted)
+            continue;
+        const State *written = NULL;
+        for (int j = 0; peer->applied && j < RING; j++)
+            if (peer->states[j].tick == peer->applied)
+                written = &peer->states[j];
+        if (!written || written->ack < tick)
+            return false;
+    }
+    return true;
+}
+
+/* A release is forgotten once no state left to write can be older than the sender's knowing of it
+   (acknowledgements only grow with the sender's ticks, and older states are never written). */
+static void ForgetReleases(StoreNet *net)
+{
+    StoreNetData *d = net->data;
+    int kept = 0;
+    for (int i = 0; i < d->releaseCount; i++)
+        if (StoreAlive(net->store, LocalOf(net, d->releases[i].netId)) &&
+            !SeenByAll(net, d->releases[i].tick))
+            d->releases[kept++] = d->releases[i];
+    d->releaseCount = kept;
+}
+
+// ---- writing states ---------------------------------------------------------------------------
+// Room for n entries and their flags in the scratch lists.
+static bool Room(StoreNetData *d, int n)
+{
+    const Entry **taken = Grow(d->taken, &d->takenCapacity, n + 1, sizeof *taken);
+    if (taken)
+        d->taken = taken;
+    bool *fresh = taken ? Grow(d->fresh, &d->freshCapacity, n + 1, sizeof *fresh) : NULL;
+    if (fresh)
+        d->fresh = fresh;
+    StoreId *made = fresh ? Grow(d->created, &d->createdCapacity, n + 1, sizeof *made) : NULL;
+    if (made)
+        d->created = made;
+    return made != NULL;
+}
+
+// Creates the things of d->taken not seen here before (a removed thing stays removed); fresh[k]
+// says which. Returns how many, listed in d->created.
+static int CreateAll(StoreNet *net, int n)
+{
+    StoreNetData *d = net->data;
+    int created = 0;
+    for (int k = 0; k < n; k++)
+    {
+        d->fresh[k] = false;
+        if (!d->taken[k] || Lookup(d, d->taken[k]->netId))
+            continue;
+        StoreId id = Create(net, d->taken[k]);
+        if (id.index != UINT32_MAX)
+        {
+            d->fresh[k] = true;
+            d->created[created++] = id;
+        }
+    }
+    return created;
+}
+
+static void TellArrived(StoreNet *net, int created)
+{
+    for (int k = 0; k < created && net->config.onArrived; k++)
+        if (StoreAlive(net->store, net->data->created[k]))
+            net->config.onArrived(net->config.user, net->data->created[k]);
+}
+
+/* A thing that a newly arrived state makes this machine's own stops being remote on arrival: that
+   state's header and every field apply now (§9.2), and it is never interpolated while it is ours. */
+static void TakeOwned(StoreNet *net, int from, const State *st)
+{
+    StoreNetData *d = net->data;
+    Store *s = net->store;
+    int n = 0;
+    if (!Room(d, st->count))
+        return;
+    // Decided for all before any is written: a root's move changes its children's owner.
+    for (int j = 0; j < st->count; j++)
+    {
+        const Entry *e = &st->entries[j];
+        if (!LocalOwner(net, e->owner) || Ignored(net, e->netId, st))
+            continue;
+        StoreId *known = Lookup(d, e->netId);
+        if (known && (!StoreAlive(s, *known) || LocalOwner(net, StoreOwner(s, *known)) ||
+                      !Accept(net, *known, from)))
+            continue;
+        d->taken[n++] = e;
+    }
+    int created = CreateAll(net, n);
+    for (int k = 0; k < n; k++)
+    {
+        StoreId id = LocalOf(net, d->taken[k]->netId);
+        if (!StoreAlive(s, id))
+            continue;
+        if (d->fresh[k])
+            Link(net, id, d->taken[k]);
+        else
+            Reparent(net, id, d->taken[k]);
+        WriteFields(net, id, NULL, NULL, st, d->taken[k], true);
+    }
+    TellArrived(net, created);
+}
+
+// Applies what changed from the state last written from a peer to the next, in network id order.
 static void Apply(StoreNet *net, int from, const State *was, const State *now)
 {
     StoreNetData *d = net->data;
     Store *s = net->store;
-    int wasCount = was ? was->count : 0, n = 0, i = 0, j = 0, created = 0;
+    int wasCount = was ? was->count : 0, n = 0, i = 0, j = 0;
     Action *actions = Grow(d->actions, &d->actionCapacity, wasCount + now->count + 1, sizeof *actions);
     if (!actions)
         return;
     d->actions = actions;
-    StoreId *made = Grow(d->created, &d->createdCapacity, now->count + 1, sizeof *made);
-    if (!made)
+    if (!Room(d, wasCount + now->count))
         return;
-    d->created = made;
     while (i < wasCount || j < now->count)
     {
         const Entry *a = i < wasCount ? &was->entries[i] : NULL;
@@ -1372,29 +1575,25 @@ static void Apply(StoreNet *net, int from, const State *was, const State *now)
             b = NULL, i++;
         else
             a = NULL, j++;
+        if (b && Ignored(net, b->netId, now))
+            continue; // let go of here, and its sender did not know yet
+        if (a && b && Ignored(net, a->netId, was))
+            a = NULL; // left alone until now: whole
         if (a && b && a->kind == b->kind && SameHeader(a, b) &&
             !memcmp(was->bytes + a->block, now->bytes + b->block, BlockSize(s, b->kind)))
             continue;
-        actions[n++] = (Action){a, b, false};
+        actions[n] = (Action){a, b, false};
+        d->taken[n++] = b;
     }
     // Things new here first, so parents and references among them resolve.
-    for (int k = 0; k < n; k++)
-        if (actions[k].now && !Lookup(d, actions[k].now->netId))
-        {
-            StoreId id = Create(net, actions[k].now);
-            if (id.index != UINT32_MAX)
-            {
-                actions[k].fresh = true;
-                made[created++] = id;
-            }
-        }
+    int created = CreateAll(net, n);
     for (int k = 0; k < n; k++)
     {
         const Entry *a = actions[k].was, *b = actions[k].now;
         StoreId id = LocalOf(net, (a ? a : b)->netId);
         if (!StoreAlive(s, id))
             continue;
-        if (actions[k].fresh)
+        if (d->fresh[k])
         {
             Link(net, id, b);
             WriteFields(net, id, NULL, NULL, now, b, true);
@@ -1406,91 +1605,101 @@ static void Apply(StoreNet *net, int from, const State *was, const State *now)
         else
         {
             Reparent(net, id, b);
-            // Ownership arriving here is the transfer's last write: transforms too, at once.
+            // Registered fields are the interpolation's to write, unless the thing just became ours.
             WriteFields(net, id, a ? was : NULL, a, now, b, !Accept(net, id, from));
         }
     }
-    for (int k = 0; k < created && net->config.onArrived; k++)
-        if (StoreAlive(s, made[k]))
-            net->config.onArrived(net->config.user, made[k]);
+    TellArrived(net, created);
 }
 
 static float Blend(float a, float b, float t) { return a + (b - a) * t; }
 
-// A peer's things' registered transforms, between the two applied states either side of
-// DELAY_TICKS behind its newest (B3.5).
-static void Interpolate(StoreNet *net, int from)
+/* A peer's things' registered fields at renderTick, between the state written (a) and the first
+   received after renderTick (b; none: hold a, no extrapolation). Across a parent change there is no
+   blend: a's value, until renderTick reaches b and it jumps to b's. */
+static void Interpolate(StoreNet *net, int from, const State *a, const State *b, int64_t render)
 {
     StoreNetData *d = net->data;
     Store *s = net->store;
-    const Peer *peer = &d->peers[from];
-    if (!d->lerpCount || !peer->newest)
+    if (!d->lerpCount || !a)
         return;
-    int64_t render =
-        (int64_t)peer->newest + (int64_t)(StoreTickCount(s) - peer->arrival) - DELAY_TICKS;
-    const State *a = NULL, *b = NULL, *newest = NULL;
-    for (int i = 0; i < RING; i++)
+    float t = b ? (float)(render - (int64_t)a->tick) / (float)(b->tick - a->tick) : 0.0f;
+    for (int j = 0; j < a->count; j++)
     {
-        const State *st = &peer->states[i];
-        if (!st->tick || !st->applied)
+        const Entry *ea = &a->entries[j];
+        StoreId id = LocalOf(net, ea->netId);
+        if (!StoreAlive(s, id) || StoreKindOf(s, id) != ea->kind || !Accept(net, id, from) ||
+            Ignored(net, ea->netId, a))
             continue;
-        if (!newest || st->tick > newest->tick)
-            newest = st;
-        if ((int64_t)st->tick <= render && (!a || st->tick > a->tick))
-            a = st;
-        if ((int64_t)st->tick > render && (!b || st->tick < b->tick))
-            b = st;
-    }
-    if (!b)
-        a = b = newest; // past the newest: hold it, no extrapolation
-    if (!b)
-        return;
-    if (!a)
-        a = b;
-    float t = a == b ? 1.0f : (float)(render - (int64_t)a->tick) / (float)(b->tick - a->tick);
-    for (int j = 0; j < b->count; j++)
-    {
-        const Entry *eb = &b->entries[j];
-        StoreId id = LocalOf(net, eb->netId);
-        if (!StoreAlive(s, id) || StoreKindOf(s, id) != eb->kind || !Accept(net, id, from))
-            continue;
-        const Entry *ea = FindEntry(a, eb->netId);
-        bool jump = !ea || ea->parent != eb->parent || ea->kind != eb->kind; // a parent change jumps
-        const StoreKindData *k = KindData(s, eb->kind);
+        const Entry *eb = b ? FindEntry(b, ea->netId) : NULL;
+        if (eb && (eb->parent != ea->parent || eb->kind != ea->kind || Ignored(net, eb->netId, b)))
+            eb = NULL;
+        const StoreKindData *k = KindData(s, ea->kind);
         for (int l = 0; l < d->lerpCount; l++)
         {
-            if (!StoreKindIs(s, eb->kind, d->lerps[l].kind))
+            if (!StoreKindIs(s, ea->kind, d->lerps[l].kind))
                 continue;
             int f = d->lerps[l].field;
-            StoreType type = k->fields[f].type;
-            const unsigned char *pb = b->bytes + eb->block + k->offsets[f];
+            const unsigned char *pa = a->bytes + ea->block + k->offsets[f];
             StoreValue va, vb;
-            ValueOf(type, pb, &vb);
-            ValueOf(type, jump ? pb : a->bytes + ea->block + k->offsets[f], &va);
-            if (type == STORE_FLOAT)
-                vb.as.f = Blend(va.as.f, vb.as.f, t);
-            else if (type == STORE_VEC3)
-                vb.as.v = (Vector3){Blend(va.as.v.x, vb.as.v.x, t), Blend(va.as.v.y, vb.as.v.y, t),
+            ValueOf(k->fields[f].type, pa, &va);
+            ValueOf(k->fields[f].type, eb ? b->bytes + eb->block + k->offsets[f] : pa, &vb);
+            if (k->fields[f].type == STORE_FLOAT)
+                va.as.f = Blend(va.as.f, vb.as.f, t);
+            else
+                va.as.v = (Vector3){Blend(va.as.v.x, vb.as.v.x, t), Blend(va.as.v.y, vb.as.v.y, t),
                                     Blend(va.as.v.z, vb.as.v.z, t)};
-            else if (t < 1.0f)
-                vb = va;
-            if (type == STORE_REF)
-                vb.as.ref = LocalOf(net, vb.as.ref.index);
-            StoreSetEngine(s, id, f, &vb);
+            StoreSetEngine(s, id, f, &va);
         }
     }
 }
 
-// Messages that came with states, once those are applied: delivered, forwarded or bounced (§9.3).
+/* One sender's things as they stood at renderTick (§9.2): renderTick = newest tick received + ticks
+   since it arrived - 6, never going back. The latest state at or before it is written (when newer
+   than the one written), then the registered fields are blended towards the next. */
+static void Render(StoreNet *net, int from)
+{
+    Peer *peer = &net->data->peers[from];
+    if (!peer->newest)
+        return;
+    int64_t render =
+        (int64_t)peer->newest + (int64_t)(StoreTickCount(net->store) - peer->arrival) - DELAY_TICKS;
+    if (render < peer->render)
+        render = peer->render;
+    peer->render = render;
+    const State *a = NULL, *b = NULL;
+    for (int i = 0; i < RING; i++)
+    {
+        const State *st = &peer->states[i];
+        if (st->tick && (int64_t)st->tick <= render && (!a || st->tick > a->tick))
+            a = st;
+        if (st->tick && (int64_t)st->tick > render && (!b || st->tick < b->tick))
+            b = st;
+    }
+    if (a && a->tick > peer->applied)
+    {
+        Apply(net, from, FindState(peer->states, peer->applied), a);
+        peer->applied = a->tick;
+    }
+    Interpolate(net, from, FindState(peer->states, peer->applied), b, render);
+}
+
+/* Messages whose sender tick renderTick has reached, after this tick's states are written:
+   delivered, forwarded or bounced (§9.3). The rest wait; a message from a peer that left goes now. */
 static void DeliverMessages(StoreNet *net)
 {
     StoreNetData *d = net->data;
     Store *s = net->store;
-    int count = d->inCount;
-    d->inCount = 0;
+    int count = d->inCount, kept = 0;
     for (int i = 0; i < count; i++)
     {
         Message m = d->in[i];
+        const Peer *sender = m.peer >= 0 && m.peer < PEERS ? &d->peers[m.peer] : NULL;
+        if (sender && sender->accepted && (int64_t)m.tick > sender->render)
+        {
+            d->in[kept++] = m;
+            continue;
+        }
         StoreId target = LocalOf(net, m.target);
         bool alive = StoreAlive(s, target);
         int owner = alive ? StoreOwner(s, target) : -1;
@@ -1524,6 +1733,7 @@ static void DeliverMessages(StoreNet *net)
                  StoreSymbolName(s, m.event),
                  alive ? StoreKindName(s, StoreKindOf(s, target)) : "a thing", (unsigned)m.target);
     }
+    d->inCount = kept;
 }
 
 // ---- store hooks ------------------------------------------------------------------------------
@@ -1635,8 +1845,9 @@ static void TellGame(Store *s, const char *event, int player)
 static void ResetPeer(Peer *p)
 {
     p->accepted = false;
-    p->acked = p->newest = p->applied = 0;
+    p->acked = p->newest = p->seen = p->applied = 0;
     p->arrival = 0;
+    p->render = 0;
     for (int i = 0; i < RING; i++)
     {
         p->frames[i].tick = 0;
@@ -1732,6 +1943,7 @@ static void ReceiveHello(StoreNet *net, int peer, Reader *r)
     Buf *b = StartPacket(net, PACKET_WELCOME);
     PutU8(b, (unsigned)peer);
     PutU32(b, (uint32_t)StoreTickCount(s));
+    PutU32(b, net->players); // the session's players, this one included (a dedicated host is none)
     Send(net, peer, 0, b);
     TellGame(s, "player-joined", peer);
 }
@@ -1740,7 +1952,7 @@ static void ReceiveWelcome(StoreNet *net, Reader *r)
 {
     Store *s = net->store;
     unsigned player = GetU8(r);
-    uint32_t tick = GetU32(r);
+    uint32_t tick = GetU32(r), players = GetU32(r);
     if (r->bad || player < 2 || player > STORE_NET_PLAYERS)
         return;
     // The world is the host's from here: empty this one (guests of removed roots become roots,
@@ -1757,8 +1969,9 @@ static void ReceiveWelcome(StoreNet *net, Reader *r)
     StoreSetLocalOwners(s, owners, 1);
     net->player = (int)player;
     net->data->machine = player;
-    net->players = 1u << 1 | 1u << player;
+    net->players = players | 1u << player;
     net->joined = true;
+    net->data->releaseCount = 0;
     ResetPeer(&net->data->peers[0]);
     net->data->peers[0].accepted = true;
     if (net->config.onJoined)
@@ -1839,10 +2052,10 @@ bool StoreNetHost(StoreNet *net, Store *store, const StoreNetConfig *config)
     if (!Open(net, store, config, true))
         return false;
     int owners[2] = {0, 1};
-    StoreSetLocalOwners(store, owners, 2);
+    StoreSetLocalOwners(store, owners, config->dedicated ? 1 : 2);
     net->joined = true;
-    net->player = 1;
-    net->players = 1u << 1;
+    net->player = config->dedicated ? 0 : 1;
+    net->players = config->dedicated ? 0 : 1u << 1;
     return true;
 }
 
@@ -1950,28 +2163,30 @@ void StoreNetBeforeTick(StoreNet *net)
     if (!net || !net->data || !net->joined || net->ended)
         return;
     StoreNetData *d = net->data;
+    // Let go of between ticks: the next capture is the first that can show it.
+    LookAtOwners(net, (uint32_t)StoreTickCount(net->store) + 1);
     for (int from = 0; from < PEERS; from++)
     {
         Peer *peer = &d->peers[from];
         while (peer->accepted)
         {
-            // Every state newer than the last applied, oldest first; older ones are only kept.
+            // Every state that arrived since the last look, oldest first: what it makes ours.
             State *next = NULL;
             for (int i = 0; i < RING; i++)
-                if (peer->states[i].tick > peer->applied &&
-                    (!next || peer->states[i].tick < next->tick))
+                if (peer->states[i].tick > peer->seen && (!next || peer->states[i].tick < next->tick))
                     next = &peer->states[i];
             if (!next)
                 break;
-            Apply(net, from, FindState(peer->states, peer->applied), next);
-            next->applied = true;
-            peer->applied = next->tick;
+            peer->seen = next->tick;
+            TakeOwned(net, from, next);
         }
     }
-    DeliverMessages(net);
     for (int from = 0; from < PEERS; from++)
         if (d->peers[from].accepted)
-            Interpolate(net, from);
+            Render(net, from);
+    DeliverMessages(net);
+    LookAtOwners(net, 0);
+    ForgetReleases(net);
 }
 
 void StoreNetAfterTick(StoreNet *net)
@@ -1979,6 +2194,7 @@ void StoreNetAfterTick(StoreNet *net)
     if (!net || !net->data || !net->joined || net->ended)
         return;
     StoreNetData *d = net->data;
+    LookAtOwners(net, (uint32_t)StoreTickCount(net->store)); // let go of in this tick
     bool sendTick = StoreTickCount(net->store) % SEND_EVERY == 0, any = false;
     for (int p = 0; p < PEERS; p++)
         any |= d->peers[p].accepted && (sendTick || HasMessages(d, p));
@@ -2012,7 +2228,7 @@ bool StoreNetInterpolate(StoreNet *net, StoreKind kind, const char *field)
     StoreNetData *d = net->data;
     int f = StoreFieldIndex(net->store, kind, field);
     const StoreFieldDecl *decl = StoreFieldAt(net->store, kind, f);
-    if (!decl || (decl->flags & STORE_LOCAL) || decl->type >= STORE_LIST)
+    if (!decl || (decl->flags & STORE_LOCAL) || (decl->type != STORE_FLOAT && decl->type != STORE_VEC3))
         return false;
     Lerp *lerps = Grow(d->lerps, &d->lerpCapacity, d->lerpCount + 1, sizeof *lerps);
     if (!lerps)
@@ -2099,6 +2315,10 @@ void StoreNetFree(StoreNet *net)
         free(d->scratch);
         free(d->actions);
         free(d->created);
+        free(d->taken);
+        free(d->fresh);
+        free(d->releases);
+        free(d->owned);
         free(d);
     }
     memset(net, 0, sizeof *net);

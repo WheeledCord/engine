@@ -1139,6 +1139,54 @@ static void LocalChecks(void)
     StoreFree(&c);
 }
 
+// ---- for native systems (B7) --------------------------------------------------------------------
+// StoreFieldOffset says where StoreSet writes; StoreOwnedHere follows the local owners and attach.
+static void NativeChecks(void)
+{
+    Store s;
+    StoreInit(&s, 5);
+    StoreFieldDecl fields[] = {Field("hp", STORE_INT, 0, Int(0)), Field("glow", STORE_FLOAT, STORE_LOCAL, Float(0)),
+                               Field("at", STORE_VEC3, 0, Vec(0, 0, 0)), Field("age", STORE_FLOAT, 0, Float(0))};
+    StoreKind k = StoreDeclareKind(&s, "shell", -1, fields, 4, NULL);
+    StoreId shell = StoreSpawn(&s, k, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreValue at = Vec(1.5f, 2.5f, 3.5f), age = Float(0.75f), hp = Int(42);
+    StoreSet(&s, shell, 2, &at);
+    StoreSet(&s, shell, 3, &age);
+    StoreSet(&s, shell, 0, &hp);
+    const unsigned char *block = StoreSharedBlock(&s, shell);
+    int atOffset = StoreFieldOffset(&s, k, 2), ageOffset = StoreFieldOffset(&s, k, 3),
+        hpOffset = StoreFieldOffset(&s, k, 0);
+    float v[3], a = 0;
+    int32_t h = 0;
+    if (block && atOffset >= 0 && ageOffset >= 0 && hpOffset >= 0)
+    {
+        memcpy(v, block + atOffset, sizeof v);
+        memcpy(&a, block + ageOffset, sizeof a);
+        memcpy(&h, block + hpOffset, sizeof h);
+    }
+    printf("store: field offsets hp %d at %d age %d (glow, local, %d)\n", hpOffset, atOffset, ageOffset,
+           StoreFieldOffset(&s, k, 1));
+    Expect(block && v[0] == 1.5f && v[1] == 2.5f && v[2] == 3.5f && a == 0.75f && h == 42,
+           "StoreFieldOffset says where StoreSet writes a field in StoreSharedBlock");
+    Expect(StoreFieldOffset(&s, k, 1) == 0 && StoreFieldOffset(&s, k, 4) == -1 &&
+               StoreFieldOffset(&s, k, -1) == -1 && StoreFieldOffset(&s, 99, 0) == -1,
+           "a local field's offset is in the local block; an unknown field or kind answers -1");
+    StoreId soldier = StoreSpawn(&s, k, 2, STORE_NULL, STORE_NO_SYMBOL);
+    StoreSetLocalOwners(&s, (int[]){0, 1}, 2);
+    bool before = StoreOwnedHere(&s, shell) && !StoreOwnedHere(&s, soldier);
+    StoreAttach(&s, shell, soldier);
+    bool attached = !StoreOwnedHere(&s, shell);
+    StoreSetLocalOwners(&s, (int[]){2}, 1);
+    bool asClient = StoreOwnedHere(&s, shell) && StoreOwnedHere(&s, soldier);
+    StoreSetLocalOwners(&s, (int[]){0, 1}, 2);
+    StoreDetach(&s, shell);
+    bool detached = StoreOwnedHere(&s, shell);
+    StoreRemove(&s, shell);
+    Expect(before && attached && asClient && detached && !StoreOwnedHere(&s, shell),
+           "StoreOwnedHere follows the local owners and attach, and is false for a removed thing");
+    StoreFree(&s);
+}
+
 int StoreChecks(void)
 {
     failures = 0;
@@ -1152,5 +1200,6 @@ int StoreChecks(void)
     SnapshotChecks();
     SaveChecks();
     LocalChecks();
+    NativeChecks();
     return failures;
 }
