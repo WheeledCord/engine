@@ -214,7 +214,12 @@ void StoreSetLocalOwners(Store *, const int *owners, int count);    /* which own
    detached (§2.3). Then the store records which shared fields changed since the last `StoreFrame`
    (compare the shared pools against a shadow copy per kind, only for kinds that registered any
    `-changed` event; fields are compared per declared field, so a collection is one change).
-   Things spawned this tick get their `start` message delivered at the head of the next tick's queue.
+   `start` always reaches a thing before its first `tick`. A thing spawned during a tick (from a
+   `tick` handler, a message handler or a system) has `start` queued at the tail of the message
+   queue at spawn, so it is delivered later in that tick's step 5 or 6. A thing spawned outside a
+   tick (level setup, the REPL, a frame, a load) keeps its `start` pending; pending starts are
+   delivered at the very beginning of the next `StoreTick`, in spawn order, before step 2's commands
+   and step 3's timers.
 
 Handlers run with `StoreCurrent` and `StoreCurrentOwner` set, `StorePhaseNow` at GAMEPLAY. A kind's
 `StoreHandlerFn` is called only for events `StoreKindHandlesEvent` answers true for (so a kind

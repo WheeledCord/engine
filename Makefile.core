@@ -90,6 +90,7 @@ $(eval $(call core_project,core_integration,tests/integration/core))
 $(eval $(call core_project,gameplay_integration,tests/integration/gameplay))
 $(eval $(call core_project,regression_test,tests/regression))
 $(eval $(call core_project,describe_types,tools/describe_types))
+$(eval $(call core_project,store_bench,tools/store_bench))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
