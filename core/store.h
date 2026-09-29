@@ -676,6 +676,20 @@ bool StoreAfter(Store *store, StoreId self, float seconds, StoreSymbol event,
 bool StoreCommand(Store *store, StoreId target, StoreSymbol event, const StoreValue *args,
                   int count);
 
+/** @brief Copies the player commands queued since the last tick, in queue order, for a recording.
+ *
+ * These are the commands StoreCommand queued (and StoreSend outside a tick) that the next
+ * StoreTick will deliver at its step 2. The queue is left as it is.
+ * @param store Store.
+ * @param targets Receives each command's target; may be NULL.
+ * @param events Receives each command's event; may be NULL.
+ * @param args Receives each command's arguments, STORE_MAX_ARGS per command; may be NULL.
+ * @param counts Receives each command's argument count; may be NULL.
+ * @param max Room in each non-NULL array; at most that many commands are copied.
+ * @return The number of commands queued, which may exceed max; 0 for a NULL store. */
+int StoreCommandsPending(const Store *store, StoreId *targets, StoreSymbol *events,
+                         StoreValue (*args)[STORE_MAX_ARGS], int *counts, int max);
+
 /** @brief Says which owners run on this machine: their `tick` handlers and messages run here.
  * @param store Store.
  * @param owners Owners 0 to 63; others are ignored. May be NULL when count is 0 (none local).

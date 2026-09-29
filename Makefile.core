@@ -94,6 +94,10 @@ $(eval $(call core_project,describe_types,tools/describe_types))
 $(eval $(call core_project,draw_bench,tools/draw_bench))
 $(BUILD)/draw_bench: LDLIBS += -lEGL
 $(eval $(call core_project,store_bench,tools/store_bench))
+# The project runner (gameplay/game.c). The runner in libgameplay calls into libscript, which the
+# default link order has already passed, so the libraries are listed once more after it.
+$(eval $(call core_project,trench,tools/trench))
+$(BUILD)/trench: LDLIBS := $(BUILD)/libscript.a $(BUILD)/libgameplay.a $(BUILD)/libcore.a $(RLLIB) $(LDLIBS)
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,
@@ -103,7 +107,7 @@ SDK ?= $(BUILD)/sdk
 PREFIX ?= $(HOME)/.local
 SDK_HEADERS := $(filter-out core/ui_internal.h,$(wildcard core/*.h)) $(wildcard gameplay/*.h) \
 	$(wildcard gameplay/script/*.h)
-sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) script-api
+sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/trench script-api
 	rm -rf $(SDK)
 	mkdir -p $(SDK)/include/core $(SDK)/include/gameplay/script $(SDK)/lib/pkgconfig $(SDK)/bin \
 		$(SDK)/share/engine/docs
@@ -116,6 +120,7 @@ sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) scr
 	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(BUILD)/script-objects.md $(SDK)/share/engine/docs/
 	cp tools/engine_build.py $(SDK)/bin/engine-build
 	cp tools/engine_new.py $(SDK)/bin/engine-new
+	cp $(BUILD)/trench $(SDK)/bin/trench
 	chmod +x $(SDK)/bin/engine-build $(SDK)/bin/engine-new
 	python3 tools/write_engine_pc.py --prefix "$(abspath $(SDK))" --revision "$(ENGINE_REV)" --out $(SDK)/lib/pkgconfig/engine.pc
 	@echo "SDK $(ENGINE_REV) in $(SDK); build a project with $(SDK)/bin/engine-build <project dir>"
