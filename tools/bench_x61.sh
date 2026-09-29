@@ -28,8 +28,7 @@ if [ -f /usr/include/EGL/egl.h ] || [ -f /usr/local/include/EGL/egl.h ]; then
 else
     echo "== draw_bench skipped: no EGL headers" >> "$OUT"
 fi
-if [ -x build/core/trench ] && [ -d ../Games/swat-tower ]; then
-    echo "== swat-tower headless bot session, 3600 ticks (condition 3 tick cost)" >> "$OUT"
-    taskset -c "$LAST" ./build/core/trench run ../Games/swat-tower --headless --bot --ticks 3600 --seed 7 --bench >> "$OUT" 2>&1 || echo "trench failed" >> "$OUT"
-fi
+make -f Makefile.core build/core/trench >/dev/null
+echo "== swat-tower headless bot session, 3600 ticks (condition 3: gameplay tick cost)" >> "$OUT"
+taskset -c "$LAST" ./build/core/trench run examples/swat-tower --headless --bot --ticks 3600 --seed 7 --bench >> "$OUT" 2>&1 || echo "trench failed" >> "$OUT"
 echo "wrote $OUT"
