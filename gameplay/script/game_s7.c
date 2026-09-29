@@ -7,6 +7,7 @@
 
 #include "core/file.h"
 #include <math.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -105,6 +106,7 @@ static struct
 
 static bool Dispatch(Store *store, StoreId self, StoreSymbol event, const StoreValue *args,
                      int count, void *user);
+static bool Throttled(StoreKind kind, StoreSymbol event);
 
 // ---- small helpers ----------------------------------------------------------------------------
 static bool IsNull(StoreId id) { return id.index == UINT32_MAX; }
@@ -192,6 +194,68 @@ static void Report(const char *line)
     if (game.sink)
         game.sink(line);
 }
+
+// ---- the handler time limit (proposal B2.6) ---------------------------------------------------
+/* While a handler runs, the clock is read every 256th time s7 enters a body (the begin hook) or a
+   script calls one of the engine's functions (GameS7LimitCheck): a loop whose body calls only
+   engine functions never enters a body. Past the limit, or on an interrupt, the handler is
+   stopped: the begin hook sets all_done, which makes s7 abandon the evaluation and return from the
+   dispatcher's s7_call; GameS7LimitCheck raises handler-time-limit, which the dispatcher's catch
+   takes quietly. Run then reports it once. Kept outside `game`, which GameS7Open clears. */
+static double handlerLimit;               /* seconds; 0: no limit */
+static volatile sig_atomic_t interrupted; /* GameS7SetInterrupted, from a signal handler */
+static struct
+{
+    bool armed, stopped, timedOut;
+    unsigned calls;
+    double start;
+} limit;
+
+static bool OverLimit(void)
+{
+    if (!limit.armed)
+        return false;
+    if (limit.stopped || interrupted)
+        return limit.stopped = true;
+    if (handlerLimit <= 0 || ++limit.calls % 256)
+        return false;
+    if (Now() - limit.start > handlerLimit)
+        return limit.stopped = limit.timedOut = true;
+    return false;
+}
+
+static void BeginHook(s7_scheme *sc, bool *all_done)
+{
+    (void)sc;
+    if (OverLimit() || interrupted) /* outside a handler too: the REPL, a load */
+        *all_done = true;
+}
+
+void GameS7LimitCheck(s7_scheme *sc)
+{
+    if (OverLimit())
+        s7_error(sc, s7_make_symbol(sc, "handler-time-limit"),
+                 s7_list(sc, 1, s7_make_string(sc, "the handler was stopped")));
+}
+
+// "the tick handler of rusher #34 ran for over 50 ms and was stopped; the loop at x.scm:212 ..."
+static void ReportStopped(void)
+{
+    const char *where = game.location, *slash = where ? strrchr(where, '/') : NULL;
+    char line[TEXT];
+    if (slash)
+        where = slash + 1;
+    snprintf(line, sizeof line,
+             "the %s handler of %s #%u ran for over %.0f ms and was stopped; %s%s may never end",
+             EventName(), KindName(game.eventKind), game.eventThing.index, handlerLimit * 1000.0,
+             where ? "the loop at " : "a loop in it", where ? where : "");
+    if (!Throttled(game.eventKind, game.event))
+        Report(line);
+}
+
+void GameS7SetHandlerLimit(double seconds) { handlerLimit = seconds > 0 ? seconds : 0; }
+
+void GameS7SetInterrupted(bool on) { interrupted = on; }
 
 // ---- errors -----------------------------------------------------------------------------------
 /* Every error a script sees is one symbol, game-error, with ("~A" text) as its data, so a script's
@@ -550,6 +614,7 @@ s7_pointer GameS7FromValue(s7_scheme *sc, const StoreValue *value)
 // A live thing argument, or the error that it is not one.
 static StoreId ThingArg(s7_scheme *sc, s7_pointer p, const char *caller, int position)
 {
+    GameS7LimitCheck(sc);
     StoreId id;
     if (!GameS7ToId(p, &id))
     {
@@ -573,6 +638,7 @@ static const char *NameArg(s7_scheme *sc, s7_pointer p, const char *caller, int 
 
 static double NumberArg(s7_scheme *sc, s7_pointer p, const char *caller, int position)
 {
+    GameS7LimitCheck(sc);
     if (!s7_is_real(p))
     {
         s7_wrong_type_arg_error(sc, caller, position, p, "a number");
@@ -621,6 +687,7 @@ static s7_pointer MakeView(s7_scheme *sc, StoreId id, int field, s7_int tag)
 
 static s7_pointer ReadField(s7_scheme *sc, StoreId id, int field)
 {
+    GameS7LimitCheck(sc);
     Store *store = game.store;
     StoreKind kind = StoreKindOf(store, id);
     if (kind < 0)
@@ -792,6 +859,7 @@ static bool WriteField(s7_scheme *sc, StoreId id, int field, s7_pointer value, b
 
 static s7_pointer SetField(s7_scheme *sc, StoreId id, int field, s7_pointer value)
 {
+    GameS7LimitCheck(sc);
     char err[TEXT];
     if (!WriteField(sc, id, field, value, false, err, sizeof err))
         return Fail(sc, "%s", err);
@@ -1728,7 +1796,22 @@ static bool Run(StoreId self, StoreKind kind, StoreSymbol event, s7_pointer entr
     game.eventKind = kind;
     game.eventThing = self;
     game.location = s7_is_string(s7_cdr(entry)) ? s7_string(s7_cdr(entry)) : NULL;
+    bool outer = !limit.armed; // a nested handler counts against the one that called it
+    if (outer)
+    {
+        memset(&limit, 0, sizeof limit);
+        limit.armed = true;
+        limit.start = Now();
+    }
     s7_pointer result = s7_call(sc, game.dispatch, s7_list(sc, 2, s7_car(entry), args));
+    if (outer)
+    {
+        if (limit.timedOut)
+            ReportStopped();
+        if (limit.stopped)
+            result = s7_f(sc);
+        memset(&limit, 0, sizeof limit);
+    }
     game.event = oldEvent;
     game.eventKind = oldKind;
     game.eventThing = oldThing;
@@ -1858,6 +1941,8 @@ static s7_pointer SchemeReport(s7_scheme *sc, s7_pointer args)
     s7_pointer type = s7_cadr(args), info = s7_caddr(args), text = s7_cadddr(args);
     s7_pointer rest = s7_cddddr(args), file = s7_car(rest), line = s7_cadr(rest);
     char message[TEXT], where[600] = "", full[2 * TEXT];
+    if (s7_is_symbol(type) && !strcmp(s7_symbol_name(type), "handler-time-limit"))
+        return s7_make_string(sc, "the handler was stopped"); // Run reports it
     if (!Rule2(sc, type, info, message, sizeof message))
         snprintf(message, sizeof message, "%s", s7_is_string(text) ? s7_string(text) : "error");
     // Code the walk rewrote has no line of its own, and s7 then names the prelude's catch; the
@@ -2249,6 +2334,7 @@ static uint32_t Draw(uint32_t n)
 
 static s7_pointer SchemeRandom(s7_scheme *sc, s7_pointer args)
 {
+    GameS7LimitCheck(sc);
     s7_pointer n = s7_car(args);
     if (s7_is_integer(n))
     {
@@ -2417,6 +2503,7 @@ typedef struct D3
 
 static D3 VecArg(s7_scheme *sc, s7_pointer p, const char *caller, int position)
 {
+    GameS7LimitCheck(sc);
     if (s7_is_float_vector(p) && s7_vector_length(p) == 3)
     {
         s7_double *e = s7_float_vector_elements(p);
@@ -2837,6 +2924,8 @@ bool GameS7Open(Store *store, const char *preludePath)
         GameS7Close();
         return false;
     }
+    memset(&limit, 0, sizeof limit);
+    s7_set_begin_hook(sc, BeginHook);
     game.dispatch = Protected(sc, "%dispatch");
     game.loadFile = Protected(sc, "%load-file");
     game.repl = Protected(sc, "%repl");

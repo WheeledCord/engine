@@ -4,13 +4,16 @@
 
 // The store's Scheme frontend (gameplay/script/game_s7.c): define-kind's code walk and the calls,
 // from tests/regression/kinds_walk.scm; the five rule errors, one file each under
-// tests/regression/rules/; and what must be refused. docs/developer/store.md §5 and §8.
+// tests/regression/rules/; the handler time limit; and what must be refused. docs/developer/store.md
+// §5 and §8.
+#define _POSIX_C_SOURCE 200809L /* clock_gettime */
 #include "checks.h"
 #include "core/store.h"
 #include "gameplay/script/game_s7.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static int failures;
 static char lastError[2048];
@@ -25,9 +28,13 @@ static void Expect(bool ok, const char *what)
     }
 }
 
+static char errorLog[8192]; /* every report since the last clear, one per line */
+
 static void Sink(const char *message)
 {
     snprintf(lastError, sizeof lastError, "%s", message);
+    size_t used = strlen(errorLog);
+    snprintf(errorLog + used, sizeof errorLog - used, "%s\n", message);
     errorCount++;
 }
 
@@ -298,12 +305,49 @@ static void RuleChecks(void)
     }
 }
 
+// Tick handlers that never end are stopped after 50 ms with a sentence naming each and its (on ...)
+// line, whether the loop calls an engine function or a helper; the game keeps ticking, and the next
+// tick runs (and stops) the handlers again.
+static void LimitChecks(void)
+{
+    Store store;
+    errorCount = 0;
+    lastError[0] = errorLog[0] = 0;
+    GameS7SetHandlerLimit(0.05);
+    bool loaded = StoreInit(&store, 7) && GameS7Open(&store, "core/scheme/kinds.scm") &&
+                  GameS7LoadGame("tests/regression/rules/runaway.scm");
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    for (int i = 0; loaded && i < 3; i++)
+        StoreTick(&store, 1.0f / 60.0f);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    double took = (double)(b.tv_sec - a.tv_sec) + (double)(b.tv_nsec - a.tv_nsec) * 1e-9;
+    int rusherTicks = loaded ? Int(&store, First(&store, "rusher", 0), "ticks") : -1;
+    int shooterTicks = loaded ? Int(&store, First(&store, "shooter", 0), "ticks") : -1;
+    printf("game limit: 3 ticks of 2 runaway handlers took %.0f ms, ran them %d and %d times, %d report(s):\n%s",
+           took * 1000.0, rusherTicks, shooterTicks, errorCount, errorLog);
+    Expect(loaded && !strncmp(errorLog, "the tick handler of", strlen("the tick handler of")) &&
+               strstr(errorLog, "the tick handler of rusher #0 ran for over 50 ms and was stopped; the loop "
+                                "at runaway.scm:11 may never end\n"),
+           "a tick handler whose loop calls an engine function is stopped and named, with its (on ...) line");
+    Expect(loaded && strstr(errorLog, "the tick handler of shooter #1 ran for over 50 ms and was stopped; the "
+                                      "loop at runaway.scm:19 may never end\n"),
+           "a tick handler whose loop calls a helper is stopped and named");
+    Expect(errorCount == 2, "each is reported once a second, not every tick");
+    Expect(rusherTicks == 3 && shooterTicks == 3 && took < 1.0,
+           "the game keeps ticking, each tick stopping the handlers again");
+    GameS7Close();
+    StoreFree(&store);
+    GameS7SetHandlerLimit(0);
+}
+
 int GameChecks(void)
 {
     failures = 0;
     GameS7SetErrorSink(Sink);
     WalkChecks();
     RuleChecks();
+    LimitChecks();
     GameS7SetErrorSink(NULL);
     Store store;
     Expect(StoreInit(&store, 1) && !GameS7Open(&store, "core/scheme/no-such-prelude.scm"),
