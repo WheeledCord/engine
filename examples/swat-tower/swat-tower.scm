@@ -45,8 +45,7 @@
   (child sun (light :type 'ambient :energy 0.35))
 
   (on (start)
-    (send self 'next-floor)
-    (send self 'player-joined (local-player)))       ; the runner sends no player-joined yet
+    (send self 'next-floor))
 
   (on (player-joined player)                         ; at start this also fires for the local player
     (set! (roster player) (spawn 'soldier :owner player :at (spot-near spawn-point player))))

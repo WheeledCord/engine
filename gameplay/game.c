@@ -1428,6 +1428,16 @@ static bool Init(void *context)
         free(answer);
         if (!ok)
             return false;
+        /* The engine, not the game, announces players (proposal B3.7): in phase 1 the local player
+           joins a fresh world at once. A loaded world already holds their things. Outside a tick
+           this queues as a command, delivered in the first tick after the game's start. */
+        StoreId root[1];
+        if (StoreThings(&run.store, game, root, 1) == 1)
+        {
+            StoreValue player = {.type = STORE_INT};
+            player.as.i = 1;
+            StoreSend(&run.store, root[0], StoreIntern(&run.store, "player-joined"), &player, 1);
+        }
     }
     static const int owners[] = {0, 1};
     StoreSetLocalOwners(&run.store, owners, 2);
