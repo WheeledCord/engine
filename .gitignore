@@ -12,3 +12,4 @@ screenshot*.png
 
 # Agent worktrees
 .claude/worktrees/
+bench_*.txt
