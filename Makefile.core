@@ -93,6 +93,7 @@ $(eval $(call core_project,describe_types,tools/describe_types))
 # Go/no-go condition 6: the draw path timed headless through EGL, so it links EGL as well.
 $(eval $(call core_project,draw_bench,tools/draw_bench))
 $(BUILD)/draw_bench: LDLIBS += -lEGL
+$(eval $(call core_project,store_bench,tools/store_bench))
 
 # ---- the SDK a project outside this repository builds against --------------------------------
 # Everything a project needs and nothing of this repository's own layout: headers, static libraries,

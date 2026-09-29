@@ -3851,6 +3851,7 @@ int main(int argc, char **argv)
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();
+    failures += StoreChecks();
     printf("REGRESSION TEST failures=%d checks=%d\n", failures, checks);
     return failures ? 1 : 0;
 }
