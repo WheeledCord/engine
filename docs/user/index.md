@@ -16,6 +16,7 @@ These guides explain how to use Trench Engine in a game. Start with a task-focus
 - [2D space, camera, and queries](2d-space.md) — optional camera conventions and collision queries without physics.
 - [Project game state](project-game-state.md) — spawning, score, reset, UI capture, and persistence boundaries.
 - [Scripting](scripting.md) — Scheme and game-defined binding calls.
+- [Running a Scheme game](kinds.md) — `engine.project`, `trench run`, recording, replay and the bot.
 - [Diagnostics, audio, and sprite presentation](diagnostics-audio-sprites.md) — optional runtime helpers.
 
 Rendering, UI, animation, sprites, and isometric movement currently have their detailed source documentation in `core/README.md` and `gameplay/README.md`. Move each topic here as it gains a task-focused guide; do not duplicate a claim without naming its canonical page.
