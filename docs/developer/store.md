@@ -755,7 +755,10 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
   transforms) are blended between the two received states either side of `renderTick`; every other
   field, the header (parent, owner) and spawns and removes come from the earlier of the two. A parent
   change between the two states is a jump (the later value). So a remote thing never shows two
-  ticks at once. (Replaces a first cut that applied non-registered fields on arrival:
+  ticks at once. A thing whose new owner is this machine stops being remote on arrival: that state's
+  header and fields apply at once and the thing is never interpolated again while it is ours
+  (research N26 and N27 in the design repository: Quake 3 runs commands and events at the
+  render-time snapshot; this is its rule, plus the arrival of one's own things). (Replaces a first cut that applied non-registered fields on arrival:
   `resolutions.md` §20 in the design repository.)
 - **Releasing ownership.** A machine that stops owning a thing by its own write (a detach, or an
   attach under another owner's thing) at its tick D ignores the header of that thing in states
