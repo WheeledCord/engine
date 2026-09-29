@@ -13,4 +13,7 @@ int HeadlessChecks(void);
 /* The draw path: keys, sort, cull, static batching, and a submit under the hidden window. */
 int DrawPathChecks(void);
 
+/* The store: kinds, fields, the tree, the tick order, rules, snapshot, hash, save and load. */
+int StoreChecks(void);
+
 #endif

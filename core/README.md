@@ -7,7 +7,13 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   type — and a caller-owned pool of objects named by generational handles, with signal connections.
   Camera, audio, collision world, network clocks, texture and timer each declare their type in
   their own file.
-- `timer`: a countdown object that emits `timeout`, then starts again unless it is one-shot.
+- `store`: the world store the Scheme-first game runner is built on — kinds with typed fields
+  (scalars and bounded lists, sets, maps and grids) in per-kind pools, things named by generational
+  handles in a tree whose root decides the owner, the ordered tick (commands, timers, `tick`
+  handlers, messages, systems, removals), the presentation frame with `-changed` found by
+  comparison, the rules that keep gameplay replayable, per-thing random streams, snapshots, a
+  world hash and text saves (`store_save.c`). Headless: no window and no GL. The contract is
+  [docs/developer/store.md](../docs/developer/store.md) §2.
 - `node`: a `node3d` object with a local position, rotation and scale and an optional parent, whose
   world transform is its parent's world transform times its own, as in Godot's Node3D.
 - `network`, `net_clock`, `net_sync`, `net_session`: multiplayer. `network` is the ENet transport;
