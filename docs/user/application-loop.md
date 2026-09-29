@@ -21,6 +21,8 @@ EngineApplication EngineApplicationMain(int argc, char **argv)
 }
 ```
 
+`EngineConfigDefault` sets `config.windowFlags = FLAG_VSYNC_HINT`, so a window waits for the display's refresh unless a project replaces the flags without it.
+
 Use `Update` for simulation and `Draw` for rendering. With a positive `fixed_dt`, one rendered frame can run zero or more updates; `Draw` receives interpolation alpha and must not advance game time. Read the [EngineApplication XML reference](../api/core/EngineApplication.xml) for callback lifetime and routing details.
 
 ## Running without a window

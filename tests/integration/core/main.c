@@ -876,7 +876,7 @@ int main(int argc, char **argv)
                            .targetFps = 60,
                            .fixed_dt = fixed,
                            .max_frame_dt = 0.25,
-                           .windowFlags = FLAG_WINDOW_RESIZABLE,
+                           .windowFlags = FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT,
                            /* A skinned character drawn into a target whose depth it samples back. */
                            .requirements = {.gpuSkinning = true, .sampleableDepth = true}};
     EngineProject hooks = {Init, FrameInput, Update, Draw, Shutdown};

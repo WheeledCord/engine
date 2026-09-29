@@ -80,7 +80,7 @@ static void RunHeadless(const EngineConfig *c, const EngineProject *p, void *con
 EngineConfig EngineConfigDefault(void)
 {
     return (EngineConfig){.title = "Core", .width = 960, .height = 540, .targetFps = 60,
-                          .fixed_dt = 1.0 / 60.0, .max_frame_dt = 0.25};
+                          .fixed_dt = 1.0 / 60.0, .max_frame_dt = 0.25, .windowFlags = FLAG_VSYNC_HINT};
 }
 
 EngineApplication EngineApplicationDefault(void)

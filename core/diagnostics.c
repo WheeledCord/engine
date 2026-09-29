@@ -53,6 +53,11 @@ void CoreDebugUpdate(CoreDebug *d, double dt)
     }
     d->count = out;
 }
+static void DebugDrawText(const CoreDebug *d, const char *text, float x, float y, Color color)
+{
+    if (d->font) DrawTextEx(*d->font, text, (Vector2){x, y}, (float)d->font->baseSize, 1, color);
+    else DrawText(text, (int)x, (int)y, 10, color);
+}
 void CoreDebugDraw(CoreDebug *d)
 {
     if (!d) return;
@@ -63,7 +68,7 @@ void CoreDebugDraw(CoreDebug *d)
         {
             char line[128];
             snprintf(line, sizeof line, "fps %d | updates %u | backlog %.2f ms", GetFPS(), s->updates, s->fixedBacklog * 1000);
-            DrawText(line, d->x, d->y, 10, LIME);
+            DebugDrawText(d, line, (float)d->x, (float)d->y, LIME);
         }
     }
     for (size_t i = 0; i < d->count; i++)
@@ -72,7 +77,7 @@ void CoreDebugDraw(CoreDebug *d)
         if (p->kind == CORE_DEBUG_LINE) DrawLineV(p->a, p->b, p->color);
         else if (p->kind == CORE_DEBUG_CIRCLE) DrawCircleLines((int)p->a.x, (int)p->a.y, p->radius, p->color);
         else if (p->kind == CORE_DEBUG_RECT) DrawRectangleLines((int)p->a.x, (int)p->a.y, (int)p->b.x, (int)p->b.y, p->color);
-        else DrawText(p->text, (int)p->a.x, (int)p->a.y, 10, p->color);
+        else DebugDrawText(d, p->text, p->a.x, p->a.y, p->color);
     }
     size_t persistent = 0;
     for (size_t i = 0; i < d->count; i++)
