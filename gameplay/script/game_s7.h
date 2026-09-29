@@ -184,4 +184,28 @@ const char *GameS7ActionKey(int action);
  * @return No value. */
 void GameS7SetErrorSink(void (*sink)(const char *message));
 
+/** @brief Limits how long one handler may run (proposal B2.6). A handler that runs longer is
+ * stopped and reported through the error sink, at most once per kind and event per second: "the
+ * tick handler of rusher #34 ran for over 50 ms and was stopped; the loop at swat-tower.scm:212 may
+ * never end". The runner sets 0.05; its `--no-time-limit` sets 0. The clock is read when s7 enters
+ * a body (a closure's or a begin's) and when a script calls an engine function that checks
+ * (GameS7LimitCheck): a loop that does neither, e.g. `(do ((i 0 (+ i 1))) ((< i 0)) (+ i 1))`, is not
+ * caught.
+ * @param seconds Limit; 0 or less means none, the default.
+ * @return No value. */
+void GameS7SetHandlerLimit(double seconds);
+
+/** @brief The limit's check, for a C function registered for scripts: past the limit (or after an
+ * interrupt) while a handler runs, it raises an error that stops the handler. Outside a handler it
+ * does nothing. The field, thing, number and vec3 argument helpers call it already.
+ * @param sc Interpreter.
+ * @return No value; when over the limit it does not return. */
+void GameS7LimitCheck(s7_scheme *sc);
+
+/** @brief Stops the running handler, and every later one, until cleared (the runner's Ctrl+C).
+ * It only writes a volatile sig_atomic_t, so a signal handler may call it.
+ * @param on True to stop handlers; false to let them run again.
+ * @return No value. */
+void GameS7SetInterrupted(bool on);
+
 #endif

@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int failures;
@@ -150,6 +151,130 @@ static void PresentChecks(void)
     Expect(Run(shots) == 2, "--shot-every without a window is refused");
 }
 
+// Runs the runner with its stdout and stderr in log; answers its result.
+static int RunLogged(char **argv, const char *log)
+{
+    fflush(stdout);
+    fflush(stderr);
+    int out = dup(1), err = dup(2);
+    FILE *capture = fopen(log, "w");
+    if (!capture || out < 0 || err < 0)
+    {
+        if (capture)
+            fclose(capture);
+        return -1;
+    }
+    dup2(fileno(capture), 1);
+    dup2(fileno(capture), 2);
+    int result = Run(argv);
+    fflush(stdout);
+    fflush(stderr);
+    dup2(out, 1);
+    dup2(err, 2);
+    close(out);
+    close(err);
+    fclose(capture);
+    return result;
+}
+
+/* A floor of swat-tower can end (playtest 2 froze there: populate's do loop drew a new random count
+   in its end test, and on floor 2 it could run forever). The save of a short bot run is edited so
+   that the enemies are gone and the soldier stands on the stairs; loaded, the stairs send the game
+   to floor 2 within a few ticks. A save is text: a `thing N gen G kind K parent P ...` line, then
+   its fields indented. */
+static void FloorChecks(void)
+{
+    const char *saved = "build/core/floor_start.sav", *edited = "build/core/floor_edited.sav",
+               *after = "build/core/floor_after.sav", *log = "build/core/floor_run.log";
+    bool hadProfile = FileHasLine("examples/swat-tower/profile.txt", "", true);
+    char *start[] = {"trench", "run", "examples/swat-tower", "--headless", "--bot", "--seed", "7",
+                     "--ticks", "120", "--save", (char *)saved, NULL};
+    Expect(RunLogged(start, log) == 0, "a bot run of swat-tower saves its world");
+    enum { LINES = 4096 };
+    static char lines[LINES][256];
+    static int owner[LINES]; /* the thing index each line belongs to, or -1 before the first */
+    int count = 0, current = -1, soldier = -1, enemies[256], enemyCount = 0;
+    char stairsAt[256] = "";
+    FILE *file = fopen(saved, "r");
+    while (file && count < LINES && fgets(lines[count], sizeof lines[count], file))
+    {
+        char kind[64], parent[32];
+        int index;
+        if (sscanf(lines[count], "thing %d gen %*d kind %63s parent %31s", &index, kind, parent) == 3)
+        {
+            current = index;
+            if (!strcmp(kind, "soldier"))
+                soldier = index;
+            bool enemy = !strcmp(kind, "rusher") || !strcmp(kind, "shooter");
+            for (int e = 0; e < enemyCount && !enemy; e++)
+                enemy = atoi(parent) == enemies[e] && parent[0] != '-'; /* an enemy's child */
+            if (enemy && enemyCount < 256)
+                enemies[enemyCount++] = index;
+            if (!strcmp(kind, "stairs"))
+                current = -2 - index; /* marks the stairs' own lines below */
+        }
+        else if (current <= -2 && !strncmp(lines[count], "  position ", 11))
+            snprintf(stairsAt, sizeof stairsAt, "%s", lines[count]);
+        owner[count] = current <= -2 ? -2 - current : current;
+        count++;
+    }
+    if (file)
+        fclose(file);
+    Expect(soldier >= 0 && stairsAt[0] && enemyCount > 0, "the save holds a soldier, the stairs and enemies");
+    FILE *out = fopen(edited, "w");
+    for (int i = 0; out && i < count; i++)
+    {
+        bool drop = false;
+        for (int e = 0; e < enemyCount && !drop; e++)
+            drop = owner[i] == enemies[e];
+        if (drop)
+            continue;
+        fputs(owner[i] == soldier && !strncmp(lines[i], "  position ", 11) ? stairsAt : lines[i], out);
+    }
+    if (out)
+        fclose(out);
+    char *load[] = {"trench", "run", "examples/swat-tower", "--load", (char *)edited, "--headless",
+                    "--ticks", "120", "--save", (char *)after, NULL};
+    Expect(RunLogged(load, log) == 0, "the edited save loads and runs 120 ticks");
+    int floor = -1;
+    bool inGame = false;
+    file = fopen(after, "r");
+    char line[256];
+    while (file && fgets(line, sizeof line, file))
+    {
+        char kind[64];
+        if (!strncmp(line, "thing ", 6))
+            inGame = sscanf(line, "thing %*d gen %*d kind %63s", kind) == 1 && !strcmp(kind, "game");
+        else if (inGame)
+            sscanf(line, "  floor %d", &floor);
+    }
+    if (file)
+        fclose(file);
+    printf("runner floor: %d enemy things removed, soldier #%d put on the stairs at%s  floor after 120 ticks: %d\n",
+           enemyCount, soldier, stairsAt + 10, floor);
+    Expect(floor == 2, "with the enemies gone and the soldier on the stairs, the game reaches floor 2");
+    Expect(!FileHasLine(log, "ERROR", false) && !FileHasLine(log, "ran for over", true),
+           "reaching floor 2 prints no ERROR and stops no handler");
+    if (!hadProfile)
+        remove("examples/swat-tower/profile.txt");
+    remove(saved);
+    remove(edited);
+    remove(after);
+}
+
+// With no display the windowed runner exits with a message, not a crash (playtest 2, over ssh).
+static void NoDisplayChecks(void)
+{
+    int status = system("env -u DISPLAY -u WAYLAND_DISPLAY ./build/core/trench run examples/swat-tower "
+                        "--ticks 1 > build/core/trench_nodisplay.log 2>&1");
+    printf("runner no display: exit %d%s\n", WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+           WIFSIGNALED(status) ? ", killed by a signal" : "");
+    Expect(status != -1 && !WIFSIGNALED(status) && WIFEXITED(status) && WEXITSTATUS(status) != 0,
+           "with no display the runner exits nonzero, not by a signal");
+    Expect(FileHasLine("build/core/trench_nodisplay.log", "Engine: no display; run with --headless", true),
+           "with no display the runner says so");
+}
+
 static float Luminance(Color c) { return 0.299f * c.r + 0.587f * c.g + 0.114f * c.b; }
 
 // The built runner in a window of its own: it captures the pointer, reaches tick 240 without an
@@ -252,6 +377,8 @@ int GameRunnerChecks(void)
     remove(recording);
     remove(wrong);
     PresentChecks();
+    FloorChecks();
+    NoDisplayChecks();
     WindowedChecks();
     return failures;
 }
