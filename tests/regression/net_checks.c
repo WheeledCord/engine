@@ -489,6 +489,43 @@ static void DedicatedChecks(void)
     TearDown();
 }
 
+/* Giving a thing to a client that held it before (§9.2): the host hangs a thing under the client's
+   soldier, the client drops it, and again, three times, over 150 ms each way with 5% of states lost.
+   Once dropped and acknowledged the client stops sending the thing; the host's copy of the client's
+   states must not keep the client's last word on it, or the next grant reads that as the client
+   handing it straight back. */
+static void RegrantChecks(void)
+{
+    Boot(2, 0x6E6A1u);
+    Store *host = &machines[0].store, *client = &machines[1].store;
+    StoreNetConfig config = Config(&machines[0]);
+    Expect(StoreNetHost(&machines[0].net, host, &config), "a host for the re-grant check starts");
+    StoreSpawn(host, gameKind, 0, STORE_NULL, STORE_NO_SYMBOL);
+    SpawnUnits(host, 5);
+    config = Config(&machines[1]);
+    Expect(StoreNetJoin(&machines[1].net, client, &config), "a client for the re-grant check joins");
+    Step(60);
+    int granted = 0, dropped = 0;
+    for (int round = 1; round <= 3; round++)
+    {
+        StoreAttach(host, Unit(host, 3), Unit(host, 1002));
+        Step(60);
+        bool held = Placed(3, 1002, 2, 2);
+        granted += held;
+        StoreDetach(client, Unit(client, 3));
+        Step(60);
+        bool back = Placed(3, 0, 0, 2);
+        dropped += back;
+        printf("net: re-grant round %d: client owns it under its soldier %s; after its drop the host "
+               "owns it unparented %s\n",
+               round, held ? "yes" : "no", back ? "yes" : "no");
+    }
+    Expect(granted == 3, "every grant of a thing the client held before ends with the client owning "
+                         "it under its soldier");
+    Expect(dropped == 3, "every drop of a re-granted thing ends with the host owning it unparented");
+    TearDown();
+}
+
 // ---- the session ------------------------------------------------------------------------------
 int NetChecks(void)
 {
@@ -775,5 +812,6 @@ int NetChecks(void)
     TearDown();
     LossyJoinChecks();
     DedicatedChecks();
+    RegrantChecks();
     return failures;
 }

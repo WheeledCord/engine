@@ -19,7 +19,7 @@
    number is its player id. Channels: 0 reliable (hello, welcome, refusal, messages with their state,
    states over 1,200 bytes), 1 unreliable and sequenced (state), 2 unreliable (effects). */
 
-#define STORE_NET_PROTOCOL 2u  /* the store's wire protocol; a client speaking another is refused */
+#define STORE_NET_PROTOCOL 3u  /* the store's wire protocol; a client speaking another is refused */
 #define STORE_NET_PLAYERS 16   /* players 1 (the host) to 16 */
 
 typedef struct StoreNetConfig
