@@ -137,8 +137,12 @@ A second, separate Scheme frontend runs games written against the store (`core/s
 table alone. `GameS7Open` loads the prelude `core/scheme/kinds.scm` (`define-kind`, its code walk,
 `define-actions`, `clamp`, `map-for-each`); `GameS7LoadGame` loads a game file into a fresh
 environment under the rootlet and then freezes it, so a top-level `set!` fails with rule 2's
-message; `GameS7Reload` loads it again into another environment and swaps the handlers in, refusing
-when a kind's fields changed; `GameS7Eval` is the REPL.
+message; `GameS7Reload` loads it again into another environment and swaps the handlers in,
+migrating a kind whose fields changed with `StoreRedeclareKind` (its things and those of derived
+kinds keep the fields whose name and type are unchanged); a file that fails declares those kinds
+back and restores the world, and in a networked session (`GameS7Network.session`) a reload that
+changes a kind's fields or adds a kind is refused. `GameS7Eval` is the REPL; in a networked session
+it refuses writes to things this machine does not own with rule 5's message.
 
 - A thing is a c-object whose value word is its store handle, one object per live handle, so `eq?`
   works. `(t 'field)` reads a declared child, then a field; `(set! (t 'field) v)` writes through

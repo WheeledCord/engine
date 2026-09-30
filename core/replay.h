@@ -21,9 +21,12 @@
    2 the packet count (u16), that many commands: target index and generation (u32 each), event name
    (32 bytes), argument count (u32) and four argument slots, each a u32 type and 64 bytes of value;
    then that many packets: transport peer (u32), channel (u8), byte count (u32) and the bytes.
-   Version 1 files (no role, no packets) still read, as single-player sessions. */
+   From version 3 each command starts with its kind (u32, a ReplayCommandKind); a REPL command is
+   then its text's byte count (u32) and the bytes, in place of the target, event and arguments.
+   Version 1 files (no role, no packets) and version 2 files (no REPL commands) still read. */
 
-#define REPLAY_MAX_ARGS 4 /* arguments a recorded command keeps; later ones are dropped */
+#define REPLAY_MAX_ARGS 4     /* arguments a recorded command keeps; later ones are dropped */
+#define REPLAY_MAX_TEXT 65536 /* bytes of a recorded REPL line, at most */
 
 /* A packet's channel above the transport's three names a transport event instead, with no bytes. */
 #define REPLAY_PEER_CONNECTED 255 /* the host: peer (a player id) connected */
@@ -47,12 +50,21 @@ typedef struct ReplayTick
     uint16_t packetCount;   /* packets follow the commands */
 } ReplayTick;
 
+typedef enum ReplayCommandKind
+{
+    REPLAY_COMMAND_PLAYER, /* a player command (StoreCommand): target, event, arguments */
+    REPLAY_COMMAND_REPL    /* a developer command: a REPL line, evaluated again on replay (§5.7) */
+} ReplayCommandKind;
+
+/* One command of a tick, in the order they reached the store. */
 typedef struct ReplayCommand
 {
     StoreId target;
     char event[32];
     StoreValue args[REPLAY_MAX_ARGS];
     int count;
+    ReplayCommandKind kind; /* REPLAY_COMMAND_PLAYER unless set */
+    char *text;             /* a REPL command's line: written, borrowed; read, malloced (free it) */
 } ReplayCommand;
 
 /* One packet (or transport event) that arrived for a tick. */
@@ -102,7 +114,7 @@ bool ReplaySetRole(Replay *replay, ReplayRole role, int player);
 bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand *commands,
                      const ReplayPacket *packets);
 
-/** @brief Opens a recording and reads its header (version 1 or 2); the role and player land in
+/** @brief Opens a recording and reads its header (version 1, 2 or 3); the role and player land in
  * replay. The caller compares the kinds hash with StoreKindsHash of the loaded game and refuses a
  * mismatch.
  * @param replay Replay to open.
@@ -115,7 +127,8 @@ bool ReplayOpenRead(Replay *replay, const char *path, uint64_t *seed, uint64_t *
 
 /** @brief Reads the next tick and its commands; its packets follow through ReplayReadPacket.
  *
- * Packets of the previous tick that were not read are skipped first.
+ * Packets of the previous tick that were not read are skipped first. A REPL command's text is
+ * malloced; the caller frees each one it received (commands past max are skipped unallocated).
  * @param replay Replay open for reading.
  * @param tick Receives the tick; commandCount and packetCount are what was recorded.
  * @param commands Receives up to max commands; later ones are skipped. May be NULL when max is 0.

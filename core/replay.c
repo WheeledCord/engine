@@ -7,7 +7,7 @@
 #include <string.h>
 
 #define REPLAY_MAGIC "TRENCHREPLAY"
-#define REPLAY_VERSION 2u /* 1: no role, no packets */
+#define REPLAY_VERSION 3u /* 1: no role, no packets; 2: no command kinds (no REPL lines) */
 #define REPLAY_REVISION 64
 #define REPLAY_SLOT 64
 #define REPLAY_HEADER (16 + 8 + 8 + REPLAY_REVISION)
@@ -166,6 +166,20 @@ bool ReplayWriteTick(Replay *replay, const ReplayTick *tick, const ReplayCommand
     for (int i = 0; i < tick->commandCount; i++)
     {
         const ReplayCommand *c = &commands[i];
+        unsigned char kind[8];
+        Put32(kind, (uint32_t)c->kind);
+        if (c->kind == REPLAY_COMMAND_REPL)
+        {
+            size_t length = c->text ? strlen(c->text) : 0;
+            if (length > REPLAY_MAX_TEXT)
+                return false;
+            Put32(kind + 4, (uint32_t)length);
+            if (!Write(replay, kind, 8) || (length && !Write(replay, c->text, length)))
+                return false;
+            continue;
+        }
+        if (!Write(replay, kind, 4))
+            return false;
         unsigned char bytes[8 + 32 + 4 + REPLAY_MAX_ARGS * (4 + REPLAY_SLOT)] = {0};
         Put32(bytes, c->target.index);
         Put32(bytes + 4, c->target.generation);
@@ -204,7 +218,7 @@ bool ReplayOpenRead(Replay *replay, const char *path, uint64_t *seed, uint64_t *
     unsigned char header[REPLAY_HEADER + 8];
     uint32_t version = 0;
     if (!Read(replay, header, REPLAY_HEADER) || memcmp(header, REPLAY_MAGIC, 12) ||
-        ((version = Get32(header + 12)) != 1 && version != REPLAY_VERSION) ||
+        (version = Get32(header + 12)) < 1 || version > REPLAY_VERSION ||
         (version >= 2 && !Read(replay, header + REPLAY_HEADER, 8)))
     {
         ReplayClose(replay);
@@ -245,7 +259,37 @@ bool ReplayReadTick(Replay *replay, ReplayTick *tick, ReplayCommand *commands, i
     for (int i = 0; i < tick->commandCount; i++)
     {
         unsigned char bytes[8 + 32 + 4 + REPLAY_MAX_ARGS * (4 + REPLAY_SLOT)];
-        if (!Read(replay, bytes, sizeof bytes))
+        uint32_t kind = REPLAY_COMMAND_PLAYER;
+        if (replay->version >= 3)
+        {
+            if (!Read(replay, bytes, 4))
+                return false;
+            kind = Get32(bytes);
+        }
+        if (kind == REPLAY_COMMAND_REPL)
+        {
+            if (!Read(replay, bytes, 4))
+                return false;
+            uint32_t length = Get32(bytes);
+            char *text = length <= REPLAY_MAX_TEXT ? malloc((size_t)length + 1) : NULL;
+            if (!text || (length && !Read(replay, text, length)))
+            {
+                free(text);
+                return false;
+            }
+            text[length] = 0;
+            if (i >= max || !commands)
+            {
+                free(text);
+                continue;
+            }
+            memset(&commands[i], 0, sizeof commands[i]);
+            commands[i].target = STORE_NULL;
+            commands[i].kind = REPLAY_COMMAND_REPL;
+            commands[i].text = text;
+            continue;
+        }
+        if (kind != REPLAY_COMMAND_PLAYER || !Read(replay, bytes, sizeof bytes))
             return false;
         if (i >= max || !commands)
             continue;

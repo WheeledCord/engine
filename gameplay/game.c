@@ -299,6 +299,20 @@ typedef struct Runner
     int pendingCount, pendingCapacity;
     ReplayCommand captured[MAX_COMMANDS]; /* commands queued for the next tick from outside it */
     int capturedCount;
+    // The REPL in recordings (docs/developer/store.md §5.7).
+    struct
+    {
+        char *text;        /* the line, malloced */
+        int before, after; /* the pending player commands before and after it ran */
+    } repl[MAX_COMMANDS]; /* REPL lines since the last recorded tick */
+    int replCount;
+    const char *replFilePath; /* --repl-file FILE */
+    struct
+    {
+        uint64_t tick;
+        char *text;
+    } *replFile; /* its lines, in file order */
+    int replFileCount, replFileNext;
 } Runner;
 
 static Runner run;
@@ -790,6 +804,14 @@ static int NetPlayers(void *user, int *out, int max)
     return 1;
 }
 
+// A session is open: hosting, joined or joining, or replaying one (§5.7: no kind changes, no REPL
+// writes to others' things).
+static bool NetSession(void *user)
+{
+    (void)user;
+    return run.netOpen;
+}
+
 static bool NetHostCall(void *user, int port, char *why, size_t size)
 {
     (void)user;
@@ -806,6 +828,40 @@ static bool NetJoinCall(void *user, const char *address, int port, char *why, si
 
 /* ---- the tick -------------------------------------------------------------------------------- */
 
+static void ClearRepl(void)
+{
+    for (int i = 0; i < run.replCount; i++)
+        free(run.repl[i].text);
+    run.replCount = 0;
+}
+
+/* A REPL line (typed, or from --repl-file): evaluated in the game, its answer printed with format,
+   and, when recording, kept to be written with the next tick as a developer command (§5.7). */
+static void EvalRepl(const char *line, const char *format)
+{
+    int before = StoreCommandsPending(&run.store, NULL, NULL, NULL, NULL, 0);
+    char *answer = NULL;
+    GameS7Eval(line, &answer);
+    int after = StoreCommandsPending(&run.store, NULL, NULL, NULL, NULL, 0);
+    printf(format, answer ? answer : "");
+    fflush(stdout);
+    free(answer);
+    if (!run.recording)
+        return;
+    size_t length = strcspn(line, "\r\n");
+    char *text = run.replCount < MAX_COMMANDS ? malloc(length + 1) : NULL;
+    if (!text)
+    {
+        TraceLog(LOG_WARNING, "RUN: a REPL line could not be recorded; the replay will differ");
+        return;
+    }
+    memcpy(text, line, length);
+    text[length] = 0;
+    run.repl[run.replCount].text = text;
+    run.repl[run.replCount].before = before;
+    run.repl[run.replCount++].after = after > before ? after : before;
+}
+
 // The commands queued for the next tick from outside it (the REPL, a key press, setup), taken
 // before the network adds its own: those come back from the recorded packets on replay.
 static void CaptureCommands(void)
@@ -821,9 +877,23 @@ static void CaptureCommands(void)
         TraceLog(LOG_WARNING, "RUN: %d commands in one tick; recording the first %d", n, MAX_COMMANDS);
         n = MAX_COMMANDS;
     }
-    int k = 0;
-    for (int i = run.skipCommands; i < n; i++, k++)
+    // REPL lines go in where they ran; the commands a line queued are not recorded, since replaying
+    // the line queues them again.
+    int k = 0, r = 0;
+    for (int i = run.skipCommands; i <= n && k < MAX_COMMANDS; i++)
     {
+        while (r < run.replCount && run.repl[r].before <= i && k < MAX_COMMANDS)
+        {
+            memset(&out[k], 0, sizeof out[k]);
+            out[k].target = STORE_NULL;
+            out[k].kind = REPLAY_COMMAND_REPL;
+            out[k++].text = run.repl[r++].text;
+        }
+        bool fromRepl = false;
+        for (int j = 0; j < run.replCount; j++)
+            fromRepl = fromRepl || (i >= run.repl[j].before && i < run.repl[j].after);
+        if (i == n || fromRepl || k == MAX_COMMANDS)
+            continue;
         memset(&out[k], 0, sizeof out[k]);
         out[k].target = targets[i];
         const char *name = StoreSymbolName(&run.store, events[i]);
@@ -835,6 +905,7 @@ static void CaptureCommands(void)
             TraceLog(LOG_WARNING, "RUN: a recorded command keeps its first %d arguments", REPLAY_MAX_ARGS);
         }
         memcpy(out[k].args, args[i], (size_t)out[k].count * sizeof args[i][0]);
+        k++;
     }
     run.capturedCount = k;
 }
@@ -851,6 +922,7 @@ static void RecordTick(const GameInput *input)
                  run.recordPath);
     run.skipCommands = 0;
     ClearPending();
+    ClearRepl();
 }
 
 // The next recorded tick: its input, its commands queued again, its packets handed to store_net.
@@ -864,7 +936,17 @@ static bool ReplayInput(GameInput *input)
     int n = tick.commandCount < MAX_COMMANDS ? tick.commandCount : MAX_COMMANDS;
     for (int i = 0; i < n; i++)
     {
-        const ReplayCommand *c = &commands[i];
+        ReplayCommand *c = &commands[i];
+        if (c->kind == REPLAY_COMMAND_REPL)
+        {
+            // Evaluated again where it ran, its answer discarded (§5.7).
+            char *answer = NULL;
+            GameS7Eval(c->text ? c->text : "", &answer);
+            free(answer);
+            free(c->text);
+            c->text = NULL;
+            continue;
+        }
         if (!StoreCommand(&run.store, c->target, StoreIntern(&run.store, c->event), c->args, c->count))
             TraceLog(LOG_WARNING, "RUN: replayed command %s refused: %s", c->event, StoreLastError(&run.store));
     }
@@ -911,6 +993,9 @@ static bool Update(void *context, double dt, const EngineInput *in)
     }
     if (run.netLive && run.headless)
         Pace();
+    // --repl-file: its lines due before this tick, as if typed at the REPL since the last one.
+    while (run.replFileNext < run.replFileCount && run.replFile[run.replFileNext].tick <= StoreTickCount(&run.store))
+        EvalRepl(run.replFile[run.replFileNext++].text, "repl: %s\n");
     if (run.recording)
         CaptureCommands();
     GameInput input = {0};
@@ -2009,11 +2094,7 @@ static void PollRepl(void)
             return;
         if (strspn(line, " \t\r\n") == strlen(line))
             continue;
-        char *answer = NULL;
-        GameS7Eval(line, &answer);
-        printf("%s\n> ", answer ? answer : "");
-        fflush(stdout);
-        free(answer);
+        EvalRepl(line, "%s\n> ");
     }
 }
 
@@ -3194,7 +3275,7 @@ static bool Init(void *context)
     if (!GameS7Open(&run.store, run.prelude))
         return Fail("could not start Scheme with %s", run.prelude);
     run.scriptOpen = true;
-    GameS7Network network = {NULL, NetPlayer, NetPlayers, NetHostCall, NetJoinCall};
+    GameS7Network network = {NULL, NetPlayer, NetPlayers, NetHostCall, NetJoinCall, NetSession};
     GameS7SetNetwork(&network);
     if (!RegisterCalls())
         return Fail("could not register the runner's calls%s", "");
@@ -3380,7 +3461,7 @@ static int Usage(const char *problem)
                     "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] "
                     "[--present] [--shot-every N] [--shot-dir DIR] [--no-time-limit] [--host PORT] "
                     "[--join ADDRESS:PORT] [--bot-until N] [--print-field KIND FIELD] [--print-count KIND] "
-                    "[--print-draw-position KIND] [--skin-on-cpu] [--no-static-batch]\n");
+                    "[--print-draw-position KIND] [--skin-on-cpu] [--no-static-batch] [--repl-file FILE]\n");
     return 2;
 }
 
@@ -3430,6 +3511,61 @@ static bool Count(const char *text, uint64_t *out)
     return true;
 }
 
+static void FreeReplFile(void)
+{
+    for (int i = 0; i < run.replFileCount; i++)
+        free(run.replFile[i].text);
+    free(run.replFile);
+    run.replFile = NULL;
+    run.replFileCount = run.replFileNext = 0;
+}
+
+/* --repl-file FILE: lines `TICK TEXT`, each evaluated at the REPL just before tick TICK (0 is the
+   first), in file order; blank lines and lines starting with ; are skipped. A debugging aid, and a
+   deterministic REPL for checks. */
+static bool ReadReplFile(const char *path)
+{
+    FILE *file = fopen(path, "r");
+    if (!file)
+        return fprintf(stderr, "trench: can't read --repl-file %s\n", path), false;
+    char line[4096];
+    int number = 0;
+    bool ok = true;
+    while (ok && fgets(line, sizeof line, file))
+    {
+        number++;
+        const char *p = line + strspn(line, " \t");
+        if (!*p || *p == '\n' || *p == '\r' || *p == ';')
+            continue;
+        char *end;
+        unsigned long long tick = strtoull(p, &end, 10);
+        if (end == p || (*end != ' ' && *end != '\t'))
+        {
+            fprintf(stderr, "trench: %s:%d: a line is TICK TEXT, such as 30 (inspect (game))\n", path, number);
+            ok = false;
+            break;
+        }
+        end += strspn(end, " \t");
+        size_t length = strcspn(end, "\r\n");
+        void *grown = realloc(run.replFile, (size_t)(run.replFileCount + 1) * sizeof *run.replFile);
+        char *text = malloc(length + 1);
+        if (grown)
+            run.replFile = grown;
+        if (!grown || !text)
+        {
+            free(text);
+            ok = false;
+            break;
+        }
+        memcpy(text, end, length);
+        text[length] = 0;
+        run.replFile[run.replFileCount].tick = tick;
+        run.replFile[run.replFileCount++].text = text;
+    }
+    fclose(file);
+    return ok;
+}
+
 int GameRun(int argc, char **argv)
 {
     memset(&run, 0, sizeof run);
@@ -3468,12 +3604,14 @@ int GameRun(int argc, char **argv)
                  strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir") &&
                  strcmp(flag, "--host") && strcmp(flag, "--join") && strcmp(flag, "--bot-until") &&
                  strcmp(flag, "--print-field") && strcmp(flag, "--print-count") &&
-                 strcmp(flag, "--print-draw-position"))
+                 strcmp(flag, "--print-draw-position") && strcmp(flag, "--repl-file"))
             return Usage("unknown flag");
         else if (!value)
             return Usage("a flag is missing its value");
         else if (!strcmp(flag, "--print-draw-position"))
             run.printDrawKind = value;
+        else if (!strcmp(flag, "--repl-file"))
+            run.replFilePath = value;
         else if (!strcmp(flag, "--host"))
         {
             uint64_t port;
@@ -3552,11 +3690,18 @@ int GameRun(int argc, char **argv)
         run.shotDir = ".";
     if (run.hostPort && run.joinPort)
         return Usage("--host and --join: a machine hosts or joins, not both");
+    if (run.replFilePath && run.replayPath)
+        printf("run: --repl-file is ignored while replaying; the recording holds the REPL lines it ran\n");
+    else if (run.replFilePath && !ReadReplFile(run.replFilePath))
+    {
+        FreeReplFile();
+        return 1;
+    }
     // A live session stops itself: a client's ticks start at its welcome, which the engine's own
     // count would not know.
     run.selfStop = !run.headless || ((run.hostPort || run.joinPort) && !run.replayPath);
     if (!ReadProject())
-        return 1;
+        return FreeReplFile(), 1;
     EngineApplication app = EngineApplicationDefault();
     app.config.title = run.title;
     // Opened at a size every display holds, then fitted to the monitor in Init.
@@ -3580,6 +3725,8 @@ int GameRun(int argc, char **argv)
     sigaction(SIGINT, &interrupt, &previous);
     int result = EngineRunApplication(&app);
     sigaction(SIGINT, &previous, NULL);
+    FreeReplFile();
+    ClearRepl();
     GameS7SetHandlerLimit(0);
     return result || run.failed ? 1 : 0;
 }
