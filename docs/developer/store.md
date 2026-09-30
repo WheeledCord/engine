@@ -402,9 +402,22 @@ int  World3DTilemapChunks(World3D *, StoreId tilemap, World3DChunk *out, int max
   frame, 3 vec3 compares per node, which E7 shows costs under the budget). Interpolation is between
   `%prev-*` and the current values by `alpha`, except when the thing's parent changed this tick or
   `World3DTeleport` was called (then `%prev` equals the current value).
-- **Socket**: its world matrix is its parent model's bone matrix when §6 supplies one (a callback
-  `World3DSetBoneLookup`), otherwise its own local transform. Phase 1 supplies none; the field
-  exists so the carried-item example loads.
+- **Socket**: in drawing, its world matrix is the named bone of the model it follows (its `of`
+  list: the first listed sibling model drawn on this machine; with no `of`, its parent if that is a
+  model) times that model's world matrix, supplied by the runner through
+  `World3DSetBoneLookup(world, fn, user)`; with no bone or no animation, its own local transform.
+  **Gameplay never sees the bone**: `World3DWorldPosition` and `World3DWorldMatrix` for gameplay
+  (and every thing under the socket) use the socket's local transform, the rest pose. Animation
+  runs only where things are drawn, and headless runs draw nothing, so a gameplay read of a bone
+  would differ between a replay and play (rule 1, proposal A4: what is drawn never feeds gameplay).
+  Only the drawn matrices (`World3DDrawMatrix`) follow bones.
+- **Animation** (B6 `model`: `animation` SYMBOL, shared; `animation-speed` FLOAT, default 1):
+  presentation only. Each drawn model with clips keeps a local playback clock that restarts when
+  `animation` changes (seen by comparing, like everything else); a missing clip name holds the rest
+  pose with one warning per name. Skinning follows B9.3: on the GPU through the engine's
+  `core/shaders/skinning.vs` when the model has at most 24 bones (GLSL 120's 512 vertex uniform
+  components), else on the CPU with raylib's `UpdateModelAnimation`. The draw path takes the bone
+  matrices per item (`DrawItem.bones`, `boneCount`) and uploads them only for skinned materials.
 
 ## 4. The draw path (`core/draw_path.h`)
 
