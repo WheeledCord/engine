@@ -30,4 +30,8 @@ int GameChecks(void);
 int GameRunnerChecks(void);
 int NetChecks(void); /* networking on the store: host and two clients, in-memory and lossy (§9.7) */
 
+/* What the runner draws and plays beyond models (§3.1): static batching, point lights, the viewmodel
+   pass and sound emitters, from ./build/core/trench runs in a window and their screenshots. */
+int PresentationChecks(void);
+
 #endif

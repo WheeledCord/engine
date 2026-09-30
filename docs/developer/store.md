@@ -337,7 +337,7 @@ registers one system (areas). It holds no GL objects: geometry is CPU arrays; §
 | `node` | - | `position` VEC3, `rotation` VEC3 (Euler radians X Y Z), `scale` VEC3 (1 1 1), `visible` BOOL #t, `static` BOOL, `cull-distance` FLOAT 0; `%prev-position` VEC3 LOCAL HIDDEN ENGINE, `%prev-rotation` VEC3 LOCAL HIDDEN ENGINE |
 | `model` | node | `mesh` STRING, `animation` SYMBOL, `animation-speed` FLOAT 1, `spin` FLOAT (radians/s about Y, presentation only: the drawn rotation adds `spin * time`), `tint` VEC3 (1 1 1), `for-owner` BOOL, `hidden-for-owner` BOOL, `viewmodel` BOOL |
 | `socket` | node | `bone` STRING, `of` LIST of SYMBOL max 4 |
-| `camera` | node | `fov` FLOAT 75, `for-owner` BOOL |
+| `camera` | node | `fov` FLOAT 75, `for-owner` BOOL, `viewmodel-fov` FLOAT 60 (§3.1) |
 | `light` | node | `type` SYMBOL (`ambient` `directional` `point`), `energy` FLOAT 1, `color` VEC3 (1 1 1), `range` FLOAT 10 |
 | `character` | node | `radius` FLOAT 0.4, `height` FLOAT 1.8, `velocity` VEC3, `on-floor` BOOL ENGINE |
 | `solid` | node | `size` VEC3 (1 1 1): an axis-aligned box centred on the node |
@@ -443,10 +443,10 @@ uint32_t DrawPathMeshUpdate(DrawPath *, uint32_t id, const Mesh *);   /* re-uplo
 bool DrawPathMeshPositions(DrawPath *, uint32_t id, const float *positions, const float *normals);
                                                         /* in place, for CPU skinning */
 uint32_t DrawPathMaterial(DrawPath *, Shader, Texture2D, Color tint, int normalMatrixLoc);
-uint32_t DrawPathStaticBatch(DrawPath *, const DrawItem *items, int count);   /* one merged mesh
-                                                                                 per material, world
-                                                                                 space; returns the
-                                                                                 first new mesh id */
+int DrawPathStaticBatch(DrawPath *, const DrawItem *items, int count, DrawItem *out, int max);
+                                        /* one merged world-space mesh per material (and per 65,536
+                                           vertices), as items written to out; returns how many */
+bool DrawPathMeshRelease(DrawPath *, uint32_t id);  /* frees a mesh; a later upload reuses its id */
 void DrawPathBegin(DrawPath *, Camera3D camera, int screenWidth, int screenHeight);
 void DrawPathAdd(DrawPath *, const DrawItem *);
 DrawStats DrawPathEnd(DrawPath *);   /* cull, key, sort, submit; inside BeginMode3D */
@@ -462,7 +462,8 @@ the CPU per item and uploads it, uploads the model matrix and the normal matrix 
 material whose `normalMatrixLoc >= 0`, and calls `rlDrawVertexArrayElements`. It does not call
 `DrawMesh`. Start from `experiments/e9_cull_sort/e9.c` and `experiments/e6_draw_cost/bench.c` in
 the design repository for the sort and the submit body. Layer 3 (viewmodel) is drawn last with the
-depth buffer cleared and its own projection; phase 1 draws it like layer 0 and notes that.
+depth buffer cleared and its own projection; `DrawPathEnd` approximates that by drawing layer 3 last
+with depth testing off, and the runner does it properly with a pass of its own (§3.1).
 
 Static batching (B9.3): items with the same material are merged into one world-space mesh (apply
 each `world` to positions and normals); the result is a mesh id the caller adds as one item with the
@@ -636,6 +637,41 @@ in the recording (§6.3).
   positional emitter: volume from `volume` and distance to the local camera (linear falloff to
   silence at 30 m), pan from the camera's right vector. Headless plays nothing.
 
+As built (`gameplay/game.c`; the checks are `tests/regression/present_checks.c`), where the above
+left room:
+
+- *Static batching.* A model is batched when it or an ancestor has `static` set, it is drawn here,
+  and it has no clips, no `spin`, no `cull-distance` and no `viewmodel` (all of which need it drawn
+  as itself); none under a `socket`. Its region is the 8x8-cell chunk of the first tilemap whose
+  cells hold its position (`World3DWorldToCell`), or one region for everything on no tilemap. A
+  region is re-merged (`DrawPathStaticBatch`, the old merged meshes freed with
+  `DrawPathMeshRelease`) at the end of a frame in which a member joined, was removed, stopped being
+  drawn here, or changed `mesh`, `tint`, `spin`, `viewmodel`, `cull-distance` or its static thing.
+  The transform error is **the runner's check at the next frame**, not a store rule at the write:
+  it compares the position, rotation and scale of every node from each batched model up to its
+  static thing with the values it was batched at. A store rule could name the handler's line, but
+  batching happens only where a window draws, so refusing the write there would make gameplay differ
+  between a headless replay and play (rule 1); the write stands, the error is reported once (the
+  bottom-of-screen line and `ERROR: RUN: ...`), and the models under the node are drawn as
+  themselves from then on. When the moving node is not the static thing itself the message is
+  `position on bulb #13 changed, but it hangs from lamp #12, which is :static; ...`. A write to a
+  thing's parent above the static thing is not seen. `--no-static-batch` draws everything as itself.
+- *Lights.* "Visible" is the light's `visible` field and its range sphere reaching into the view
+  frustum; the nearest four by distance from the camera to the light are uploaded as
+  `pointPosition[4]`, `pointColor[4]` (colour times energy) and `pointRange[4]`, and unused slots
+  have zero colour. With no directional light the default sun of §6.2 still shines, so a dark scene
+  places a directional light of energy 0. The skinning vertex shader shares `world.fs`, so skinned
+  models are lit the same way.
+- *Viewmodel.* The owner's viewmodel items are collected apart from the world's and drawn after the
+  world and the particles by `DrawViewmodelCleared` (`core/viewmodel.h`: `DrawViewmodel`'s pass
+  with the depth buffer cleared and its own clip planes, which a draw path begun inside it uses
+  too), as a second `DrawPathBegin/End` on a camera with the local camera's place and
+  `viewmodel-fov`; its draws add to the frame's stats. The runner no longer uses layer 3.
+- *Sound.* Each `sound` thing gets a held voice (`CoreAudioVoiceCreate` on the `game` bus, looping,
+  `CoreAudioVoicePlayAt` with range 30, then moved and re-gained each frame, stopped when `playing`
+  turns off, freed when the thing goes); the stream is loaded whole, as `play-sound`'s sounds are.
+  `GameSoundHeard` (`gameplay/game.h`) is the gain and pan it is heard at, for checks.
+
 ## 6. The runner (`gameplay/game.c`)
 
 ### 6.1 Projects and entry points
@@ -666,6 +702,7 @@ executable (engine-build copies it) or the directory given as the first argument
 --shot-dir DIR       where --shot-every writes (default: the current directory)
 --no-time-limit      GameS7SetHandlerLimit(0): no handler is stopped (default 0.05 s)
 --host PORT / --join ADDRESS:PORT, --bot-until N, --print-field KIND FIELD, --print-count KIND: §9.6
+--no-static-batch    windowed only: draw every :static model as itself (§3.1; for comparing shots)
 ```
 
 A handler that runs past the limit (proposal B2.6, 50 ms) is stopped: `Run` in game_s7.c arms the
@@ -708,8 +745,9 @@ the runner's bone lookup answers for drawn, posed models, so sockets follow bone
 Headless does none of this. Sounds: `play-sound` loads a `.wav`/`.ogg` once per name; missing is one warning.
 `burst` presets: `muzzle-flash`, `blood`, `dust`, `sparks`, as `CoreParticles` emits with fixed
 parameters. Lighting: one GLSL 120 pair `core/shaders/world.vs` / `world.fs`: ambient plus one
-directional light from the first `light` of type `directional` (default from above), distance fog,
-a diffuse texture, `tint`.
+directional light from the first `light` of type `directional` (default from above) plus up to four
+point lights (§3.1), distance fog, a diffuse texture, `tint`. Static models are drawn in batches,
+viewmodels in their own pass and `sound` things play as emitters (§3.1).
 
 The window path is built and checked for build and for draw statistics only. It is not verified in
 play by this work; the user does that on their hardware.
@@ -774,6 +812,14 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
   equals qsort order; cull counts; static batch vertex count; skinning (bones move the drawn mesh,
   uploads only for skinned materials with bones). GL-dependent parts run under the hidden window the
   suite already opens.
+- `tests/regression/present_checks.c` (§3.1; `regression_test --present` runs only these): the
+  gain and pan `GameSoundHeard` gives at 0, 15, 30 and 45 m and on either side; then, in a window,
+  `tests/regression/statics/` (200 static crates: draws against regions x materials + non-static
+  items, the same pixels as `--no-static-batch` before and after a move and a removal, and the
+  moved crate's error), `lights/` (the floor under a point light against twice its range away, lit
+  and at energy 0, a skinned rig lit, a fifth light left out), `viewmodel/` (a box behind a wall
+  hidden as a model and drawn as a viewmodel; another player's `:for-owner` viewmodel not drawn)
+  and `emitters/` (a run with sound things and no audio device ends cleanly).
 - `tests/regression/game_checks.c`: `define-kind` walk (from `kinds_walk.scm`); the five rule
   errors; a headless bot session of 600 ticks recorded then replayed to the same hash.
 - `tools/store_bench`: 1,000 things of a 12-field kind all changing every tick, 3,600 ticks: prints

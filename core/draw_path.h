@@ -143,6 +143,15 @@ uint32_t DrawPathMesh(DrawPath *path, const Mesh *mesh);
  * @return id on success, or 0 when the id is unknown or the new contents are refused. */
 uint32_t DrawPathMeshUpdate(DrawPath *path, uint32_t id, const Mesh *mesh);
 
+/** @brief Releases an uploaded mesh: its GL buffers and CPU copy are freed and its id is refused
+ * (by DrawPathAdd, DrawPathStaticBatch, DrawPathMeshUpdate and DrawPathMeshPositions) until a later
+ * DrawPathMesh or DrawPathStaticBatch reuses the slot, as it does before growing the path. For
+ * meshes that are rebuilt, such as a static batch whose region changed.
+ * @param path Path that owns the mesh.
+ * @param id Id from DrawPathMesh or DrawPathStaticBatch.
+ * @return True when released; false for an unknown or already released id. */
+bool DrawPathMeshRelease(DrawPath *path, uint32_t id);
+
 /** @brief Rewrites an uploaded mesh's positions, and its normals when it has them, in place: CPU
  * skinning's per-frame upload, with no reallocation.
  *

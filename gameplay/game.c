@@ -21,6 +21,7 @@
 #include "core/store.h"
 #include "core/store_net.h"
 #include "core/store_net_enet.h"
+#include "core/viewmodel.h"
 #include "core/world3d.h"
 #include "gameplay/script/game_s7.h"
 #include "raymath.h"
@@ -87,6 +88,56 @@ typedef struct Pose
     int meshCount;
 } Pose;
 
+/* Static batching (docs/developer/store.md §3.1, proposal B9.3): a model that is `:static`, or hangs
+   under a thing that is, is merged with the others of its region into one world-space mesh per
+   material at the first frame it is drawn, and the batch is drawn instead of it. */
+#define STATIC_REGION_CELLS 8 /* a region is a tilemap chunk: 8x8 cells */
+typedef enum StaticState
+{
+    STATIC_NONE,    /* not batched (yet): drawn as itself */
+    STATIC_BATCHED, /* its items ride in its region's batch */
+    STATIC_MOVED    /* it moved after it was batched (an error): drawn as itself from then on */
+} StaticState;
+
+typedef struct StaticModel
+{
+    StoreId thing;
+    StaticState state;
+    int region;
+    uint64_t look;   /* what it was batched with (LookOf): another look unbatches it */
+    DrawItem *items; /* its world-space items, as they went into the batch */
+    int itemCount;
+} StaticModel;
+
+/* A node whose transform a batch depends on: a batched model and each node above it up to its
+   :static thing, with the fields it was batched at. */
+typedef struct StaticNode
+{
+    StoreId thing, root;
+    Vector3 position, rotation, scale;
+} StaticNode;
+
+/* A tilemap's 8x8-cell region (map null: things standing on no tilemap) and its batches. */
+typedef struct StaticRegion
+{
+    StoreId map;
+    int x, z;
+    bool dirty;
+    DrawItem *batches;
+    int batchCount;
+} StaticRegion;
+
+/* A `sound` thing's voice (§3.1): a held core/audio.h voice looping its stream where it is. */
+typedef struct Emitter
+{
+    StoreId thing;
+    bool used;       /* the slot holds a thing's emitter */
+    char stream[NAME];
+    CoreAudioVoice voice;
+    bool tried;      /* a voice was asked for this stream (once: no device or no file stays silent) */
+    bool playing;
+} Emitter;
+
 /* The world pass's shader and its lighting uniforms: 0 is core/shaders/world.vs, 1 the skinning
    vertex shader for GPU_SKIN_BONES bones, both over world.fs. */
 typedef struct WorldPass
@@ -94,7 +145,11 @@ typedef struct WorldPass
     Shader shader;
     bool loaded;
     int normalLoc, lightDirLoc, lightColorLoc, ambientLoc, fogColorLoc, fogDensityLoc, viewPosLoc;
+    int pointPositionLoc, pointColorLoc, pointRangeLoc; /* arrays of POINT_LIGHTS */
 } WorldPass;
+
+/* Point lights the world shader lights each pixel by (core/shaders/world.fs, §3.1). */
+#define POINT_LIGHTS 4
 
 typedef struct TextureEntry
 {
@@ -179,6 +234,21 @@ typedef struct Runner
     int clipWarningCount;
     bool skinCpuForced; /* --skin-on-cpu: every skinned model on the CPU path (a check's switch) */
     const char *printDrawKind; /* --print-draw-position KIND */
+    bool noStaticBatch;        /* --no-static-batch: every static model drawn as itself (a check's switch) */
+    StaticModel *statics;      /* per thing index */
+    uint32_t staticCapacity;
+    StaticNode *staticNodes;
+    int staticNodeCount, staticNodeCapacity;
+    StaticRegion *regions;
+    int regionCount, regionCapacity;
+    DrawItem *scratch; /* one model's items while they are built */
+    int scratchCapacity;
+    DrawItem *viewItems; /* this frame's viewmodel items, for the viewmodel pass */
+    int viewCount, viewCapacity;
+    float viewmodelFov; /* the local camera's viewmodel-fov this frame */
+    int pointLights;    /* point lights lit on the last frame */
+    Emitter *emitters;  /* per thing index */
+    uint32_t emitterCapacity;
     Texture2D white, grey;
     Font font;
     CoreAudio audio;
@@ -486,6 +556,7 @@ static GameInput FromBot(void)
 #define NET_LINGER_SECONDS 5.0 /* a headless host that finished waits this long for its clients */
 
 static bool PlaySoundHere(const char *name, bool placed, Vector3 at);
+static void OnError(const char *message);
 static int PresetNamed(const char *name);
 static bool BurstHere(int which, Vector3 at);
 
@@ -1306,15 +1377,370 @@ static World3DBone BoneOf(void *user, StoreId model, const char *bone, Matrix *o
     return WORLD3D_BONE_NONE;
 }
 
+/* ---- static batching (docs/developer/store.md §3.1) ------------------------------------------ */
+
+static bool SameThing(StoreId a, StoreId b) { return a.index == b.index && a.generation == b.generation; }
+
+/* Room for need items of size in a growing array. */
+static bool Reserve(void **items, int *capacity, int need, size_t size)
+{
+    if (need <= *capacity)
+        return true;
+    int grown = *capacity ? *capacity : 16;
+    while (grown < need)
+        grown *= 2;
+    void *more = realloc(*items, (size_t)grown * size);
+    if (!more)
+        return false;
+    *items = more;
+    *capacity = grown;
+    return true;
+}
+
+/* The :static thing a model is batched under: the outermost of it and its ancestors with `static`
+   set, or null for none. A model under a socket follows a bone, so it is never batched. */
+static StoreId StaticRootOf(StoreId id)
+{
+    StoreId root = STORE_NULL;
+    for (StoreId at = id; StoreAlive(&run.store, at); at = StoreParent(&run.store, at))
+    {
+        if (StoreKindIs(&run.store, StoreKindOf(&run.store, at), run.world.socket))
+            return STORE_NULL;
+        if (FieldTrue(at, "static"))
+            root = at;
+    }
+    return root;
+}
+
+/* What a batched model was merged with: its :static thing and the fields that choose its items.
+   Another look (a new mesh or tint, `static` turned off) takes it out of the batch. */
+static uint64_t LookOf(StoreId id, StoreId root)
+{
+    static const char *const fields[] = {"mesh", "tint", "spin", "viewmodel", "cull-distance"};
+    uint64_t h = 1469598103934665603ull;
+    uint32_t words[2] = {root.index, root.generation};
+    const unsigned char *bytes = (const unsigned char *)words;
+    for (size_t k = 0; k < sizeof words; k++)
+        h = (h ^ bytes[k]) * 1099511628211ull;
+    for (size_t f = 0; f < sizeof fields / sizeof fields[0]; f++)
+    {
+        StoreValue v;
+        memset(&v, 0, sizeof v);
+        Field(id, fields[f], &v);
+        bytes = (const unsigned char *)&v;
+        for (size_t k = 0; k < sizeof v; k++)
+            h = (h ^ bytes[k]) * 1099511628211ull;
+    }
+    return h;
+}
+
+/* The static slot of a thing index, grown on demand; NULL when out of memory. */
+static StaticModel *StaticSlot(StoreId id)
+{
+    if (id.index >= run.staticCapacity)
+    {
+        uint32_t capacity = run.staticCapacity ? run.staticCapacity : 64;
+        while (capacity <= id.index)
+            capacity *= 2;
+        StaticModel *grown = realloc(run.statics, sizeof *grown * capacity);
+        if (!grown)
+            return NULL;
+        memset(grown + run.staticCapacity, 0, sizeof *grown * (capacity - run.staticCapacity));
+        run.statics = grown;
+        run.staticCapacity = capacity;
+    }
+    StaticModel *s = &run.statics[id.index];
+    if (!SameThing(s->thing, id)) /* a new thing in the slot starts unbatched */
+    {
+        free(s->items);
+        memset(s, 0, sizeof *s);
+        s->thing = id;
+    }
+    return s;
+}
+
+/* Takes a model out of its batch: its region is rebuilt at this frame's end without it. */
+static void StaticRelease(StaticModel *s, StaticState state)
+{
+    if (s->state == STATIC_BATCHED && s->region >= 0 && s->region < run.regionCount)
+        run.regions[s->region].dirty = true;
+    free(s->items);
+    s->items = NULL;
+    s->itemCount = 0;
+    s->state = state;
+}
+
+/* The region a point stands in: the 8x8-cell chunk of the first tilemap under it, or the region of
+   things standing on no tilemap. -1 when out of memory. */
+static int RegionAt(Vector3 at)
+{
+    StoreId map = STORE_NULL;
+    int x = 0, z = 0, count;
+    StoreId *maps = ThingsOf(run.world.tilemap, &count);
+    for (int m = 0; maps && m < count; m++)
+        if (World3DWorldToCell(&run.world, maps[m], at, &x, &z))
+        {
+            map = maps[m];
+            x /= STATIC_REGION_CELLS;
+            z /= STATIC_REGION_CELLS;
+            break;
+        }
+    free(maps);
+    if (map.index == STORE_NULL.index)
+        x = z = 0;
+    for (int r = 0; r < run.regionCount; r++)
+        if (SameThing(run.regions[r].map, map) && run.regions[r].x == x && run.regions[r].z == z)
+            return r;
+    if (!Reserve((void **)&run.regions, &run.regionCapacity, run.regionCount + 1, sizeof *run.regions))
+        return -1;
+    run.regions[run.regionCount] = (StaticRegion){map, x, z, false, NULL, 0};
+    return run.regionCount++;
+}
+
+static bool NodeFields(StoreId id, Vector3 *p, Vector3 *r, Vector3 *s)
+{
+    StoreValue a, b, c;
+    if (!StoreGet(&run.store, id, run.world.position, &a) || !StoreGet(&run.store, id, run.world.rotation, &b) ||
+        !StoreGet(&run.store, id, run.world.scale, &c))
+        return false;
+    *p = a.as.v, *r = b.as.v, *s = c.as.v;
+    return true;
+}
+
+/* Remembers the transform of every node from a batched model up to its :static thing. */
+static void TrackStaticChain(StoreId model, StoreId root)
+{
+    for (StoreId at = model; StoreAlive(&run.store, at); at = StoreParent(&run.store, at))
+    {
+        bool known = false;
+        for (int n = 0; n < run.staticNodeCount && !known; n++)
+            known = SameThing(run.staticNodes[n].thing, at);
+        StaticNode node = {at, root, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}};
+        if (!known && NodeFields(at, &node.position, &node.rotation, &node.scale) &&
+            Reserve((void **)&run.staticNodes, &run.staticNodeCapacity, run.staticNodeCount + 1,
+                    sizeof *run.staticNodes))
+            run.staticNodes[run.staticNodeCount++] = node;
+        if (SameThing(at, root))
+            break;
+    }
+}
+
+/* Puts a model's items in its region's batch, which is rebuilt at this frame's end. */
+static bool StaticBatch(StaticModel *s, StoreId root, const DrawItem *items, int count, Vector3 at)
+{
+    int region = RegionAt(at);
+    DrawItem *copy = count > 0 ? malloc(sizeof *copy * (size_t)count) : NULL;
+    if (region < 0 || !copy)
+    {
+        free(copy);
+        return false;
+    }
+    memcpy(copy, items, sizeof *copy * (size_t)count);
+    s->items = copy;
+    s->itemCount = count;
+    s->region = region;
+    s->state = STATIC_BATCHED;
+    s->look = LookOf(s->thing, root);
+    run.regions[region].dirty = true;
+    TrackStaticChain(s->thing, root);
+    return true;
+}
+
+/* Whether a batched model hangs from node (or is it). */
+static bool Under(StoreId model, StoreId node)
+{
+    for (StoreId at = model; StoreAlive(&run.store, at); at = StoreParent(&run.store, at))
+        if (SameThing(at, node))
+            return true;
+    return false;
+}
+
+/* Before the models are gathered: a batched node whose position, rotation or scale was written is an
+   error naming the flag, reported once, and the models under it leave the batch and are drawn as
+   themselves; a removed model leaves its region's batch. Checked here, at the next frame, and not
+   when the field is written: batching happens only where a window draws, so refusing the write
+   would make gameplay differ between a headless replay and play (rule 1). */
+static void CheckStatics(void)
+{
+    static const char *const names[3] = {"position", "rotation", "scale"};
+    for (int n = run.staticNodeCount - 1; n >= 0; n--)
+    {
+        StaticNode *node = &run.staticNodes[n];
+        Vector3 now[3];
+        bool alive = StoreAlive(&run.store, node->thing) && StoreAlive(&run.store, node->root) &&
+                     NodeFields(node->thing, &now[0], &now[1], &now[2]);
+        int changed = -1;
+        const Vector3 was[3] = {node->position, node->rotation, node->scale};
+        for (int f = 0; alive && f < 3 && changed < 0; f++)
+            if (memcmp(&was[f], &now[f], sizeof now[f]))
+                changed = f;
+        if (alive && changed < 0)
+            continue;
+        if (changed >= 0 && FieldTrue(node->root, "static"))
+        {
+            char text[256];
+            const char *kind = StoreKindName(&run.store, StoreKindOf(&run.store, node->thing));
+            const char *rootKind = StoreKindName(&run.store, StoreKindOf(&run.store, node->root));
+            if (SameThing(node->thing, node->root))
+                snprintf(text, sizeof text, "%s on %s #%u changed, but %s is :static; remove :static if it moves",
+                         names[changed], kind, node->thing.index, kind);
+            else
+                snprintf(text, sizeof text,
+                         "%s on %s #%u changed, but it hangs from %s #%u, which is :static; remove :static if "
+                         "it moves",
+                         names[changed], kind, node->thing.index, rootKind, node->root.index);
+            TraceLog(LOG_ERROR, "RUN: %s", text);
+            OnError(text);
+            for (uint32_t i = 0; i < run.staticCapacity; i++)
+                if (run.statics[i].state == STATIC_BATCHED && Under(run.statics[i].thing, node->thing))
+                    StaticRelease(&run.statics[i], STATIC_MOVED);
+        }
+        run.staticNodes[n] = run.staticNodes[--run.staticNodeCount];
+    }
+    for (uint32_t i = 0; i < run.staticCapacity; i++)
+        if (run.statics[i].state == STATIC_BATCHED && !StoreAlive(&run.store, run.statics[i].thing))
+            StaticRelease(&run.statics[i], STATIC_NONE);
+}
+
+/* After the models are gathered: each region whose members changed is merged again, and every
+   region's batches are drawn. */
+static void AddStatics(void)
+{
+    for (int r = 0; r < run.regionCount; r++)
+    {
+        StaticRegion *region = &run.regions[r];
+        if (region->dirty)
+        {
+            region->dirty = false;
+            for (int b = 0; b < region->batchCount; b++)
+                DrawPathMeshRelease(&run.path, region->batches[b].mesh);
+            free(region->batches);
+            region->batches = NULL;
+            region->batchCount = 0;
+            int count = 0, used = 0;
+            for (uint32_t i = 0; i < run.staticCapacity; i++)
+                if (run.statics[i].state == STATIC_BATCHED && run.statics[i].region == r)
+                    count += run.statics[i].itemCount;
+            DrawItem *items = count ? malloc(sizeof *items * (size_t)count) : NULL;
+            for (uint32_t i = 0; items && i < run.staticCapacity; i++)
+                if (run.statics[i].state == STATIC_BATCHED && run.statics[i].region == r)
+                {
+                    memcpy(items + used, run.statics[i].items, sizeof *items * (size_t)run.statics[i].itemCount);
+                    used += run.statics[i].itemCount;
+                }
+            region->batches = items ? malloc(sizeof *region->batches * (size_t)count) : NULL;
+            if (region->batches)
+                region->batchCount = DrawPathStaticBatch(&run.path, items, used, region->batches, count);
+            free(items);
+        }
+        for (int b = 0; b < region->batchCount; b++)
+            DrawPathAdd(&run.path, &region->batches[b]);
+    }
+}
+
+/* --bench: how many models ride in batches, in how many regions with members, as how many merged
+   items of how many materials. */
+static void PrintStatics(void)
+{
+    int models = 0, regions = 0, batches = 0, materials = 0;
+    uint32_t seen[64];
+    for (uint32_t i = 0; i < run.staticCapacity; i++)
+        models += run.statics[i].state == STATIC_BATCHED;
+    for (int r = 0; r < run.regionCount; r++)
+    {
+        regions += run.regions[r].batchCount > 0;
+        batches += run.regions[r].batchCount;
+        for (int b = 0; b < run.regions[r].batchCount; b++)
+        {
+            bool known = false;
+            for (int k = 0; k < materials && !known; k++)
+                known = seen[k] == run.regions[r].batches[b].material;
+            if (!known && materials < 64)
+                seen[materials++] = run.regions[r].batches[b].material;
+        }
+    }
+    printf("bench static models %d regions %d batches %d materials %d\n", models, regions, batches, materials);
+}
+
+static void FreeStatics(void)
+{
+    for (uint32_t i = 0; i < run.staticCapacity; i++)
+        free(run.statics[i].items);
+    for (int r = 0; r < run.regionCount; r++)
+        free(run.regions[r].batches);
+    free(run.statics);
+    free(run.staticNodes);
+    free(run.regions);
+    free(run.scratch);
+    free(run.viewItems);
+    run.statics = NULL;
+    run.staticNodes = NULL;
+    run.regions = NULL;
+    run.scratch = run.viewItems = NULL;
+    run.staticCapacity = 0;
+    run.staticNodeCount = run.staticNodeCapacity = run.regionCount = run.regionCapacity = 0;
+    run.scratchCapacity = run.viewCount = run.viewCapacity = 0;
+}
+
+/* A model thing's draw items at world, one per mesh, into run.scratch; their count. */
+static int ModelItems(StoreId id, ModelEntry *e, const Pose *pose, Matrix world)
+{
+    if (!Reserve((void **)&run.scratch, &run.scratchCapacity, e->model.meshCount, sizeof *run.scratch))
+        return 0;
+    Color tint = e->placeholder ? (Color){255, 0, 255, 255} : TintOf(id);
+    Matrix local = e->model.transform;
+    if (e->placeholder) /* standing on the node's origin: a character's is its feet */
+    {
+        StoreId parent = StoreParent(&run.store, id);
+        bool character = StoreAlive(&run.store, parent) &&
+                         StoreKindIs(&run.store, StoreKindOf(&run.store, parent), run.world.character);
+        Vector3 size = character ? (Vector3){0.5f, 1.6f, 0.5f} : (Vector3){0.25f, 0.25f, 0.25f};
+        local = MatrixMultiply(MatrixScale(size.x, size.y, size.z), MatrixTranslate(0, size.y / 2, 0));
+    }
+    int n = 0;
+    for (int m = 0; m < e->model.meshCount; m++)
+    {
+        bool cpu = pose && e->cpu && m < pose->meshCount && pose->meshes[m];
+        bool gpu = pose && !e->cpu && e->model.meshes[m].boneIds;
+        uint32_t mesh = cpu ? pose->meshes[m] : e->meshes[m];
+        if (!mesh)
+            continue;
+        int which = e->model.meshMaterial ? e->model.meshMaterial[m] : 0;
+        Texture2D texture = which >= 0 && which < e->model.materialCount && e->model.materials[which].maps
+                                ? e->model.materials[which].maps[MATERIAL_MAP_DIFFUSE].texture
+                                : (Texture2D){0};
+        DrawItem item = {mesh, MaterialFor(texture, tint, gpu), MatrixMultiply(local, world), {0, 0, 0}, 0,
+                         DRAW_LAYER_OPAQUE, gpu ? pose->bones : NULL, gpu ? e->model.boneCount : 0};
+        const DrawPathMeshData *data = &run.path.meshes[mesh - 1];
+        item.center = Vector3Transform(data->center, item.world);
+        /* A posed mesh reaches past its rest bounds (a raised arm), so it is culled generously. */
+        item.radius = data->radius * MaxScale(item.world) * (pose ? 2.0f : 1.0f);
+        if (item.material)
+            run.scratch[n++] = item;
+    }
+    return n;
+}
+
 static void AddModels(Camera3D camera)
 {
+    run.viewCount = 0;
+    CheckStatics();
     int count;
     StoreId *ids = ThingsOf(run.world.model, &count);
     float now = StoreTickTime(&run.store);
     for (int i = 0; ids && i < count; i++)
     {
         StoreId id = ids[i];
-        if (!DrawnHere(id))
+        bool drawn = DrawnHere(id);
+        StaticModel *s = run.noStaticBatch ? NULL : StaticSlot(id);
+        StoreId root = s && s->state != STATIC_MOVED ? StaticRootOf(id) : STORE_NULL;
+        if (s && s->state == STATIC_BATCHED)
+        {
+            if (drawn && root.index != STORE_NULL.index && LookOf(id, root) == s->look)
+                continue; /* drawn in its region's batch */
+            StaticRelease(s, STATIC_NONE);
+        }
+        if (!drawn)
             continue;
         Matrix world;
         if (!World3DDrawMatrix(&run.world, id, &world)) /* under a socket: on its bone, this frame */
@@ -1329,46 +1755,36 @@ static void AddModels(Camera3D camera)
         ModelEntry *e = ModelOf(id);
         if (!e || !e->meshes)
             continue;
-        Color tint = e->placeholder ? (Color){255, 0, 255, 255} : TintOf(id);
-        Matrix local = e->model.transform;
-        if (e->placeholder) /* standing on the node's origin: a character's is its feet */
-        {
-            StoreId parent = StoreParent(&run.store, id);
-            bool character = StoreAlive(&run.store, parent) &&
-                             StoreKindIs(&run.store, StoreKindOf(&run.store, parent), run.world.character);
-            Vector3 size = character ? (Vector3){0.5f, 1.6f, 0.5f} : (Vector3){0.25f, 0.25f, 0.25f};
-            local = MatrixMultiply(MatrixScale(size.x, size.y, size.z), MatrixTranslate(0, size.y / 2, 0));
-        }
         const Pose *pose = PoseOf(id, e);
-        uint8_t layer = FieldTrue(id, "viewmodel") ? DRAW_LAYER_VIEWMODEL : DRAW_LAYER_OPAQUE;
-        for (int m = 0; m < e->model.meshCount; m++)
+        int n = ModelItems(id, e, pose, world);
+        bool viewmodel = FieldTrue(id, "viewmodel");
+        /* Batched: static, not animated, spun, culled by distance or a viewmodel (§3.1). */
+        if (s && root.index != STORE_NULL.index && !e->clipCount && spin == 0 && cull <= 0 && !viewmodel && n > 0 &&
+            StaticBatch(s, root, run.scratch, n, at))
+            continue;
+        /* A viewmodel draws in the viewmodel pass for its owner, and like any model elsewhere. */
+        if (viewmodel && StoreOwner(&run.store, id) == LocalPlayer())
         {
-            bool cpu = pose && e->cpu && m < pose->meshCount && pose->meshes[m];
-            bool gpu = pose && !e->cpu && e->model.meshes[m].boneIds;
-            uint32_t mesh = cpu ? pose->meshes[m] : e->meshes[m];
-            if (!mesh)
-                continue;
-            int which = e->model.meshMaterial ? e->model.meshMaterial[m] : 0;
-            Texture2D texture = which >= 0 && which < e->model.materialCount && e->model.materials[which].maps
-                                    ? e->model.materials[which].maps[MATERIAL_MAP_DIFFUSE].texture
-                                    : (Texture2D){0};
-            DrawItem item = {mesh, MaterialFor(texture, tint, gpu), MatrixMultiply(local, world), {0, 0, 0}, 0,
-                             layer, gpu ? pose->bones : NULL, gpu ? e->model.boneCount : 0};
-            const DrawPathMeshData *data = &run.path.meshes[mesh - 1];
-            item.center = Vector3Transform(data->center, item.world);
-            /* A posed mesh reaches past its rest bounds (a raised arm), so it is culled generously. */
-            item.radius = data->radius * MaxScale(item.world) * (pose ? 2.0f : 1.0f);
-            if (item.material)
-                DrawPathAdd(&run.path, &item);
+            if (Reserve((void **)&run.viewItems, &run.viewCapacity, run.viewCount + n, sizeof *run.viewItems))
+            {
+                memcpy(run.viewItems + run.viewCount, run.scratch, sizeof *run.scratch * (size_t)n);
+                run.viewCount += n;
+            }
+            continue;
         }
+        for (int k = 0; k < n; k++)
+            DrawPathAdd(&run.path, &run.scratch[k]);
     }
     free(ids);
+    AddStatics();
 }
 
-// The local player's for-owner camera, or one above the origin.
+// The local player's for-owner camera, or one above the origin; run.viewmodelFov is its
+// viewmodel-fov (60 without one).
 static Camera3D ChooseCamera(void)
 {
     Camera3D camera = {{0, 10, 10}, {0, 0, 0}, {0, 1, 0}, 60, CAMERA_PERSPECTIVE};
+    run.viewmodelFov = 60;
     int count;
     StoreId *ids = ThingsOf(run.world.camera, &count);
     for (int i = 0; ids && i < count; i++)
@@ -1381,10 +1797,172 @@ static Camera3D ChooseCamera(void)
         Vector3 forward = Vector3Subtract(Vector3Transform((Vector3){0, 0, -1}, m), at);
         Vector3 up = Vector3Subtract(Vector3Transform((Vector3){0, 1, 0}, m), at);
         camera = (Camera3D){at, Vector3Add(at, forward), up, FieldFloat(ids[i], "fov", 75), CAMERA_PERSPECTIVE};
+        run.viewmodelFov = FieldFloat(ids[i], "viewmodel-fov", 60);
         break;
     }
     free(ids);
     return camera;
+}
+
+/* The viewmodel pass (§3.1, proposal B9.2's layer 3): the owner's viewmodel models after the world,
+   from the local camera's place with its viewmodel-fov and clip planes of 0.01 and 10 m, over a
+   cleared depth buffer, so a gun never clips into a wall. Its draw counts join the frame's. */
+#define VIEWMODEL_NEAR 0.01f
+#define VIEWMODEL_FAR 10.0f
+static Camera3D viewCamera;
+
+static void DrawViewItems(void *context)
+{
+    (void)context;
+    DrawPathBegin(&run.path, viewCamera, GetScreenWidth(), GetScreenHeight());
+    for (int i = 0; i < run.viewCount; i++)
+        DrawPathAdd(&run.path, &run.viewItems[i]);
+    DrawStats s = DrawPathEnd(&run.path);
+    run.lastStats.items += s.items;
+    run.lastStats.visible += s.visible;
+    run.lastStats.draws += s.draws;
+    run.lastStats.shaderSwitches += s.shaderSwitches;
+    run.lastStats.textureSwitches += s.textureSwitches;
+    run.lastStats.boneUploads += s.boneUploads;
+}
+
+static void DrawViewmodels(Camera3D camera)
+{
+    if (!run.viewCount)
+        return;
+    viewCamera = camera;
+    viewCamera.fovy = run.viewmodelFov;
+    float aspect = GetScreenHeight() > 0 ? (float)GetScreenWidth() / (float)GetScreenHeight() : 1.0f;
+    static float warnedFov = -1; /* one warning per bad value, not one per frame */
+    if (!DrawViewmodelCleared((ViewmodelProjection){run.viewmodelFov, aspect, 1.0f}, VIEWMODEL_NEAR, VIEWMODEL_FAR,
+                              DrawViewItems, NULL) &&
+        warnedFov != run.viewmodelFov)
+    {
+        warnedFov = run.viewmodelFov;
+        TraceLog(LOG_WARNING, "RUN: viewmodel-fov %.1f is not between 0 and 180; the viewmodels are not drawn",
+                 (double)run.viewmodelFov);
+    }
+}
+
+/* ---- sound emitters (§3.1) ------------------------------------------------------------------ */
+
+void GameSoundHeard(Vector3 camera, Vector3 forward, Vector3 up, Vector3 at, float volume, float *gain, float *pan)
+{
+    CoreAudio listener;
+    memset(&listener, 0, sizeof listener);
+    CoreAudioSetListener(&listener, camera, forward, up);
+    if (gain)
+        *gain = CoreAudioGainAt(&listener, at, GAME_SOUND_RANGE, volume);
+    if (pan)
+        *pan = CoreAudioPanAt(&listener, at);
+}
+
+static void EmitterRelease(Emitter *e)
+{
+    if (CoreAudioVoiceValid(&run.audio, e->voice))
+        CoreAudioVoiceFree(&run.audio, e->voice);
+    memset(e, 0, sizeof *e);
+    e->voice = (CoreAudioVoice){UINT32_MAX, 0};
+}
+
+static Emitter *EmitterSlot(StoreId id)
+{
+    if (id.index >= run.emitterCapacity)
+    {
+        uint32_t capacity = run.emitterCapacity ? run.emitterCapacity : 64;
+        while (capacity <= id.index)
+            capacity *= 2;
+        Emitter *grown = realloc(run.emitters, sizeof *grown * capacity);
+        if (!grown)
+            return NULL;
+        memset(grown + run.emitterCapacity, 0, sizeof *grown * (capacity - run.emitterCapacity));
+        run.emitters = grown;
+        run.emitterCapacity = capacity;
+    }
+    Emitter *e = &run.emitters[id.index];
+    if (!e->used || !SameThing(e->thing, id))
+    {
+        if (e->used)
+            EmitterRelease(e);
+        memset(e, 0, sizeof *e);
+        e->voice = (CoreAudioVoice){UINT32_MAX, 0};
+        e->thing = id;
+        e->used = true;
+    }
+    return e;
+}
+
+/* Each frame, after the listener moved to the camera: a `sound` thing with `playing` loops its
+   `stream` on a held voice of its own at its drawn place, at `volume` falling off to silence at
+   GAME_SOUND_RANGE; turning `playing` off stops it, and a removed thing's voice is freed. With no
+   audio device or no such file it stays silent, with one warning. */
+static void UpdateEmitters(void)
+{
+    int count;
+    StoreId *ids = ThingsOf(run.world.sound, &count);
+    for (int i = 0; ids && i < count; i++)
+    {
+        Emitter *e = EmitterSlot(ids[i]);
+        if (!e)
+            continue;
+        StoreValue v;
+        const char *stream = Field(ids[i], "stream", &v) && v.type == STORE_STRING ? v.as.str : "";
+        if (strcmp(e->stream, stream))
+        {
+            StoreId thing = e->thing;
+            EmitterRelease(e);
+            e->thing = thing;
+            e->used = true;
+            snprintf(e->stream, sizeof e->stream, "%s", stream);
+        }
+        bool playing = FieldTrue(ids[i], "playing") && stream[0];
+        if (playing && !e->tried)
+        {
+            e->tried = true;
+            char buf[1024];
+            const char *path = AssetPath(stream, buf, sizeof buf);
+            e->voice = path ? CoreAudioVoiceCreate(&run.audio, path, "game") : (CoreAudioVoice){UINT32_MAX, 0};
+            if (!path)
+            {
+                TraceLog(LOG_WARNING, "RUN: no sound %s", stream);
+                run.missingAssets++;
+            }
+            else if (!CoreAudioVoiceValid(&run.audio, e->voice))
+                TraceLog(LOG_WARNING, "RUN: sound %s could not be loaded or no audio device; it is silent", stream);
+        }
+        if (!CoreAudioVoiceValid(&run.audio, e->voice))
+            continue;
+        Matrix m;
+        Vector3 at = World3DDrawMatrix(&run.world, ids[i], &m) ? (Vector3){m.m12, m.m13, m.m14} : (Vector3){0, 0, 0};
+        float volume = FieldFloat(ids[i], "volume", 1);
+        if (playing && !e->playing)
+        {
+            CoreAudioVoiceSetLoop(&run.audio, e->voice, true);
+            CoreAudioVoicePlayAt(&run.audio, e->voice, at, GAME_SOUND_RANGE, volume);
+        }
+        else if (playing)
+        {
+            CoreAudioVoiceMove(&run.audio, e->voice, at);
+            CoreAudioVoiceSetGain(&run.audio, e->voice, volume);
+        }
+        else if (e->playing)
+            CoreAudioVoiceStop(&run.audio, e->voice);
+        e->playing = playing;
+    }
+    free(ids);
+    for (uint32_t i = 0; i < run.emitterCapacity; i++)
+        if (run.emitters[i].used && !StoreAlive(&run.store, run.emitters[i].thing))
+            EmitterRelease(&run.emitters[i]);
+}
+
+static void FreeEmitters(void)
+{
+    for (uint32_t i = 0; i < run.emitterCapacity; i++)
+        if (run.emitters[i].used)
+            EmitterRelease(&run.emitters[i]);
+    free(run.emitters);
+    run.emitters = NULL;
+    run.emitterCapacity = 0;
 }
 
 static void DrawHud(void)
@@ -1451,12 +2029,34 @@ static void PollRepl(void)
 
 static double Seconds(void) { return run.gl ? GetTime() : 0; }
 
-// The world shader's light for this frame: the first directional light (its rotation turning
-// (0,-1,0)) or a default sun, over the first ambient light's energy or 0.3, fogged to the clear colour.
+/* Whether a sphere reaches into the frustum DrawPathBegin took for this frame. */
+static bool InView(Vector3 at, float radius)
+{
+    for (int p = 0; p < 6; p++)
+    {
+        const float *plane = run.path.planes[p];
+        if (plane[0] * at.x + plane[1] * at.y + plane[2] * at.z + plane[3] < -radius)
+            return false;
+    }
+    return true;
+}
+
+typedef struct PointLight
+{
+    Vector3 position, color; /* color times energy */
+    float range, distance;   /* distance: to the camera, to choose the nearest */
+} PointLight;
+
+// The world shader's lights for this frame (§3.1), after DrawPathBegin: the first directional
+// light (its rotation turning (0,-1,0)) or a default sun, over the first ambient light's energy or
+// 0.3; the four point lights nearest the camera among the visible ones whose range reaches into
+// the view (unused slots have zero colour); fog to the clear colour.
 static void SetLights(Camera3D camera)
 {
     Vector3 dir = Vector3Normalize((Vector3){0.5f, -1.0f, 0.3f}), color = {1, 1, 1}, ambient = {0.3f, 0.3f, 0.3f};
     bool haveSun = false, haveAmbient = false;
+    PointLight near[POINT_LIGHTS];
+    int nearCount = 0;
     int count;
     StoreId *ids = ThingsOf(run.world.light, &count);
     for (int i = 0; ids && i < count; i++)
@@ -1466,6 +2066,8 @@ static void SetLights(Camera3D camera)
                                ? StoreSymbolName(&run.store, type.as.sym)
                                : NULL;
         float energy = FieldFloat(ids[i], "energy", 1);
+        StoreValue c;
+        Vector3 tint = Field(ids[i], "color", &c) && c.type == STORE_VEC3 ? c.as.v : (Vector3){1, 1, 1};
         Matrix m;
         if (name && !strcmp(name, "directional") && !haveSun && World3DWorldMatrix(&run.world, ids[i], &m))
         {
@@ -1474,8 +2076,6 @@ static void SetLights(Camera3D camera)
             Vector3 turned = Vector3Subtract(Vector3Transform((Vector3){0, -1, 0}, m), at);
             if (Vector3Length(turned) > 0)
                 dir = Vector3Normalize(turned);
-            StoreValue c;
-            Vector3 tint = Field(ids[i], "color", &c) && c.type == STORE_VEC3 ? c.as.v : (Vector3){1, 1, 1};
             color = Vector3Scale(tint, energy);
         }
         else if (name && !strcmp(name, "ambient") && !haveAmbient)
@@ -1483,8 +2083,35 @@ static void SetLights(Camera3D camera)
             haveAmbient = true;
             ambient = (Vector3){energy, energy, energy};
         }
+        else if (name && !strcmp(name, "point") && FieldTrue(ids[i], "visible") &&
+                 World3DDrawMatrix(&run.world, ids[i], &m))
+        {
+            PointLight light = {{m.m12, m.m13, m.m14}, Vector3Scale(tint, energy), FieldFloat(ids[i], "range", 10), 0};
+            light.distance = Vector3Distance(light.position, camera.position);
+            if (!(light.range > 0) || !InView(light.position, light.range))
+                continue;
+            /* Kept sorted nearest first; a light farther than the fourth is dropped. */
+            int at = nearCount < POINT_LIGHTS ? nearCount++ : POINT_LIGHTS;
+            while (at > 0 && near[at - 1].distance > light.distance)
+            {
+                if (at < POINT_LIGHTS)
+                    near[at] = near[at - 1];
+                at--;
+            }
+            if (at < POINT_LIGHTS)
+                near[at] = light;
+        }
     }
     free(ids);
+    Vector3 positions[POINT_LIGHTS], colors[POINT_LIGHTS];
+    float ranges[POINT_LIGHTS];
+    for (int i = 0; i < POINT_LIGHTS; i++)
+    {
+        bool used = i < nearCount;
+        positions[i] = used ? near[i].position : (Vector3){0, 0, 0};
+        colors[i] = used ? near[i].color : (Vector3){0, 0, 0};
+        ranges[i] = used ? near[i].range : 1.0f;
+    }
     Color clear = {30, 32, 36, 255};
     Vector3 fog = {clear.r / 255.0f, clear.g / 255.0f, clear.b / 255.0f};
     float density = 0.02f;
@@ -1496,10 +2123,14 @@ static void SetLights(Camera3D camera)
         SetShaderValue(pass->shader, pass->lightDirLoc, &dir, SHADER_UNIFORM_VEC3);
         SetShaderValue(pass->shader, pass->lightColorLoc, &color, SHADER_UNIFORM_VEC3);
         SetShaderValue(pass->shader, pass->ambientLoc, &ambient, SHADER_UNIFORM_VEC3);
+        SetShaderValueV(pass->shader, pass->pointPositionLoc, positions, SHADER_UNIFORM_VEC3, POINT_LIGHTS);
+        SetShaderValueV(pass->shader, pass->pointColorLoc, colors, SHADER_UNIFORM_VEC3, POINT_LIGHTS);
+        SetShaderValueV(pass->shader, pass->pointRangeLoc, ranges, SHADER_UNIFORM_FLOAT, POINT_LIGHTS);
         SetShaderValue(pass->shader, pass->fogColorLoc, &fog, SHADER_UNIFORM_VEC3);
         SetShaderValue(pass->shader, pass->fogDensityLoc, &density, SHADER_UNIFORM_FLOAT);
         SetShaderValue(pass->shader, pass->viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
     }
+    run.pointLights = nearCount;
 }
 
 // Handler errors, kept by the sink with their tick, shown for five seconds along the bottom.
@@ -1624,16 +2255,18 @@ static void Draw(void *context, float alpha)
     if (run.audioReady)
     {
         CoreAudioSetListener(&run.audio, camera.position, Vector3Subtract(camera.target, camera.position), camera.up);
+        UpdateEmitters();
         CoreAudioUpdate(&run.audio);
     }
-    SetLights(camera);
     DrawPathBegin(&run.path, camera, GetScreenWidth(), GetScreenHeight());
+    SetLights(camera); /* after DrawPathBegin: point lights are chosen against its frustum */
     BeginMode3D(camera);
     AddTilemaps();
     UpdatePoses(dt);
     AddModels(camera);
     run.lastStats = DrawPathEnd(&run.path);
     CoreParticlesDraw(&run.particles, camera, NULL, NULL);
+    DrawViewmodels(camera);
     EndMode3D();
     DrawHud();
     DrawErrors();
@@ -2472,6 +3105,9 @@ static bool InitPresentation(void)
         pass->fogColorLoc = GetShaderLocation(pass->shader, "fogColor");
         pass->fogDensityLoc = GetShaderLocation(pass->shader, "fogDensity");
         pass->viewPosLoc = GetShaderLocation(pass->shader, "viewPos");
+        pass->pointPositionLoc = GetShaderLocation(pass->shader, "pointPosition");
+        pass->pointColorLoc = GetShaderLocation(pass->shader, "pointColor");
+        pass->pointRangeLoc = GetShaderLocation(pass->shader, "pointRange");
     }
     World3DSetBoneLookup(&run.world, BoneOf, NULL);
     if (!LoadHudFont())
@@ -2490,6 +3126,7 @@ static bool InitPresentation(void)
 static void FreePresentation(void)
 {
     World3DSetBoneLookup(&run.world, NULL, NULL);
+    FreeStatics();
     for (uint32_t i = 0; i < run.poseCapacity; i++)
     {
         free(run.poses[i].bones);
@@ -2515,6 +3152,7 @@ static void FreePresentation(void)
         if (run.passes[i].loaded)
             CoreUnloadShaders(&run.passes[i].shader, 1);
     memset(run.passes, 0, sizeof run.passes);
+    FreeEmitters(); /* before the audio service its voices belong to */
     CoreAudioFree(&run.audio);
     CoreDebugFree(&run.debug);
     CoreMouseCaptureRelease(&run.capture);
@@ -2703,6 +3341,7 @@ static void Shutdown(void *context)
                 printf("bench draw items %d visible %d draws %d shader-switches %d texture-switches %d\n",
                        run.lastStats.items, run.lastStats.visible, run.lastStats.draws,
                        run.lastStats.shaderSwitches, run.lastStats.textureSwitches);
+                PrintStatics();
                 for (int i = 0; i < 3; i++) /* as the overlay read on the last drawn frame */
                     printf("overlay: %s\n", run.overlayText[i]);
             }
@@ -2751,7 +3390,7 @@ static int Usage(const char *problem)
                     "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] "
                     "[--present] [--shot-every N] [--shot-dir DIR] [--no-time-limit] [--host PORT] "
                     "[--join ADDRESS:PORT] [--bot-until N] [--print-field KIND FIELD] [--print-count KIND] "
-                    "[--print-draw-position KIND] [--skin-on-cpu]\n");
+                    "[--print-draw-position KIND] [--skin-on-cpu] [--no-static-batch]\n");
     return 2;
 }
 
@@ -2832,6 +3471,8 @@ int GameRun(int argc, char **argv)
             handlerLimit = 0, takes = false;
         else if (!strcmp(flag, "--skin-on-cpu"))
             run.skinCpuForced = true, takes = false;
+        else if (!strcmp(flag, "--no-static-batch"))
+            run.noStaticBatch = true, takes = false;
         else if (strcmp(flag, "--ticks") && strcmp(flag, "--seed") && strcmp(flag, "--hash-every") &&
                  strcmp(flag, "--record") && strcmp(flag, "--replay") && strcmp(flag, "--save") &&
                  strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir") &&
@@ -2912,8 +3553,9 @@ int GameRun(int argc, char **argv)
         return Usage("--present is for --headless runs; a window presents anyway");
     if ((run.shotEvery || run.shotDir) && run.headless)
         return Usage("--shot-every and --shot-dir need a window");
-    if ((run.printDrawKind || run.skinCpuForced) && run.headless)
-        return Usage("--print-draw-position and --skin-on-cpu need a window (headless draws nothing)");
+    if ((run.printDrawKind || run.skinCpuForced || run.noStaticBatch) && run.headless)
+        return Usage("--print-draw-position, --skin-on-cpu and --no-static-batch need a window (headless draws "
+                     "nothing)");
     if (run.printDrawKind && !run.shotEvery)
         return Usage("--print-draw-position prints with each screenshot: give --shot-every too");
     if (run.shotEvery && !run.shotDir)

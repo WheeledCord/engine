@@ -279,6 +279,23 @@ static void GlChecks(void)
     Check(!DrawPathStaticBatch(&path, items, 10, merged, 0) && !DrawPathStaticBatch(&path, NULL, 3, merged, 4),
           "static batch: no room or no items merges nothing");
 
+    /* A rebuilt batch releases its old meshes, and the next upload takes the freed slot. */
+    uint32_t old = merged[0].mesh;
+    int count = path.meshCount;
+    Check(DrawPathMeshRelease(&path, old) && !DrawPathMeshRelease(&path, old) && !DrawPathMeshRelease(&path, 0) &&
+              !DrawPathMeshRelease(&path, 999),
+          "static batch: a merged mesh is released once; an unknown or released id is refused");
+    DrawItem stale = merged[0];
+    stale.mesh = old;
+    DrawPathBegin(&path, ViewCamera(), 64, 64);
+    DrawPathAdd(&path, &stale);
+    Check(path.itemCount == 0 && !DrawPathMeshPositions(&path, old, source.vertices, NULL) &&
+              !DrawPathMeshUpdate(&path, old, &source),
+          "static batch: a released mesh is not drawn, rewritten or updated");
+    DrawPathEnd(&path);
+    Check(DrawPathStaticBatch(&path, items, 3, merged, 4) == 1 && merged[0].mesh == old && path.meshCount == count,
+          "static batch: the next merged mesh reuses the released slot instead of growing the path");
+
     /* Updating a mesh keeps its id and takes the new contents. */
     Mesh plane = GenMeshPlane(1, 1, 1, 1);
     Check(DrawPathMeshUpdate(&path, cube, &plane) == cube && path.meshes[cube - 1].vertexCount == plane.vertexCount,
