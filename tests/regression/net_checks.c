@@ -7,6 +7,7 @@
 // kinds differ; then a join over a lossy link, and a dedicated host. docs/developer/store.md §9.7.
 #include "checks.h"
 #include "core/store_net.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -727,8 +728,22 @@ int NetChecks(void)
     Expect(Placed(31, 0, 0, -1),
            "a thing dropped within a tick of its grab arriving ends owned by the host, with no parent, everywhere");
 
+    // An interpolated field at rest arrives with its exact bits: a -0.0 (a drop placement's roll
+    // is -atan2f(0, 1)) blended between two equal states must not come out +0.0, or the state hashes
+    // of a still game differ (found by tests/regression/net_carry).
+    StoreValue negativeZero = Vec(-0.0f, 1, 0);
+    StoreSet(host, units[40], POSITION, &negativeZero);
+
     // Still for 60 ticks: every machine agrees.
     Step(60);
+    bool signKept = true;
+    for (int i = 1; i <= 2; i++)
+    {
+        StoreValue v;
+        signKept = signKept && StoreGet(&machines[i].store, Unit(&machines[i].store, 40), POSITION, &v) &&
+                   signbit(v.as.v.x) && v.as.v.y == 1;
+    }
+    Expect(signKept, "an interpolated -0.0 at rest reaches both clients as -0.0");
     uint64_t hashes[3];
     for (int i = 0; i < 3; i++)
         hashes[i] = StoreNetStateHash(&machines[i].net);

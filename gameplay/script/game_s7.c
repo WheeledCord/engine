@@ -817,12 +817,15 @@ static bool WriteField(s7_scheme *sc, StoreId id, int field, s7_pointer value, b
     }
     if (d->type == STORE_LIST || d->type == STORE_SET || d->type == STORE_MAP)
     {
+        if (engine && (d->flags & STORE_ENGINE))
+            return snprintf(err, size, "%s on %s is written by the engine", d->name, KindName(kind)), false;
         StoreValue *keys, *values;
         int count = 0;
         bool map = d->type == STORE_MAP;
         bool ok = ConvertList(sc, value, d, map, &keys, &values, &count, err, size);
         if (ok && !map)
-            ok = StoreSetList(store, id, field, values, count) ||
+            ok = (engine ? StoreSetListEngine(store, id, field, values, count)
+                         : StoreSetList(store, id, field, values, count)) ||
                  (FailureText(id, field, err, size), false);
         if (ok && map)
         {
@@ -2136,14 +2139,16 @@ static s7_pointer SchemeRemove(s7_scheme *sc, s7_pointer args)
     return s7_make_boolean(sc, RemoveThing(sc, ThingArg(sc, s7_car(args), "remove", 1)));
 }
 
-static void Place(s7_scheme *sc, StoreId id, const char *field, Vector3 value)
+/* Writes a placement. engine: part of a tree change the store has already checked; otherwise
+   through the rules (a detach! of a thing that is already a root only places it). */
+static void Place(s7_scheme *sc, StoreId id, const char *field, Vector3 value, bool engine)
 {
     int index = StoreFieldIndex(game.store, StoreKindOf(game.store, id), field);
     StoreValue v;
     memset(&v, 0, sizeof v);
     v.type = STORE_VEC3;
     v.as.v = value;
-    if (index >= 0 && !StoreSetEngine(game.store, id, index, &v))
+    if (index >= 0 && !(engine ? StoreSetEngine(game.store, id, index, &v) : StoreSet(game.store, id, index, &v)))
         StoreFailure(sc, id, index);
 }
 
@@ -2169,15 +2174,17 @@ static s7_pointer SchemeAttach(s7_scheme *sc, s7_pointer args)
     if (!StoreAttach(game.store, id, parent))
         return StoreFailure(sc, id, -1);
     if (at)
-        Place(sc, id, "position", position);
+        Place(sc, id, "position", position, true);
     if (rotated)
-        Place(sc, id, "rotation", rotation);
+        Place(sc, id, "rotation", rotation, true);
     return s7_car(args);
 }
 
 /* (detach! thing :at world-position :up normal :yaw y) or (detach! thing :keep-world #t). The
    world transform is world3d's: :keep-world asks a world-position procedure when one is bound,
-   and :up tilts the thing by the normal's slopes (exact for an upright normal). */
+   and :up tilts the thing by the normal's slopes (exact for an upright normal). A thing that is
+   already a root and is given a placement is only placed, under the rules: an orphaned handler
+   seats the thing the engine has just detached (B3.7, C4). */
 static s7_pointer SchemeDetach(s7_scheme *sc, s7_pointer args)
 {
     StoreId id = ThingArg(sc, s7_car(args), "detach!", 1);
@@ -2195,16 +2202,17 @@ static s7_pointer SchemeDetach(s7_scheme *sc, s7_pointer args)
             return Fail(sc, "detach! :keep-world: world-position gave no vec3");
         at = true;
     }
-    if (!StoreDetach(game.store, id))
+    bool root = IsNull(StoreParent(game.store, id)) && StoreAlive(game.store, id);
+    if (!(root && (at || up || yawP)) && !StoreDetach(game.store, id))
         return StoreFailure(sc, id, -1);
     if (at)
-        Place(sc, id, "position", position);
+        Place(sc, id, "position", position, !root);
     if (up || yawP)
     {
         float length = sqrtf(normal.x * normal.x + normal.y * normal.y + normal.z * normal.z);
         Vector3 n = up && length > 0 ? (Vector3){normal.x / length, normal.y / length, normal.z / length}
                                      : (Vector3){0, 1, 0};
-        Place(sc, id, "rotation", (Vector3){atan2f(n.z, n.y), (float)yaw, -atan2f(n.x, n.y)});
+        Place(sc, id, "rotation", (Vector3){atan2f(n.z, n.y), (float)yaw, -atan2f(n.x, n.y)}, !root);
     }
     return s7_car(args);
 }

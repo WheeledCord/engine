@@ -818,6 +818,112 @@ static void FrameChecks(void)
     StoreFree(&s);
 }
 
+// ---- carrying: parent-changed and orphaned (proposal B1, B3.7, C4) ----------------------------
+static char carryLog[512];
+static void CarryRef(char *out, size_t size, const StoreValue *v)
+{
+    if (v->type == STORE_NONE)
+        snprintf(out, size, "none");
+    else if (v->type == STORE_REF && v->as.ref.index == UINT32_MAX)
+        snprintf(out, size, "root");
+    else
+        snprintf(out, size, "%u", v->as.ref.index);
+}
+
+static bool CarryHandler(Store *s, StoreId self, StoreSymbol event, const StoreValue *args, int count,
+                         void *user)
+{
+    (void)self;
+    (void)user;
+    char line[96], was[16], now[16];
+    if (count == 2)
+    {
+        CarryRef(was, sizeof was, &args[0]);
+        CarryRef(now, sizeof now, &args[1]);
+        snprintf(line, sizeof line, "%s(%s,%s)%s ", StoreSymbolName(s, event), was, now,
+                 StorePhaseNow(s) == STORE_PHASE_PRESENTATION ? "" : "!");
+    }
+    else
+        snprintf(line, sizeof line, "%s(owner %d)%s ", StoreSymbolName(s, event), StoreOwner(s, self),
+                 StorePhaseNow(s) == STORE_PHASE_GAMEPLAY ? "" : "!");
+    if (strlen(carryLog) + strlen(line) < sizeof carryLog)
+        strcat(carryLog, line);
+    return true;
+}
+
+static void CarryStoreChecks(void)
+{
+    Store s;
+    StoreInit(&s, 7);
+    StoreFieldDecl fields[] = {Field("weight", STORE_INT, 0, Int(1))};
+    StoreKind crate = StoreDeclareKind(&s, "crate", -1, fields, 1, NULL);
+    StoreKind holder = StoreDeclareKind(&s, "holder", -1, NULL, 0, NULL);
+    StoreKind plain = StoreDeclareKind(&s, "plain", -1, fields, 1, NULL);
+    StoreKindSetHandler(&s, crate, CarryHandler, NULL);
+    StoreKindSetHandler(&s, plain, CarryHandler, NULL);
+    StoreKindHandles(&s, crate, StoreIntern(&s, "parent-changed"), true);
+    StoreKindHandles(&s, crate, StoreIntern(&s, "orphaned"), true);
+    StoreId c = StoreSpawn(&s, crate, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreId h = StoreSpawn(&s, holder, 1, STORE_NULL, STORE_NO_SYMBOL);
+    StoreId p = StoreSpawn(&s, plain, 0, STORE_NULL, STORE_NO_SYMBOL);
+    carryLog[0] = 0;
+    StoreFrame(&s, 0.016f);
+    Expect(!strcmp(carryLog, "parent-changed(none,root) "),
+           "parent-changed runs when a thing appears, was none, and only for kinds that handle it");
+    char expect[128];
+    StoreAttach(&s, c, h);
+    StoreAttach(&s, p, h);
+    carryLog[0] = 0;
+    StoreFrame(&s, 0.016f);
+    snprintf(expect, sizeof expect, "parent-changed(root,%u) ", h.index);
+    Expect(!strcmp(carryLog, expect), "an attach fires parent-changed in presentation with was and now");
+    if (strcmp(carryLog, expect))
+        printf("      got: %s\n", carryLog);
+    StoreValue heavy = Int(5);
+    StoreSet(&s, c, 0, &heavy);
+    carryLog[0] = 0;
+    StoreFrame(&s, 0.016f);
+    Expect(!carryLog[0], "a field change is not a parent change");
+    StoreDetach(&s, c);
+    StoreAttach(&s, c, h);
+    carryLog[0] = 0;
+    StoreFrame(&s, 0.016f);
+    Expect(!carryLog[0], "a detach and attach back between two frames is invisible");
+    StoreDetach(&s, c);
+    carryLog[0] = 0;
+    StoreFrame(&s, 0.016f);
+    snprintf(expect, sizeof expect, "parent-changed(%u,root) ", h.index);
+    Expect(!strcmp(carryLog, expect), "a detach fires parent-changed with was the old parent");
+
+    // The host (local owners 0 and 1): removing the holder detaches the guest and runs its orphaned
+    // on the host the next tick, once; the plain guest, which has no orphaned, hears nothing.
+    StoreAttach(&s, c, h);
+    StoreRemove(&s, h);
+    carryLog[0] = 0;
+    StoreTick(&s, 1.0f / 60.0f);
+    Expect(!carryLog[0] && StoreAlive(&s, c) && StoreParent(&s, c).index == UINT32_MAX &&
+               StoreOwner(&s, c) == 0 && StoreParent(&s, p).index == UINT32_MAX,
+           "removing a holder detaches its guests to the host at the end of the tick");
+    StoreTick(&s, 1.0f / 60.0f);
+    StoreTick(&s, 1.0f / 60.0f);
+    Expect(!strcmp(carryLog, "orphaned(owner 0) "), "the guest's orphaned runs on the host, once, as gameplay");
+    if (strcmp(carryLog, "orphaned(owner 0) "))
+        printf("      got: %s\n", carryLog);
+
+    // A client (local owner 2) that removes its own holder leaves orphaned to the host.
+    int client[1] = {2};
+    StoreSetLocalOwners(&s, client, 1);
+    StoreId mine = StoreSpawn(&s, holder, 2, STORE_NULL, STORE_NO_SYMBOL);
+    StoreAttach(&s, c, mine);
+    StoreRemove(&s, mine);
+    carryLog[0] = 0;
+    StoreTick(&s, 1.0f / 60.0f);
+    StoreTick(&s, 1.0f / 60.0f);
+    Expect(!carryLog[0] && StoreParent(&s, c).index == UINT32_MAX && StoreOwner(&s, c) == 0,
+           "a machine that is not the host detaches the guest but does not run its orphaned");
+    StoreFree(&s);
+}
+
 // ---- randomness, snapshot, restore, hash ------------------------------------------------------
 static StoreKind BuildWorld(Store *s, uint64_t seed, StoreId *out)
 {
@@ -1197,6 +1303,7 @@ int StoreChecks(void)
     TimerChecks();
     RuleChecks();
     FrameChecks();
+    CarryStoreChecks();
     SnapshotChecks();
     SaveChecks();
     LocalChecks();

@@ -1741,7 +1741,9 @@ static void Apply(StoreNet *net, int from, const State *was, const State *now)
     TellArrived(net, created);
 }
 
-static float Blend(float a, float b, float t) { return a + (b - a) * t; }
+// Two equal states give the later one's exact bits: a -0.0 at rest stays -0.0 (-0.0 + 0 * t is +0.0),
+// so a still game hashes the same everywhere.
+static float Blend(float a, float b, float t) { return a == b ? b : a + (b - a) * t; }
 
 /* A peer's things' registered fields at renderTick, between the state written (a) and the first
    received after renderTick (b; none: hold a, no extrapolation). Across a parent change there is no

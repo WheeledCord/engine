@@ -40,6 +40,7 @@ struct StoreKindData
     unsigned char *shared, *local; /* rowCapacity blocks each */
     unsigned char *shadow;         /* shared blocks as the last StoreFrame saw them */
     StoreId *shadowThing;          /* which thing each shadow row belongs to */
+    StoreId *shadowParent;         /* each shadow row's parent as the last StoreFrame saw it */
     uint32_t rows, rowCapacity, shadowCapacity;
     uint32_t *freeRows; /* capacity is always rowCapacity, so freeing never allocates */
     uint32_t freeCount;
@@ -53,6 +54,7 @@ struct StoreKindData
     StoreHandlerFn callHandler;
     void *callUser;
     bool handlesTick, handlesFrame, handlesDrawHud, watches;
+    StoreSymbol parentChanged; /* parent-changed when the kind handles it, else STORE_NO_SYMBOL */
     StoreSymbol *changed; /* per field: its <field>-changed event, or STORE_NO_SYMBOL */
 };
 

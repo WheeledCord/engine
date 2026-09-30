@@ -1130,7 +1130,7 @@ static void DrawHud(void)
         }
         case HUD_RECT: DrawRectangle((int)h->x, (int)h->y, (int)h->w, (int)h->h, h->color); break;
         case HUD_RING:
-            DrawRing((Vector2){h->x, h->y}, fmaxf(h->w - 1.5f, 0), h->w + 1.5f, 0, 360, 48, h->color);
+            DrawRing((Vector2){h->x, h->y}, fmaxf(h->w - 1.5f, 0), h->w + 1.5f, -90, -90 + 360 * h->h, 48, h->color);
             break;
         case HUD_IMAGE:
         {
@@ -1469,8 +1469,22 @@ static s7_pointer SchemeRaycast(s7_scheme *sc, s7_pointer args)
     if (!VecArg(sc, s7_car(args), "raycast", 1, &from) || !VecArg(sc, s7_cadr(args), "raycast", 2, &dir) ||
         !NumberArg(sc, s7_caddr(args), "raycast", 3, &max))
         return s7_f(sc);
+    // :ignore is a thing, #f, or a list of things (a soldier and the item in its hand, C4).
     s7_pointer p = GameS7KeywordArg(sc, args, "ignore");
-    if (p && p != s7_f(sc) && !ThingArg(sc, p, "raycast", 4, &ignore))
+    if (p && s7_is_pair(p))
+    {
+        StoreId ignored[16];
+        int count = 0;
+        for (; s7_is_pair(p); p = s7_cdr(p))
+        {
+            if (count == 16)
+                return GameS7Error(sc, "raycast: :ignore takes 16 things at most");
+            if (s7_car(p) != s7_f(sc) && !ThingArg(sc, s7_car(p), "raycast", 4, &ignored[count++]))
+                return s7_f(sc);
+        }
+        return Hit(sc, World3DRaycastIgnoring(&run.world, from, dir, max, ignored, count, false));
+    }
+    if (p && p != s7_f(sc) && !s7_is_null(sc, p) && !ThingArg(sc, p, "raycast", 4, &ignore))
         return s7_f(sc);
     return Hit(sc, World3DRaycast(&run.world, from, dir, max, ignore));
 }
@@ -1530,14 +1544,46 @@ static s7_pointer SchemeOverlapping(s7_scheme *sc, s7_pointer args)
     return list;
 }
 
+// The first camera under a thing, depth first in child order, or STORE_NULL.
+static StoreId CameraUnder(StoreId thing)
+{
+    for (StoreId c = StoreFirstChild(&run.store, thing); StoreAlive(&run.store, c); c = StoreNextSibling(&run.store, c))
+    {
+        if (StoreKindIs(&run.store, StoreKindOf(&run.store, c), run.world.camera))
+            return c;
+        StoreId below = CameraUnder(c);
+        if (StoreAlive(&run.store, below))
+            return below;
+    }
+    return STORE_NULL;
+}
+
+/* (aimed-at camera 'kind distance), or (aimed-at 'kind distance) from a handler: the camera is then
+   the first one under the handler's thing (a soldier's eye, C4). Areas count as targets by their
+   sphere, since a carried item is an area that rays otherwise walk through. */
 static s7_pointer SchemeAimedAt(s7_scheme *sc, s7_pointer args)
 {
     StoreId camera;
     StoreKind kind;
     float distance;
     Vector3 from;
-    if (!ThingArg(sc, s7_car(args), "aimed-at", 1, &camera) || !KindArg(sc, s7_cadr(args), "aimed-at", &kind) ||
-        !NumberArg(sc, s7_caddr(args), "aimed-at", 3, &distance))
+    if (s7_is_symbol(s7_car(args)))
+    {
+        if (!s7_is_null(sc, s7_cddr(args)))
+            return GameS7Error(sc, "aimed-at: (aimed-at 'kind distance) or (aimed-at camera 'kind distance)");
+        StoreId self = StoreCurrent(&run.store);
+        camera = StoreAlive(&run.store, self) ? CameraUnder(self) : STORE_NULL;
+        if (!StoreAlive(&run.store, camera))
+            return Refuse(sc, "aimed-at 'kind distance looks through a camera under the handler's thing, and %s",
+                          StoreAlive(&run.store, self) ? "it has none; pass one: (aimed-at eye 'kind distance)"
+                                                       : "no handler is running; pass a camera");
+        if (!KindArg(sc, s7_car(args), "aimed-at", &kind) || !NumberArg(sc, s7_cadr(args), "aimed-at", 2, &distance))
+            return s7_f(sc);
+    }
+    else if (s7_is_null(sc, s7_cddr(args)))
+        return GameS7Error(sc, "aimed-at: (aimed-at 'kind distance) or (aimed-at camera 'kind distance)");
+    else if (!ThingArg(sc, s7_car(args), "aimed-at", 1, &camera) || !KindArg(sc, s7_cadr(args), "aimed-at", &kind) ||
+             !NumberArg(sc, s7_caddr(args), "aimed-at", 3, &distance))
         return s7_f(sc);
     if (!World3DWorldPosition(&run.world, camera, &from))
         return GameS7Error(sc, "aimed-at: the first argument must be a node");
@@ -1551,7 +1597,8 @@ static s7_pointer SchemeAimedAt(s7_scheme *sc, s7_pointer args)
             dir = Vector3RotateByQuaternion(dir, QuaternionFromEuler(r.as.v.x, r.as.v.y, r.as.v.z));
     }
     StoreId parent = StoreParent(&run.store, camera);
-    World3DHit hit = World3DRaycast(&run.world, from, dir, distance, StoreAlive(&run.store, parent) ? parent : camera);
+    StoreId ignore = StoreAlive(&run.store, parent) ? parent : camera;
+    World3DHit hit = World3DRaycastIgnoring(&run.world, from, dir, distance, &ignore, 1, true);
     for (StoreId t = hit.hit ? hit.thing : STORE_NULL; StoreAlive(&run.store, t); t = StoreParent(&run.store, t))
         if (StoreKindIs(&run.store, StoreKindOf(&run.store, t), kind))
             return GameS7Thing(sc, t);
@@ -1685,17 +1732,21 @@ static s7_pointer SchemeDrawRect(s7_scheme *sc, s7_pointer args)
     return s7_t(sc);
 }
 
+// (draw-ring x y r [fill] :color c): fill, 0 to 1, draws that much of the ring clockwise from the
+// top (a hold ring, C4); 1 when left out.
 static s7_pointer SchemeDrawRing(s7_scheme *sc, s7_pointer args)
 {
-    float v[3];
+    float v[4] = {0, 0, 0, 1};
     s7_pointer p = args;
     for (int i = 0; i < 3; i++, p = s7_cdr(p))
         if (!NumberArg(sc, s7_car(p), "draw-ring", i + 1, &v[i]))
             return s7_f(sc);
+    if (s7_is_pair(p) && !s7_is_keyword(s7_car(p)) && !NumberArg(sc, s7_car(p), "draw-ring", 4, &v[3]))
+        return s7_f(sc);
     Color color = ColorValue(sc, GameS7KeywordArg(sc, args, "color"), WHITE);
     HudCall *h = HudAdd(sc, HUD_RING, "draw-ring");
     if (h)
-        h->x = v[0], h->y = v[1], h->w = v[2], h->color = color;
+        h->x = v[0], h->y = v[1], h->w = v[2], h->h = v[3] != v[3] ? 1 : fminf(fmaxf(v[3], 0), 1), h->color = color;
     return s7_t(sc);
 }
 
@@ -2029,7 +2080,7 @@ static bool RegisterCalls(void)
         {"line-of-sight?", SchemeLineOfSight, 2, 0, false, "(line-of-sight? from to): nothing static between"},
         {"nearest", SchemeNearest, 2, 0, true, "(nearest 'kind point :max m :where predicate) -> thing or #f"},
         {"overlapping", SchemeOverlapping, 2, 0, false, "(overlapping area 'kind) -> list"},
-        {"aimed-at", SchemeAimedAt, 3, 0, false, "(aimed-at camera 'kind distance) -> thing or #f"},
+        {"aimed-at", SchemeAimedAt, 2, 1, false, "(aimed-at [camera] 'kind distance) -> thing or #f"},
         {"path-next", SchemePathNext, 3, 0, false, "(path-next tilemap from to) -> vec3"},
         {"cell->world", SchemeCellToWorld, 3, 0, false, "(cell->world tilemap x z) -> vec3"},
         {"world->cell", SchemeWorldToCell, 2, 0, false, "(world->cell tilemap point) -> (x z) or #f"},
@@ -2037,7 +2088,7 @@ static bool RegisterCalls(void)
         {"teleport!", SchemeTeleport, 1, 1, false, "(teleport! [node] world-position)"},
         {"draw-text", SchemeDrawText, 3, 0, true, "(draw-text text x y :size s :color c :align 'left|'center|'right)"},
         {"draw-rect", SchemeDrawRect, 4, 0, true, "(draw-rect x y w h :color c)"},
-        {"draw-ring", SchemeDrawRing, 3, 0, true, "(draw-ring x y r :color c)"},
+        {"draw-ring", SchemeDrawRing, 3, 0, true, "(draw-ring x y r [fill] :color c)"},
         {"draw-image", SchemeDrawImage, 3, 0, false, "(draw-image \"file\" x y)"},
         {"screen-width", SchemeScreenWidth, 0, 0, false, "(screen-width)"},
         {"screen-height", SchemeScreenHeight, 0, 0, false, "(screen-height)"},
