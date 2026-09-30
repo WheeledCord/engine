@@ -4,7 +4,6 @@
 #ifndef CORE_PARTICLES_H
 #define CORE_PARTICLES_H
 
-#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 
@@ -109,10 +108,5 @@ typedef bool (*CoreParticleLookFn)(const CoreParticle *particle, float t, CorePa
  * @return No value. */
 void CoreParticlesDraw(const CoreParticles *pool, Camera camera, CoreParticleLookFn look, void *user);
 
-/* A particle pool as an engine type, "particles", created with an optional capacity (default 512):
-   count (read-only), and a template a script sets before emitting -- life, size-start, size-end,
-   gravity, drag. emit! copies the template with a given position and velocity; clear! empties the
-   pool. Drawing is a caller-owned pool and camera, so it is not reachable from a script. */
-extern const EngineType CoreParticlesType;
 
 #endif

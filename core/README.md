@@ -3,11 +3,6 @@
 Modules are ordinary C translation units, built into `build/core/libcore.a`. Public headers expose raylib-native types. Core includes only its own files, raylib and system headers.
 
 - `engine`: window lifetime, accumulator loop, project callback signatures and input buffering.
-- `object`: engine types described once — properties, methods and signals in a table beside the
-  type — and a caller-owned pool of objects named by generational handles, with signal connections.
-  Audio, camera2d, collision2d, the network clocks, particles, texture, timer and waypoints each
-  declare their type in their own file. No Scheme frontend reads these tables: a Scheme game reaches
-  the engine through the store's frontend (`gameplay/script/game_s7.c`).
 - `store`: the world store the Scheme-first game runner is built on — kinds with typed fields
   (scalars and bounded lists, sets, maps and grids) in per-kind pools, things named by generational
   handles in a tree whose root decides the owner, the ordered tick (commands, timers, `tick`

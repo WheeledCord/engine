@@ -126,40 +126,6 @@
         "CoreNetInterpolatorAdvance",
         "CoreNetInterpolatorRenderTick"
       ]
-    },
-    {
-      "name": "EngineObjects",
-      "source": "core/object.h",
-      "output": "docs/api/core/EngineObjects.xml",
-      "symbols": [
-        "EngineTypeProperty",
-        "EngineTypeMethod",
-        "EngineTypeSignal",
-        "EngineTypeIs",
-        "EngineValueConvert",
-        "EngineValueTypeName",
-        "EnginePropertyGet",
-        "EnginePropertySet",
-        "EngineMethodInvoke",
-        "EngineObjectsInit",
-        "EngineObjectsFree",
-        "EngineObjectsRegisterType",
-        "EngineObjectsTypeNamed",
-        "EngineObjectCreate",
-        "EngineObjectAdopt",
-        "EngineObjectDestroy",
-        "EngineObjectAlive",
-        "EngineObjectTypeOf",
-        "EngineObjectData",
-        "EngineObjectGet",
-        "EngineObjectSet",
-        "EngineObjectCall",
-        "EngineCallObject",
-        "EngineObjectConnect",
-        "EngineObjectDisconnect",
-        "EngineObjectEmit",
-        "EngineObjectsStep"
-      ]
     }
   ]
 }

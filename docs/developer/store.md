@@ -11,14 +11,14 @@ Rules that hold for every task:
 - Nothing here removes or changes an existing API. Games on the entity, object and net-sync paths
   (Trenchfoot, Skyrift) build and run unchanged. New code goes in new files. (That held while the
   store was built; phase 4 later retired the entity, net-sync and old script paths once Trenchfoot
-  had moved to the store and no game used them. `core/object.h` stays.)
+  had moved to the store and no game used them.)
 - `core/` depends only on core, raylib and system headers; the build checks it. Nothing in `core/`
   includes `s7.h`.
 - No new file opens a window or touches GL unless it says so here (`draw_path.c` and the
   presentation side of the runner). The store, the built-in kinds, saving, recording and replay run
   with no window and no GL, so a headless process links and runs them all.
 - C99, `-Wall -Wextra -Wpedantic -Werror`, MPL header on every new file, doc comments (`/** */`)
-  on public functions in the style of `core/object.h`. `make smoke` passes with zero warnings.
+  on public functions in the style of `core/store.h`. `make smoke` passes with zero warnings.
 - Floats are `float` (32-bit) everywhere in the store: one representation for snapshot, compare,
   save and hash. Determinism is per build (B4), not across machines.
 - Every check is a plain function in `tests/regression/<module>_checks.c` exposed through
