@@ -2261,8 +2261,14 @@ static void DrawOverlay(void)
 
 static void TakeShot(void)
 {
-    uint64_t tick = StoreTickCount(&run.store);
-    if (!run.shotEvery || !tick || tick % run.shotEvery || tick == run.lastShot)
+    /* A frame can run several ticks, so a shot is due on the first frame at or after each multiple
+       of --shot-every, and is named by that multiple: waiting for the exact tick misses it whenever
+       the frame that would have shown it ran two ticks. */
+    uint64_t now = StoreTickCount(&run.store);
+    if (!run.shotEvery || !now)
+        return;
+    uint64_t tick = now - now % run.shotEvery;
+    if (!tick || tick <= run.lastShot)
         return;
     run.lastShot = tick;
     char path[1024];
