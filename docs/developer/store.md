@@ -607,9 +607,8 @@ and the funclets of every closure reachable from it (E5's `freeze-let!`, in
 `experiments/e5_s7_determinism/traps.c` of the design repository), are made immutable. The clock
 and file functions listed in §5.5 are shadowed in that environment by procedures that raise the
 rule 3 error. `(reload)` loads the game files into a fresh environment, re-registers every kind's
-handlers (kinds keep their ids; a kind whose fields changed is re-declared only if the layout is
-identical, otherwise the reload is refused with a message naming the kind and field: migrating
-fields waits for phase 2), and re-resolves cached closures. The stdin REPL evaluates in that
+handlers (kinds keep their ids; a kind whose fields changed is migrated, as "Reload migrates changed
+kinds" below says), and re-resolves cached closures. The stdin REPL evaluates in that
 environment between frames, as `script_s7.c`'s does, and records each line as a developer command
 in the recording (§6.3).
 
@@ -791,6 +790,10 @@ void ReplayClose(Replay *);
 
 A command is `{StoreId target; char event[32]; StoreValue args[4]; int count}`, written as text
 inside a binary stream is fine; simplest is a small binary format with a magic and a version.
+Version 3 gives each command a kind: a player command as above, or a REPL line (`ReplayCommand.kind`
+`REPLAY_COMMAND_REPL`, its `text`), in the order they reached the store; the commands a REPL line
+queued are not recorded, since replaying the line queues them again. Versions 1 and 2 still read.
+`--repl-file FILE` feeds the REPL lines `TICK TEXT` just before each tick TICK (§5.7).
 Replay refuses a file whose kinds hash differs from the loaded game's (`StoreKindsHash(store)`: FNV
 over every kind's name and field declarations) with a message naming the mismatch. A replay in a
 fresh process with the same build, seed and file reaches the same `StoreHash` at every tick; the

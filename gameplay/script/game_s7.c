@@ -61,6 +61,15 @@ typedef struct Method
     GameS7Function function;
 } Method;
 
+/* A kind the running reload declared again with other fields: its own fields as they were, names
+   copied, so a reload that fails can declare it back (§5.7). */
+typedef struct Migrated
+{
+    StoreKind kind;
+    int count;
+    StoreFieldDecl *fields;
+} Migrated;
+
 typedef struct Recent
 {
     StoreKind kind;
@@ -88,6 +97,9 @@ static struct
     s7_pointer dispatch, loadFile, repl, freeze, guard;
     char gamePath[512], loading[512], prelude[512];
     bool loadingNow, reloadRequested;
+    bool inRepl;                  /* GameS7Eval is evaluating a line */
+    Migrated *migrated;           /* kinds this reload declared again, to put back if it fails */
+    int migratedCount, migratedCapacity;
     /* the handler running now */
     StoreSymbol event;
     StoreKind eventKind;
@@ -107,6 +119,8 @@ static struct
 static bool Dispatch(Store *store, StoreId self, StoreSymbol event, const StoreValue *args,
                      int count, void *user);
 static bool Throttled(StoreKind kind, StoreSymbol event);
+static bool Networked(void);
+static void ReplOwnerCheck(s7_scheme *sc, StoreId id, int field);
 
 // ---- small helpers ----------------------------------------------------------------------------
 static bool IsNull(StoreId id) { return id.index == UINT32_MAX; }
@@ -919,6 +933,7 @@ static bool WriteField(s7_scheme *sc, StoreId id, int field, s7_pointer value, b
 static s7_pointer SetField(s7_scheme *sc, StoreId id, int field, s7_pointer value)
 {
     GameS7LimitCheck(sc);
+    ReplOwnerCheck(sc, id, field);
     char err[TEXT];
     if (!WriteField(sc, id, field, value, false, err, sizeof err))
         return Fail(sc, "%s", err);
@@ -928,6 +943,7 @@ static s7_pointer SetField(s7_scheme *sc, StoreId id, int field, s7_pointer valu
 // ---- the thing type ---------------------------------------------------------------------------
 static bool RemoveThing(s7_scheme *sc, StoreId id)
 {
+    ReplOwnerCheck(sc, id, -1);
     if (!StoreRemove(game.store, id))
         StoreFailure(sc, id, -1);
     return true;
@@ -1077,6 +1093,7 @@ static s7_pointer MapSet(s7_scheme *sc, s7_pointer args)
     StoreValue key, value;
     ConvertOrFail(sc, s7_cadr(args), d->key, d->name, &key);
     ConvertOrFail(sc, s7_caddr(args), d->element, d->name, &value);
+    ReplOwnerCheck(sc, view->id, view->field);
     if (!StoreMapSet(game.store, view->id, view->field, &key, &value))
         return StoreFailure(sc, view->id, view->field);
     return s7_caddr(args);
@@ -1123,6 +1140,7 @@ static s7_pointer SchemeMapRemove(s7_scheme *sc, s7_pointer args)
     const StoreFieldDecl *d = ViewDecl(sc, view);
     StoreValue key;
     ConvertOrFail(sc, s7_cadr(args), d->key, d->name, &key);
+    ReplOwnerCheck(sc, view->id, view->field);
     if (StoreMapRemove(game.store, view->id, view->field, &key))
         return s7_t(sc);
     if (Prefixed(StoreLastError(game.store), "missing"))
@@ -1163,6 +1181,7 @@ static s7_pointer GridFill(s7_scheme *sc, View *view, int x, int y, int w, int h
     const StoreFieldDecl *d = ViewDecl(sc, view);
     StoreValue v;
     ConvertOrFail(sc, value, d->element, d->name, &v);
+    ReplOwnerCheck(sc, view->id, view->field);
     if (!StoreGridFill(game.store, view->id, view->field, x, y, w, h, &v))
         return StoreFailure(sc, view->id, view->field);
     return value;
@@ -1515,6 +1534,49 @@ static const char *ChangedField(StoreKind kind, StoreKind base, const StoreField
     return NULL;
 }
 
+static void ForgetLast(void);
+
+// Keeps a kind's own fields as they are, before this load declares it again with others.
+static bool RememberKind(StoreKind kind)
+{
+    Store *store = game.store;
+    if (game.migratedCount == game.migratedCapacity)
+    {
+        int capacity = game.migratedCapacity ? game.migratedCapacity * 2 : 8;
+        Migrated *grown = realloc(game.migrated, (size_t)capacity * sizeof *grown);
+        if (!grown)
+            return false;
+        game.migrated = grown;
+        game.migratedCapacity = capacity;
+    }
+    StoreKind base = StoreKindBase(store, kind);
+    int first = base >= 0 ? StoreFieldCount(store, base) : 0, count = StoreFieldCount(store, kind) - first;
+    Migrated *m = &game.migrated[game.migratedCount];
+    m->kind = kind;
+    m->count = 0;
+    m->fields = calloc((size_t)count + 1, sizeof *m->fields);
+    if (!m->fields)
+        return false;
+    game.migratedCount++;
+    for (int i = 0; i < count; i++)
+    {
+        m->fields[i] = *StoreFieldAt(store, kind, first + i);
+        m->fields[i].name = Copy(m->fields[i].name);
+        if (!m->fields[i].name)
+            return ForgetLast(), false;
+        m->count++;
+    }
+    return true;
+}
+
+static void ForgetLast(void)
+{
+    Migrated *m = &game.migrated[--game.migratedCount];
+    for (int f = 0; f < m->count; f++)
+        free((char *)m->fields[f].name);
+    free(m->fields);
+}
+
 // (%kind-declare 'name 'base fields children settings)
 static s7_pointer SchemeKindDeclare(s7_scheme *sc, s7_pointer args)
 {
@@ -1561,18 +1623,38 @@ static s7_pointer SchemeKindDeclare(s7_scheme *sc, s7_pointer args)
         if (game.kinds[kind].staged)
             return Fail(sc, "define-kind %s: declared twice in %s", name, game.loading);
         if (StoreKindBase(store, kind) != base)
-            return Fail(sc, "reload refused: %s now extends %s instead of %s; changing a kind's "
-                            "fields waits for phase 2",
-                        name, base >= 0 ? KindName(base) : "nothing",
+            return Fail(sc, "%s refused: %s now extends %s instead of %s; a kind's base can't change while "
+                            "the game runs, so restart it to change the base",
+                        game.loadingNow ? "reload" : "define-kind", name, base >= 0 ? KindName(base) : "nothing",
                         StoreKindBase(store, kind) >= 0 ? KindName(StoreKindBase(store, kind)) : "nothing");
+        // Fields changed: a file being loaded again migrates the kind's things; the REPL does not,
+        // since the handlers of kinds derived from it would keep the old field positions.
         const char *changed = ChangedField(kind, base, own, ownCount);
-        if (changed)
-            return Fail(sc, "reload refused: kind %s changed field %s; migrating fields waits for "
-                            "phase 2",
+        if (changed && !game.loadingNow)
+            return Fail(sc, "define-kind %s: kind %s changed field %s; at the REPL a kind can only be "
+                            "declared again with the same fields. Change the game file and (reload), which "
+                            "migrates the things of the kind",
+                        name, name, changed);
+        if (changed && Networked())
+            return Fail(sc, "reload refused: kind %s changed field %s, and this is a networked session: every "
+                            "machine must declare the same kinds, and a reload can't change them on the "
+                            "others. Restart the session to change a kind's fields",
                         name, changed);
+        if (changed && !RememberKind(kind))
+            return Fail(sc, "out of memory declaring %s again", name);
+        if (changed && !StoreRedeclareKind(store, kind, own, ownCount))
+        {
+            ForgetLast(); // nothing changed
+            return Fail(sc, "reload refused: kind %s: %s", name, Rest(StoreLastError(store)));
+        }
     }
     else
     {
+        if (game.loadingNow && Networked())
+            return Fail(sc, "reload refused: kind %s is new, and this is a networked session: every machine "
+                            "must declare the same kinds, and a reload can't change them on the others. "
+                            "Restart the session to add a kind",
+                        name);
         const char *error = NULL;
         kind = StoreDeclareKind(store, name, base, own, ownCount, &error);
         if (kind < 0)
@@ -2387,6 +2469,35 @@ void GameS7SetNetwork(const GameS7Network *hooks)
         network = *hooks;
 }
 
+static bool Networked(void) { return network.session && network.session(network.user); }
+
+/* The REPL runs outside handlers, where the store applies no rule; in a networked session a write to
+   a thing another machine owns is refused all the same (rule 5, §5.7): that machine's next state
+   would overwrite it without a word. field is -1 for the thing itself (remove). */
+static void ReplOwnerCheck(s7_scheme *sc, StoreId id, int field)
+{
+    Store *store = game.store;
+    if (!game.inRepl || StorePhaseNow(store) != STORE_PHASE_NONE || !StoreAlive(store, id) ||
+        StoreOwnedHere(store, id) || !Networked())
+        return;
+    StoreKind kind = StoreKindOf(store, id);
+    const StoreFieldDecl *d = field >= 0 ? StoreFieldAt(store, kind, field) : NULL;
+    if (d && (d->flags & STORE_LOCAL))
+        return; // presentation: this machine's own
+    char owner[32], here[32], what[160];
+    if (d)
+        snprintf(what, sizeof what, "%s on %s #%u", d->name, KindName(kind), id.index);
+    else
+        snprintf(what, sizeof what, "%s #%u", KindName(kind), id.index);
+    Fail(sc,
+         "%s belongs to %s, and this REPL runs for %s, so it can't %s it: in a networked session the "
+         "owner's next state would overwrite it. Send a message instead: (send thing 'collect 'medkit), "
+         "with a matching (on (collect what) ...) in %s.",
+         what, Player(StoreOwner(store, id), owner, sizeof owner),
+         Player(network.player ? network.player(network.user) : 1, here, sizeof here), d ? "write" : "remove",
+         KindName(kind));
+}
+
 static s7_pointer SchemeLocalPlayer(s7_scheme *sc, s7_pointer args)
 {
     (void)args;
@@ -3097,9 +3208,47 @@ static bool LoadInto(const char *path)
     s7_int loc = s7_gc_protect(sc, env);
     Guard(sc, env);
     snprintf(game.loading, sizeof game.loading, "%s", actual);
+    // A kind whose fields change is migrated as the file declares it (§5.7); should the file then
+    // fail, those kinds are declared back and the world put back as this snapshot holds it.
+    StoreSnapshot *before = game.env ? StoreSnapshotTake(game.store) : NULL;
+    int *states = calloc((size_t)game.kindCapacity + 1, sizeof *states);
+    int stateCount = states ? game.kindCapacity : 0;
+    for (int k = 0; k < stateCount; k++)
+        states[k] = game.kinds[k].stateField;
+    game.migratedCount = 0;
     game.loadingNow = true;
     bool loaded = s7_call(sc, game.loadFile, s7_list(sc, 2, s7_make_string(sc, actual), env)) != s7_f(sc);
+    for (int i = 0; loaded && i < game.migratedCount; i++)
+        for (StoreKind k = 0; k < game.kindCapacity; k++)
+            if (IsScheme(k) && !game.kinds[k].staged && StoreKindIs(game.store, k, game.migrated[i].kind))
+            {
+                snprintf(line, sizeof line,
+                         "reload: kind %s extends %s, whose fields changed, but %s no longer declares it; its "
+                         "handlers may read the wrong fields until it is declared again",
+                         KindName(k), KindName(game.migrated[i].kind), path);
+                Report(line);
+            }
     FinishLoad(loaded);
+    if (!loaded && game.migratedCount)
+    {
+        char names[300] = "";
+        for (int i = game.migratedCount - 1; i >= 0; i--)
+        {
+            StoreRedeclareKind(game.store, game.migrated[i].kind, game.migrated[i].fields, game.migrated[i].count);
+            size_t used = strlen(names);
+            snprintf(names + used, sizeof names - used, "%s%s", used ? ", " : "", KindName(game.migrated[i].kind));
+        }
+        bool restored = before && StoreSnapshotRestore(game.store, before);
+        for (int k = 0; k < stateCount; k++)
+            game.kinds[k].stateField = states[k];
+        snprintf(line, sizeof line, "reload failed, so the kinds it had declared again (%s) are back as they were%s",
+                 names, restored ? ", and so is the world" : "; their things' fields could not be put back");
+        Report(line);
+    }
+    while (game.migratedCount)
+        ForgetLast();
+    StoreSnapshotFree(before);
+    free(states);
     if (!loaded)
     {
         s7_gc_unprotect_at(sc, loc);
@@ -3137,7 +3286,10 @@ bool GameS7Eval(const char *text, char **answer)
     s7_scheme *sc = game.sc;
     game.reloadRequested = false;
     s7_pointer env = game.env ? game.env : s7_rootlet(sc);
+    bool nested = game.inRepl;
+    game.inRepl = true;
     s7_pointer result = s7_call(sc, game.repl, s7_list(sc, 2, s7_make_string(sc, text), env));
+    game.inRepl = nested;
     bool ok = s7_is_pair(result) && s7_car(result) == s7_t(sc);
     s7_pointer shown = s7_is_pair(result) ? s7_cdr(result) : result;
     if (answer)
@@ -3165,6 +3317,9 @@ void GameS7Close(void)
         free(game.kinds[k].events[1]);
     }
     free(game.kinds);
+    while (game.migratedCount)
+        ForgetLast();
+    free(game.migrated);
     free(game.thingKinds);
     free(game.thingGenerations);
     free(game.childSlots);

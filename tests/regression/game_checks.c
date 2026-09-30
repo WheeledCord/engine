@@ -10,6 +10,7 @@
 #include "checks.h"
 #include "core/store.h"
 #include "gameplay/script/game_s7.h"
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -345,6 +346,129 @@ static void LimitChecks(void)
     GameS7SetHandlerLimit(0);
 }
 
+// ---- (reload) migrates changed kinds (§5.7) ----------------------------------------------------
+static char storeLog[2048]; /* the store's "declared again" reports */
+
+static void CollectReports(int level, const char *text, va_list args)
+{
+    char line[512];
+    vsnprintf(line, sizeof line, text, args);
+    if (level == LOG_WARNING && strstr(line, "declared again"))
+    {
+        size_t used = strlen(storeLog);
+        snprintf(storeLog + used, sizeof storeLog - used, "%s\n", line);
+    }
+}
+
+static bool WriteText(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "w");
+    if (!file)
+        return false;
+    fputs(text, file);
+    return fclose(file) == 0;
+}
+
+static float Real(Store *s, StoreId id, const char *field)
+{
+    StoreValue v;
+    return Get(s, id, field, &v) ? (v.type == STORE_FLOAT ? v.as.f : v.type == STORE_INT ? (float)v.as.i : -1.0f)
+                                 : -12345.0f;
+}
+
+/* A world with a unit and a soldier (which extends unit) is reloaded with unit's fields changed: armor
+   added, tag removed, speed from a real to an integer. hp and ammo keep their values, the new handlers
+   read the new fields, and the report names tag and speed for both kinds. A reload that fails after
+   changing a kind puts the kind and the world back. */
+static void ReloadChecks(void)
+{
+    static const char *v1 =
+        "(define-kind unit (field hp 100) (field speed 1.5) (field tag 'none)\n"
+        "  (on (tick dt) (set! hp (- hp 1))))\n"
+        "(define-kind soldier (is unit) (field ammo 30)\n"
+        "  (on (tick dt) (set! ammo (- ammo 1))))\n";
+    static const char *v2 =
+        "(define-kind unit (field armor 5) (field hp 100) (field speed 2)\n"
+        "  (on (tick dt) (set! hp (- hp 1)) (set! armor (+ armor 1))))\n"
+        "(define-kind soldier (is unit) (field ammo 30)\n"
+        "  (on (tick dt) (set! ammo (- ammo 1)) (set! armor (+ armor 10))))\n";
+    static const char *broken =
+        "(define-kind unit (field armor 5) (field hp 100) (field speed 2) (field extra 1)\n"
+        "  (on (tick dt) (set! hp (+ hp 1000))))\n"
+        "(define-kind soldier (is unit) (field ammo 30))\n"
+        "(car '())\n";
+    FILE *probe = fopen("build/core/.game_probe", "w");
+    if (probe)
+        fclose(probe), remove("build/core/.game_probe");
+    const char *path = probe ? "build/core/regression_reload.scm" : "regression_reload.scm";
+    Store store;
+    errorCount = 0;
+    errorLog[0] = 0;
+    bool loaded = WriteText(path, v1) && StoreInit(&store, 5) && GameS7Open(&store, "core/scheme/kinds.scm") &&
+                  GameS7LoadGame(path) && Eval("(spawn 'unit)") && Eval("(spawn 'soldier)");
+    Expect(loaded, "the reload game loads and spawns a unit and a soldier");
+    if (!loaded)
+    {
+        GameS7Close();
+        StoreFree(&store);
+        return;
+    }
+    for (int i = 0; i < 3; i++)
+        StoreTick(&store, 1.0f / 60.0f);
+    Eval("(for-each (lambda (t) (set! (t 'speed) 9.5)) (things 'unit))");
+    StoreId unit = First(&store, "unit", 0), soldier = First(&store, "soldier", 0);
+    StoreKind unitKind = StoreKindOf(&store, unit), soldierKind = StoreKindOf(&store, soldier);
+    storeLog[0] = 0;
+    SetTraceLogCallback(CollectReports);
+    bool reloaded = WriteText(path, v2) && Answer("(reload)", "reloaded");
+    SetTraceLogCallback(NULL);
+    printf("game reload: unit hp %d armor %d speed %g tag %s; soldier hp %d ammo %d armor %d speed %g; reports:\n%s",
+           Int(&store, unit, "hp"), Int(&store, unit, "armor"), (double)Real(&store, unit, "speed"),
+           StoreFieldIndex(&store, unitKind, "tag") < 0 ? "gone" : "kept", Int(&store, soldier, "hp"),
+           Int(&store, soldier, "ammo"), Int(&store, soldier, "armor"), (double)Real(&store, soldier, "speed"),
+           storeLog);
+    Expect(reloaded && errorCount == 0, "(reload) with a kind's fields changed is not refused");
+    Expect(StoreKindOf(&store, unit) == unitKind && StoreKindOf(&store, soldier) == soldierKind,
+           "the things keep their kinds, and the kinds their ids");
+    Expect(Int(&store, unit, "hp") == 97 && Int(&store, soldier, "ammo") == 27 && Int(&store, soldier, "hp") == 100,
+           "a field whose name and type are unchanged keeps its value, in the kind and the derived kind");
+    Expect(Int(&store, unit, "armor") == 5 && Int(&store, soldier, "armor") == 5, "the new field has its default");
+    Expect(Int(&store, unit, "speed") == 2 && Int(&store, soldier, "speed") == 2,
+           "the field whose type changed has its new default");
+    Expect(StoreFieldIndex(&store, unitKind, "tag") < 0 && StoreFieldIndex(&store, soldierKind, "tag") < 0,
+           "the removed field is gone");
+    Expect(strstr(storeLog, "kind unit declared again: field speed changed from float to int") &&
+               strstr(storeLog, "kind unit declared again: field tag was removed") &&
+               strstr(storeLog, "kind soldier declared again: field speed changed") &&
+               strstr(storeLog, "kind soldier declared again: field tag was removed") && !strstr(storeLog, "field hp") &&
+               !strstr(storeLog, "field ammo"),
+           "the report lists the removed and the retyped field once per kind, and nothing else");
+    StoreTick(&store, 1.0f / 60.0f);
+    Expect(Int(&store, unit, "hp") == 96 && Int(&store, unit, "armor") == 6 && Int(&store, soldier, "ammo") == 26 &&
+               Int(&store, soldier, "armor") == 15,
+           "the reloaded handlers read and write the fields where they now are");
+
+    // A reload that fails after declaring unit again puts unit and the world back.
+    errorLog[0] = 0;
+    uint64_t hash = StoreHash(&store);
+    SetTraceLogCallback(CollectReports); /* quiet: the reports of going there and back */
+    bool refused = WriteText(path, broken) && Refused("(reload)", "reload refused; the reason is above");
+    SetTraceLogCallback(NULL);
+    printf("game reload that fails: %s", errorLog);
+    Expect(refused && strstr(errorLog, "the kinds it had declared again (unit) are back as they were, and so is the world"),
+           "a reload that fails after changing a kind says the kind and the world are back");
+    Expect(StoreFieldIndex(&store, unitKind, "extra") < 0 && StoreHash(&store) == hash,
+           "after the failed reload the kind has its fields and the world its hash");
+    StoreTick(&store, 1.0f / 60.0f);
+    Expect(Int(&store, unit, "hp") == 95 && Int(&store, unit, "armor") == 7 && Int(&store, soldier, "armor") == 25,
+           "the handlers of the last good reload still run");
+    Expect(Refused("(define-kind unit (field armor 5) (field hp 100))", "at the REPL a kind can only be declared again"),
+           "define-kind at the REPL with other fields is refused and points at (reload)");
+    GameS7Close();
+    StoreFree(&store);
+    remove(path);
+}
+
 int GameChecks(void)
 {
     failures = 0;
@@ -352,6 +476,7 @@ int GameChecks(void)
     WalkChecks();
     RuleChecks();
     LimitChecks();
+    ReloadChecks();
     GameS7SetErrorSink(NULL);
     Store store;
     Expect(StoreInit(&store, 1) && !GameS7Open(&store, "core/scheme/no-such-prelude.scm"),

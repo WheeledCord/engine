@@ -36,6 +36,7 @@ typedef struct SnapshotPool
     unsigned char *shared;
     uint32_t rows, freeCount;
     int sharedSize;
+    uint64_t layout; /* LayoutHash of the kind when taken: a redeclared kind no longer matches */
     uint32_t *freeRows;
 } SnapshotPool;
 
@@ -58,6 +59,8 @@ struct StoreSnapshot
 static bool MakeMessage(const Store *store, StoreMessage *m, StoreId target, StoreSymbol event,
                         const StoreValue *args, int count);
 static bool Push(StoreMessage **items, int *count, int *capacity, const StoreMessage *m);
+static uint64_t HashBytes(uint64_t h, const void *data, size_t size);
+static uint64_t HashU32(uint64_t h, uint32_t v);
 
 // ---- small helpers ----------------------------------------------------------------------------
 static void *Grow(void *items, int *capacity, int need, size_t size)
@@ -2423,6 +2426,314 @@ uint32_t StoreRandomLocal(Store *store, uint32_t n)
     return store ? Uniform(&store->localRandom, n) : 0;
 }
 
+// ---- declaring a kind again (docs/developer/store.md §5.7) -------------------------------------
+/* As Godot's GDScriptInstance::reload_members (modules/gdscript/gdscript.cpp) carries each member of
+   a reloaded script's instances to its new index by name, a redeclared kind's things keep each field
+   by name; here the type must match too, since a block holds raw bytes. */
+
+// Type and shape, flags aside: a field that only became :local, or stopped being, keeps its value.
+static bool SameType(const StoreFieldDecl *a, const StoreFieldDecl *b)
+{
+    if (a->type != b->type)
+        return false;
+    if (!IsCollection(a->type))
+        return true;
+    return a->element == b->element && a->max == b->max && (a->type != STORE_MAP || a->key == b->key) &&
+           (a->type != STORE_GRID || a->height == b->height);
+}
+
+static int FieldNamed(const StoreKindData *k, const char *name)
+{
+    for (int f = 0; f < k->fieldCount; f++)
+        if (!strcmp(k->fields[f].name, name))
+            return f;
+    return -1;
+}
+
+static const unsigned char *ConstTemplateOf(const StoreKindData *k, int field)
+{
+    return ((k->fields[field].flags & STORE_LOCAL) ? k->localTemplate : k->sharedTemplate) + k->offsets[field];
+}
+
+// What a snapshot's pool must match to be restored: every field's name, type, flags and place.
+static uint64_t LayoutHash(const StoreKindData *k)
+{
+    uint64_t h = HashU32(0xCBF29CE484222325ull, (uint32_t)k->fieldCount);
+    h = HashU32(HashU32(h, (uint32_t)k->sharedSize), (uint32_t)k->localSize);
+    for (int f = 0; f < k->fieldCount; f++)
+    {
+        const StoreFieldDecl *d = &k->fields[f];
+        h = HashBytes(h, d->name, strlen(d->name) + 1);
+        uint32_t words[8] = {(uint32_t)d->type, (uint32_t)d->element, (uint32_t)d->key, (uint32_t)d->max,
+                             (uint32_t)d->height, d->flags, (uint32_t)k->offsets[f], (uint32_t)k->sizes[f]};
+        for (int i = 0; i < 8; i++)
+            h = HashU32(h, words[i]);
+    }
+    return h;
+}
+
+/* A kind's new layout: base's fields (base as it will be), then own. A field whose name and type
+   are unchanged keeps old's default unless its declaration gives one; others take the declaration's. */
+static StoreKindData *Relayout(Store *store, const StoreKindData *old, const StoreKindData *base,
+                               const StoreFieldDecl *own, int count)
+{
+    const char *why = NULL;
+    int baseCount = base ? base->fieldCount : 0;
+    size_t most = (size_t)baseCount + (size_t)count + 1;
+    StoreKindData *k = calloc(1, sizeof *k);
+    bool *explicit = calloc(most, sizeof *explicit);
+    if (!k || !explicit)
+        goto oom;
+    k->base = old->base;
+    k->name = CopyString(old->name);
+    k->fields = calloc(most, sizeof *k->fields);
+    k->offsets = calloc(most, sizeof *k->offsets);
+    k->sizes = calloc(most, sizeof *k->sizes);
+    k->changed = calloc(most, sizeof *k->changed);
+    if (!k->name || !k->fields || !k->offsets || !k->sizes || !k->changed)
+        goto oom;
+    for (int f = 0; f < baseCount; f++)
+    {
+        k->fields[f] = base->fields[f];
+        k->fields[f].name = CopyString(base->fields[f].name);
+        if (!k->fields[f].name)
+            goto oom;
+        k->fieldCount++;
+        k->offsets[f] = base->offsets[f];
+        k->sizes[f] = base->sizes[f];
+    }
+    k->sharedSize = base ? base->sharedSize : 0;
+    k->localSize = base ? base->localSize : 0;
+    for (int i = 0; i < count; i++)
+    {
+        const StoreFieldDecl *d = &own[i];
+        if (!ValidField(d, &why))
+        {
+            StoreFail(store, false, "kind: field %s of %s %s", d->name ? d->name : "", old->name, why);
+            goto fail;
+        }
+        for (int j = 0; j < i; j++)
+            if (!strcmp(own[j].name, d->name))
+            {
+                StoreFail(store, false, "kind: %s declares %s twice", old->name, d->name);
+                goto fail;
+            }
+        int existing = -1;
+        for (int f = 0; f < baseCount; f++)
+            if (!strcmp(k->fields[f].name, d->name))
+                existing = f;
+        if (existing >= 0)
+        {
+            if (!SameShape(&k->fields[existing], d))
+            {
+                StoreFail(store, false,
+                          "kind: %s declares %s, which its base %s declares with a different type",
+                          old->name, d->name, base->name);
+                goto fail;
+            }
+            if (d->init.type != STORE_NONE)
+                explicit[existing] = true;
+            continue;
+        }
+        int f = k->fieldCount++;
+        k->fields[f] = *d;
+        k->fields[f].name = CopyString(d->name);
+        if (!k->fields[f].name)
+            goto oom;
+        explicit[f] = d->init.type != STORE_NONE;
+        k->sizes[f] = FieldSize(d);
+        int *size = (d->flags & STORE_LOCAL) ? &k->localSize : &k->sharedSize;
+        k->offsets[f] = *size;
+        *size += k->sizes[f];
+    }
+    k->sharedTemplate = calloc((size_t)k->sharedSize + 1, 1);
+    k->localTemplate = calloc((size_t)k->localSize + 1, 1);
+    if (!k->sharedTemplate || !k->localTemplate)
+        goto oom;
+    if (base)
+    {
+        memcpy(k->sharedTemplate, base->sharedTemplate, (size_t)base->sharedSize);
+        memcpy(k->localTemplate, base->localTemplate, (size_t)base->localSize);
+    }
+    for (int f = baseCount; f < k->fieldCount; f++)
+        if (!WriteDefault(k, f))
+        {
+            StoreFail(store, false, "kind: the default of %s in %s is a %s, not a %s", k->fields[f].name,
+                      old->name, StoreTypeName(k->fields[f].init.type), StoreTypeName(k->fields[f].type));
+            goto fail;
+        }
+    for (int i = 0; i < count; i++)
+        for (int f = 0; f < baseCount; f++)
+            if (!strcmp(k->fields[f].name, own[i].name) && own[i].init.type != STORE_NONE)
+            {
+                if (IsCollection(k->fields[f].type) ||
+                    !WriteScalar(TemplateOf(k, f), k->fields[f].type, &own[i].init))
+                {
+                    StoreFail(store, false, "kind: the default of %s in %s is a %s, not a %s", own[i].name,
+                              old->name, StoreTypeName(own[i].init.type), StoreTypeName(k->fields[f].type));
+                    goto fail;
+                }
+                ReadScalar(TemplateOf(k, f), k->fields[f].type, &k->fields[f].init);
+            }
+    for (int f = 0; f < k->fieldCount; f++)
+    {
+        int o = FieldNamed(old, k->fields[f].name);
+        if (o < 0 || !SameType(&old->fields[o], &k->fields[f]) ||
+            (explicit[f] && !IsCollection(k->fields[f].type)))
+            continue;
+        memcpy(TemplateOf(k, f), ConstTemplateOf(old, o), (size_t)k->sizes[f]);
+        k->fields[f].init = old->fields[o].init;
+    }
+    free(explicit);
+    return k;
+oom:
+    StoreFail(store, false, "kind: out of memory declaring %s again", old->name);
+fail:
+    free(explicit);
+    FreeKind(k);
+    return NULL;
+}
+
+// Copies old's things into k's pools, row for row, field by name. old is left as it was.
+static bool Migrate(const StoreKindData *old, StoreKindData *k)
+{
+    int *match = malloc(((size_t)k->fieldCount + 1) * sizeof *match);
+    uint32_t cap = old->rowCapacity;
+    if (!match)
+        return false;
+    k->shared = cap && k->sharedSize ? malloc((size_t)cap * (size_t)k->sharedSize) : NULL;
+    k->local = cap && k->localSize ? malloc((size_t)cap * (size_t)k->localSize) : NULL;
+    uint32_t shadowRows = old->shadow ? old->shadowCapacity : 0;
+    k->shadow = shadowRows ? malloc((size_t)shadowRows * (size_t)(k->sharedSize ? k->sharedSize : 1)) : NULL;
+    if ((cap && k->sharedSize && !k->shared) || (cap && k->localSize && !k->local) || (shadowRows && !k->shadow))
+    {
+        free(match);
+        return false;
+    }
+    for (int f = 0; f < k->fieldCount; f++)
+    {
+        int o = FieldNamed(old, k->fields[f].name);
+        match[f] = o >= 0 && SameType(&old->fields[o], &k->fields[f]) ? o : -1;
+    }
+    k->rows = old->rows;
+    k->rowCapacity = cap;
+    for (uint32_t row = 0; row < old->rows; row++)
+    {
+        ResetBlocks(k, row, true, true);
+        for (int f = 0; f < k->fieldCount; f++)
+        {
+            int o = match[f];
+            if (o < 0)
+                continue;
+            const StoreFieldDecl *from = &old->fields[o], *to = &k->fields[f];
+            const unsigned char *src = (from->flags & STORE_LOCAL)
+                                           ? old->local + (size_t)row * (size_t)old->localSize
+                                           : old->shared + (size_t)row * (size_t)old->sharedSize;
+            unsigned char *dst = (to->flags & STORE_LOCAL) ? k->local + (size_t)row * (size_t)k->localSize
+                                                          : k->shared + (size_t)row * (size_t)k->sharedSize;
+            memcpy(dst + k->offsets[f], src + old->offsets[o], (size_t)k->sizes[f]);
+        }
+    }
+    // The frame's shadow, so that a reload alone fires no -changed.
+    for (uint32_t row = 0; row < shadowRows; row++)
+    {
+        unsigned char *dst = k->shadow + (size_t)row * (size_t)k->sharedSize;
+        memcpy(dst, k->sharedTemplate, (size_t)k->sharedSize);
+        for (int f = 0; f < k->fieldCount; f++)
+            if (match[f] >= 0 && !(k->fields[f].flags & STORE_LOCAL) &&
+                !(old->fields[match[f]].flags & STORE_LOCAL))
+                memcpy(dst + k->offsets[f],
+                       old->shadow + (size_t)row * (size_t)old->sharedSize + old->offsets[match[f]],
+                       (size_t)k->sizes[f]);
+    }
+    k->shadowCapacity = shadowRows;
+    free(match);
+    return true;
+}
+
+// Reports what old's things lost, then moves across everything that is not layout.
+static void Adopt(Store *store, StoreKind kind, StoreKindData *old, StoreKindData *k)
+{
+    int things = 0;
+    for (uint32_t i = 0; i < store->thingCount; i++)
+        things += store->things[i].kind == kind && (store->things[i].flags & STORE_THING_LIVE);
+    for (int o = 0; o < old->fieldCount; o++)
+    {
+        int f = FieldNamed(k, old->fields[o].name);
+        if (f < 0)
+            TraceLog(LOG_WARNING, "STORE: kind %s declared again: field %s was removed; %d thing(s) dropped it",
+                     old->name, old->fields[o].name, things);
+        else if (!SameType(&old->fields[o], &k->fields[f]))
+            TraceLog(LOG_WARNING,
+                     "STORE: kind %s declared again: field %s changed from %s to %s; %d thing(s) took its "
+                     "default",
+                     old->name, old->fields[o].name, StoreTypeName(old->fields[o].type),
+                     StoreTypeName(k->fields[f].type), things);
+    }
+    // Everything that is not layout moves across: rows, handlers, events, shadow bookkeeping.
+    k->freeRows = old->freeRows, old->freeRows = NULL;
+    k->freeCount = old->freeCount;
+    k->shadowThing = old->shadowThing, old->shadowThing = NULL;
+    k->shadowParent = old->shadowParent, old->shadowParent = NULL;
+    k->handler = old->handler;
+    k->user = old->user;
+    k->events = old->events, old->events = NULL;
+    k->eventCount = old->eventCount;
+    k->eventCapacity = old->eventCapacity;
+    k->warned = old->warned, old->warned = NULL;
+    k->warnedCount = old->warnedCount;
+    k->warnedCapacity = old->warnedCapacity;
+}
+
+bool StoreRedeclareKind(Store *store, StoreKind kind, const StoreFieldDecl *fields, int count)
+{
+    if (!store || !store->error)
+        return false;
+    StoreKindData *k = Kind(store, kind);
+    if (!k)
+        return StoreFail(store, false, "kind: no kind %d to declare again", kind);
+    if (store->ticking || store->framing)
+        return StoreFail(store, false, "kind: %s can be declared again only between ticks", k->name);
+    if (count < 0 || (count && !fields))
+        return StoreFail(store, false, "kind: %s has no field list", k->name);
+    // The kind and every kind derived from it (declared after it), each built before any changes.
+    StoreKindData **built = calloc((size_t)store->kindCount, sizeof *built);
+    if (!built)
+        return StoreFail(store, false, "kind: out of memory declaring %s again", k->name);
+    bool ok = true;
+    for (StoreKind j = kind; ok && j < store->kindCount; j++)
+    {
+        if (!StoreKindIs(store, j, kind))
+            continue;
+        StoreKindData *old = store->kinds[j];
+        StoreKindData *base = old->base < 0 ? NULL : built[old->base] ? built[old->base] : store->kinds[old->base];
+        if (j == kind)
+            built[j] = Relayout(store, old, base, fields, count);
+        else
+        {
+            int first = old->base < 0 ? 0 : store->kinds[old->base]->fieldCount;
+            built[j] = Relayout(store, old, base, old->fields + first, old->fieldCount - first);
+        }
+        ok = built[j] != NULL;
+    }
+    for (StoreKind j = kind; ok && j < store->kindCount; j++)
+        if (built[j] && !Migrate(store->kinds[j], built[j]))
+            ok = StoreFail(store, false, "kind: out of memory declaring %s again", k->name);
+    for (StoreKind j = kind; ok && j < store->kindCount; j++)
+        if (built[j])
+        {
+            Adopt(store, j, store->kinds[j], built[j]);
+            FreeKind(store->kinds[j]);
+            store->kinds[j] = built[j];
+            built[j] = NULL;
+        }
+    for (StoreKind j = 0; j < store->kindCount; j++)
+        FreeKind(built[j]);
+    free(built);
+    RecomputeKinds(store);
+    return ok;
+}
+
 // ---- snapshot ---------------------------------------------------------------------------------
 void StoreSnapshotFree(StoreSnapshot *snapshot)
 {
@@ -2469,6 +2780,7 @@ StoreSnapshot *StoreSnapshotTake(const Store *store)
         pool->rows = k->rows;
         pool->freeCount = k->freeCount;
         pool->sharedSize = k->sharedSize;
+        pool->layout = LayoutHash(k);
         pool->shared = Duplicate(k->shared, (size_t)k->rows * (size_t)k->sharedSize);
         pool->freeRows = Duplicate(k->freeRows, (size_t)k->freeCount * sizeof *k->freeRows);
         ok = pool->shared && pool->freeRows;
@@ -2507,8 +2819,11 @@ bool StoreSnapshotRestore(Store *store, const StoreSnapshot *snapshot)
     if (snapshot->kindCount > store->kindCount || snapshot->symbolCount > store->symbolCount)
         return StoreFail(store, false, "restore: the snapshot has kinds or symbols this store lacks");
     for (int i = 0; i < snapshot->kindCount; i++)
-        if (snapshot->pools[i].sharedSize != store->kinds[i]->sharedSize)
-            return StoreFail(store, false, "restore: kind %s is laid out differently",
+        if (snapshot->pools[i].sharedSize != store->kinds[i]->sharedSize ||
+            snapshot->pools[i].layout != LayoutHash(store->kinds[i]))
+            return StoreFail(store, false,
+                             "restore: kind %s was declared again with other fields after this snapshot was "
+                             "taken, so the snapshot's layout of it is gone",
                              store->kinds[i]->name);
     // Everything that can fail happens before anything changes.
     uint32_t *reset = malloc(((size_t)snapshot->thingCount + 1) * sizeof *reset);

@@ -72,7 +72,8 @@ static void PendingChecks(void)
 static void FileChecks(const char *path)
 {
     Replay replay;
-    ReplayCommand command = {{3, 2}, "poke", {{STORE_INT, {.i = -7}}, {STORE_VEC3, {.v = {1, 2, 3}}}}, 2};
+    ReplayCommand command = {{3, 2}, "poke", {{STORE_INT, {.i = -7}}, {STORE_VEC3, {.v = {1, 2, 3}}}}, 2,
+                             REPLAY_COMMAND_PLAYER, NULL};
     ReplayTick tick = {5, 1, 1.5f, -2.0f, 1, 0};
     Expect(ReplayOpenWrite(&replay, path, 99, "test", 1234) && ReplayWriteTick(&replay, &tick, &command, NULL),
            "a recording is written");
@@ -101,8 +102,8 @@ static void FileChecks(const char *path)
     ReplayClose(&replay);
     ReplayPacket got = {0};
     bool opened = ReplayOpenRead(&replay, path, &seed, &kinds);
-    Expect(opened && replay.version == 2 && replay.role == REPLAY_ROLE_CLIENT && replay.player == 4,
-           "the header gives back the role and the player");
+    Expect(opened && replay.version == 3 && replay.role == REPLAY_ROLE_CLIENT && replay.player == 4,
+           "the header gives back the version, the role and the player");
     Expect(ReplayReadTick(&replay, &back, &read, 1) && back.packetCount == 2 && ReplayReadPacket(&replay, &got) &&
                got.peer == 2 && got.channel == 1 && got.size == 3 && got.data && got.data[2] == 9,
            "a tick's packet reads back with its peer, channel and bytes");
@@ -110,6 +111,40 @@ static void FileChecks(const char *path)
     Expect(ReplayReadTick(&replay, &back, &read, 1) && back.actions == 5 && back.packetCount == 0 &&
                !ReplayReadPacket(&replay, &got),
            "a packet left unread is skipped by the next tick");
+    ReplayClose(&replay);
+
+    // Version 3: a REPL line among a tick's commands, in the order they ran.
+    ReplayCommand mixed[3] = {command, command, command};
+    mixed[1].kind = REPLAY_COMMAND_REPL;
+    mixed[1].text = "(set! ((game) 'score) 42)";
+    ReplayTick replTick = {0, 0, 0, 0, 3, 0};
+    ReplayCommand readBack[3];
+    Expect(ReplayOpenWrite(&replay, path, 1, "test", 2) && ReplayWriteTick(&replay, &replTick, mixed, NULL),
+           "a tick with a REPL command between two player commands is written");
+    ReplayClose(&replay);
+    bool readOk = ReplayOpenRead(&replay, path, &seed, &kinds) && ReplayReadTick(&replay, &back, readBack, 3);
+    Expect(readOk && back.commandCount == 3 && readBack[0].kind == REPLAY_COMMAND_PLAYER &&
+               !strcmp(readBack[0].event, "poke") && readBack[1].kind == REPLAY_COMMAND_REPL && readBack[1].text &&
+               !strcmp(readBack[1].text, "(set! ((game) 'score) 42)") && readBack[2].kind == REPLAY_COMMAND_PLAYER &&
+               readBack[2].args[0].as.i == -7,
+           "the REPL command reads back as a developer command with its line, in place");
+    if (readOk)
+        free(readBack[1].text);
+    ReplayClose(&replay);
+
+    // Version 2 files, from before REPL commands, still read: every command is a player's.
+    unsigned char v2[96 + 8 + 20 + 8 + 32 + 4 + 4 * 68] = "TRENCHREPLAY";
+    v2[12] = 2;
+    v2[96 + 8 + 16] = 1; /* one command */
+    v2[96 + 8 + 20] = 6; /* target index 6 */
+    memcpy(v2 + 96 + 8 + 20 + 8, "hello", 5);
+    FILE *second = fopen(path, "wb");
+    if (second)
+        fwrite(v2, 1, sizeof v2, second), fclose(second);
+    Expect(ReplayOpenRead(&replay, path, &seed, &kinds) && replay.version == 2 &&
+               ReplayReadTick(&replay, &back, &read, 1) && back.commandCount == 1 &&
+               read.kind == REPLAY_COMMAND_PLAYER && read.target.index == 6 && !strcmp(read.event, "hello"),
+           "a version 2 recording still reads, its commands as player commands");
     ReplayClose(&replay);
 
     // Version 1 files, from before packets, still read: no role, no packets.
@@ -1152,6 +1187,183 @@ static void RuntimeHostChecks(void)
         printf("note: runner: could not remove %s\n", dir);
 }
 
+// Copies a recording, leaving out its REPL commands (keeping everything else).
+static bool CopyWithoutRepl(const char *from, const char *to)
+{
+    Replay in, out;
+    uint64_t seed = 0, kinds = 0;
+    if (!ReplayOpenRead(&in, from, &seed, &kinds))
+        return false;
+    bool ok = ReplayOpenWrite(&out, to, seed, "copy", kinds) &&
+              (in.role == REPLAY_ROLE_NONE || ReplaySetRole(&out, in.role, in.player));
+    static ReplayCommand commands[64], kept[64];
+    static ReplayPacket packets[256];
+    ReplayTick tick;
+    while (ok && ReplayReadTick(&in, &tick, commands, 64))
+    {
+        int k = 0, n = tick.commandCount < 64 ? tick.commandCount : 64, p = 0;
+        for (int i = 0; i < n; i++)
+            if (commands[i].kind == REPLAY_COMMAND_REPL)
+                free(commands[i].text);
+            else
+                kept[k++] = commands[i];
+        while (p < 256 && p < tick.packetCount && ReplayReadPacket(&in, &packets[p]))
+            p++;
+        tick.commandCount = (uint16_t)k;
+        tick.packetCount = (uint16_t)p;
+        ok = ReplayWriteTick(&out, &tick, kept, packets);
+        for (int i = 0; i < p; i++)
+            free(packets[i].data);
+    }
+    ReplayClose(&in);
+    ReplayClose(&out);
+    return ok;
+}
+
+static bool WriteFile(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "w");
+    if (!file)
+        return false;
+    fputs(text, file);
+    return fclose(file) == 0;
+}
+
+/* REPL lines in recordings (docs/developer/store.md §5.7), with --repl-file as a REPL that types at
+   known ticks: before tick 5 the score is set to 42, before tick 12 the game is sent bump 100 (a
+   command the line queues, which must not be recorded twice). score counts ticks, so 30 ticks end at
+   42 + 25 + 100 = 167. The replay reaches the same hash and score; the same recording with its REPL
+   commands taken out does not (score 30), so the lines are what made the difference. */
+static void ReplRecordChecks(const char *dir)
+{
+    char path[400], lines[400], recording[400], stripped[400], log[400], score[3][32];
+    snprintf(path, sizeof path, "%s/engine.project", dir);
+    WriteFile(path, "name repl-record\ngame game.scm\n");
+    snprintf(path, sizeof path, "%s/game.scm", dir);
+    WriteFile(path, "(define-kind game (field score 0)\n"
+                    "  (on (player-joined p) #t)\n"
+                    "  (on (tick dt) (set! score (+ score 1)))\n"
+                    "  (on (bump n) (set! score (+ score n))))\n");
+    snprintf(lines, sizeof lines, "%s/lines.repl", dir);
+    WriteFile(lines, "; tick, then the line\n5 (set! ((game) 'score) 42)\n12 (send (game) 'bump 100)\n");
+    snprintf(recording, sizeof recording, "%s/repl.rec", dir);
+    snprintf(stripped, sizeof stripped, "%s/stripped.rec", dir);
+    snprintf(log, sizeof log, "%s/repl.log", dir);
+    char *record[] = {"trench", "run", (char *)dir, "--headless", "--ticks", "30", "--seed", "4", "--repl-file", lines,
+                      "--record", recording, "--print-field", "game", "score", NULL};
+    int recorded = RunLogged(record, log);
+    uint64_t live = GameLastHash();
+    LineValue(log, "field game score ", score[0], sizeof score[0]);
+    bool answered = FileHasLine(log, "repl: 42", false) && FileHasLine(log, "repl: #t", false);
+    char *again[] = {"trench", "run", (char *)dir, "--headless", "--replay", recording, "--print-field", "game",
+                     "score", NULL};
+    int replayed = RunLogged(again, log);
+    uint64_t back = GameLastHash();
+    LineValue(log, "field game score ", score[1], sizeof score[1]);
+    bool quiet = !FileHasLine(log, "repl: ", false);
+    bool copied = CopyWithoutRepl(recording, stripped);
+    char *without[] = {"trench", "run", (char *)dir, "--headless", "--replay", stripped, "--print-field", "game",
+                       "score", NULL};
+    int bare = RunLogged(without, log);
+    uint64_t stray = GameLastHash();
+    LineValue(log, "field game score ", score[2], sizeof score[2]);
+    printf("runner repl recording: live tick 30 hash %016llx score %s; replayed %016llx score %s; "
+           "without the REPL records %016llx score %s (exits %d %d %d)\n",
+           (unsigned long long)live, score[0], (unsigned long long)back, score[1], (unsigned long long)stray,
+           score[2], recorded, replayed, bare);
+    Expect(recorded == 0 && answered && !strcmp(score[0], "167"),
+           "a run with two --repl-file lines evaluates them before ticks 5 and 12 and records them");
+    Expect(replayed == 0 && live && back == live && !strcmp(score[1], "167"),
+           "its replay evaluates the recorded REPL lines again and reaches the same hash and score");
+    Expect(quiet, "a replay discards the REPL lines' answers");
+    Expect(copied && bare == 0 && stray != live && !strcmp(score[2], "30"),
+           "the same recording without its REPL records reaches another hash: the lines matter");
+    char *both[] = {"trench", "run", (char *)dir, "--headless", "--replay", recording, "--repl-file", lines, NULL};
+    Expect(RunLogged(both, log) == 0 && GameLastHash() == live &&
+               FileHasLine(log, "run: --repl-file is ignored while replaying", false),
+           "--repl-file is ignored, with a note, while replaying");
+    snprintf(path, sizeof path, "%s/bad.repl", dir);
+    WriteFile(path, "soon (inspect (game))\n");
+    char *bad[] = {"trench", "run", (char *)dir, "--headless", "--ticks", "1", "--repl-file", path, NULL};
+    Expect(RunLogged(bad, log) == 1 && FileHasLine(log, "a line is TICK TEXT", true),
+           "a --repl-file line without its tick is refused");
+}
+
+/* A networked session in one process: the REPL hosts (host-game), spawns a probe owned by player 2
+   and tries to write it; then rewrites the game file with a field added and reloads, then with only a
+   handler changed and reloads again. The write is refused naming player 2; the first reload is
+   refused saying to restart the session and leaves game without the field; the second goes ahead
+   (n counts 1 a tick for ticks 0-6, then 10: 7 + 13 * 10 = 137 at tick 20). */
+static void NetReplChecks(const char *dir)
+{
+    int port = 20000 + (int)((getpid() + 11) % 20000);
+    char path[400], game[400], lines[400], log[400], text[2048], n[32];
+    snprintf(path, sizeof path, "%s/net/engine.project", dir);
+    snprintf(game, sizeof game, "%s/net", dir);
+    mkdir(game, 0755);
+    WriteFile(path, "name repl-net\ngame game.scm\n");
+    snprintf(game, sizeof game, "%s/net/game.scm", dir);
+    WriteFile(game, "(define-kind game (field n 0) (on (player-joined p) #t) (on (tick dt) (set! n (+ n 1))))\n"
+                    "(define-kind probe (field hp 3))\n");
+    snprintf(lines, sizeof lines, "%s/net/lines.repl", dir);
+    snprintf(text, sizeof text,
+             "2 (host-game %d)\n"
+             "3 (spawn 'probe :owner 2)\n"
+             "4 (set! ((car (things 'probe)) 'hp) 5)\n"
+             "5 (call-with-output-file \"%s\" (lambda (p) (display \"(define-kind game (field n 0) (field extra 1) "
+             "(on (player-joined p) #t) (on (tick dt) (set! n (+ n 1)))) (define-kind probe (field hp 3))\" p)))\n"
+             "5 (reload)\n"
+             "6 ((game) 'extra)\n"
+             "7 (call-with-output-file \"%s\" (lambda (p) (display \"(define-kind game (field n 0) "
+             "(on (player-joined p) #t) (on (tick dt) (set! n (+ n 10)))) (define-kind probe (field hp 3))\" p)))\n"
+             "7 (reload)\n"
+             "8 ((car (things 'probe)) 'hp)\n",
+             port, game, game);
+    WriteFile(lines, text);
+    snprintf(log, sizeof log, "%s/net/run.log", dir);
+    snprintf(path, sizeof path, "%s/net", dir);
+    char *argv[] = {"trench", "run", path, "--headless", "--ticks", "20", "--repl-file", lines, "--print-field",
+                    "game", "n", NULL};
+    int result = RunLogged(argv, log);
+    char refusedWrite[512], refusedReload[512];
+    LineValue(log, "repl: hp on probe", refusedWrite, sizeof refusedWrite);
+    LineValue(log, "ERROR: reload refused: ", refusedReload, sizeof refusedReload);
+    LineValue(log, "field game n ", n, sizeof n);
+    printf("runner repl networked: write: \"hp on probe%s\"\nrunner repl networked: reload: \"%s\"\n"
+           "runner repl networked: game n %s (exit %d)\n",
+           refusedWrite, refusedReload, n, result);
+    Expect(FileHasLine(log, "net: hosting on UDP port", false) &&
+               strstr(refusedWrite, "belongs to player 2, and this REPL runs for player 1, so it can't write it") &&
+               FileHasLine(log, "repl: 3", false),
+           "in a session the REPL's write to a thing player 2 owns is refused with rule 5's message naming "
+           "the owner, and the field keeps its value");
+    Expect(strstr(refusedReload, "kind game changed field extra, and this is a networked session") &&
+               strstr(refusedReload, "Restart the session") &&
+               FileHasLine(log, "repl: game #0 has no field, child or method named extra", false),
+           "in a session a reload that changes a kind's fields is refused, saying to restart, and changes nothing");
+    Expect(FileHasLine(log, "repl: reloaded", false) && !strcmp(n, "137") && result == 0,
+           "in a session a reload that changes only a handler goes ahead");
+}
+
+static void ReplChecks(void)
+{
+    char dir[] = "build/core/repl_XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Expect(false, "a temporary project directory can be made under build/core");
+        return;
+    }
+    int before = failures;
+    ReplRecordChecks(dir);
+    NetReplChecks(dir);
+    char script[300];
+    snprintf(script, sizeof script, "rm -rf %s", dir);
+    if (failures == before && system(script) == -1)
+        printf("note: runner: could not remove %s\n", dir);
+    if (failures != before)
+        printf("note: runner: the REPL checks' files are in %s\n", dir);
+}
+
 int GameRunnerChecks(void)
 {
     failures = 0;
@@ -1196,6 +1408,7 @@ int GameRunnerChecks(void)
     AnimChecks();
     NetHookChecks();
     RuntimeHostChecks();
+    ReplChecks();
     NetRunChecks();
     return failures;
 }

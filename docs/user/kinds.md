@@ -61,6 +61,7 @@ screen for five seconds, prefixed `game:`, besides being printed.
 | `--print-draw-position KIND` | in a window, with each `--shot-every` screenshot print `draw-position KIND TICK X Y Z`: where the first thing of KIND was drawn (a socket's bone included) |
 | `--skin-on-cpu` | in a window: skin every animated model on the CPU, as models of more than 24 bones always are (for comparing the two paths) |
 | `--no-static-batch` | in a window: draw every `:static` model as itself instead of in its region's batch (for comparing the two) |
+| `--repl-file FILE` | evaluate each line `TICK TEXT` of FILE at the REPL just before tick TICK, as if typed then (recorded like typed lines; ignored while replaying) |
 
 With no display (over ssh, say) a windowed run exits at once with `Engine: no display; run with
 --headless or under a display`.
@@ -144,7 +145,30 @@ a note) and reaches the same hashes as the live run. `tests/regression/net_game/
 co-op game.
 
 In a window, the terminal is a REPL on the running game (`(things 'player)`, `(inspect (game))`,
-`(reload)`). REPL lines are not recorded.
+`(reload)`). REPL code runs outside handlers, so the rules do not stop it, with one exception: in a
+co-op session, writing a field of a thing another player owns is refused (`hp on probe #1 belongs
+to player 2, and this REPL runs for player 1, so it can't write it ...`), because that player's
+machine would overwrite it at once; send the thing a message instead.
+
+**`(reload)`** loads the game file again and swaps in its handlers and helpers. A kind whose fields
+changed is migrated: every thing of that kind, and of kinds that extend it, keeps each field whose
+name and type are unchanged, a new field starts at its default, a removed field is dropped, and a
+field whose type changed (a real that became an integer, say) starts at its new default. Each
+dropped or reset field is printed once per kind, such as `STORE: kind unit declared again: field tag
+was removed; 3 thing(s) dropped it`. A file that fails to load keeps the old handlers, and puts the
+kinds it had changed, and the world, back as they were. A snapshot taken with `(snapshot)` before a kind changed can no longer be
+restored. A kind's base can't change while the game runs, and `define-kind` typed at the REPL may
+not change a kind's fields (edit the file and `(reload)`). In a co-op session every machine must
+declare the same kinds, so a reload there that changes a kind's fields or adds a kind is refused
+with a message saying to restart the session; a reload that changes only handlers and helpers is
+fine.
+
+**The REPL in recordings.** Each REPL line is recorded, with the tick it ran before, so a replay
+evaluates it again at the same point (its answer is not printed) and reaches the same hashes. For a
+REPL that types at known ticks, `--repl-file FILE` reads lines `TICK TEXT` (such as `30 (set!
+((game) 'score) 42)`) and evaluates each just before tick TICK, printing `repl: ANSWER`; it is
+ignored while replaying, since the recording holds the lines. A line whose output depends on a file
+it reads, such as `(reload)` after the game file changed again, replays as the file is now.
 
 The world is lit by the first `directional` light (or a default sun) and up to four point lights
 over the first `ambient` light's energy (or 0.3), with fog towards the clear colour (see the table

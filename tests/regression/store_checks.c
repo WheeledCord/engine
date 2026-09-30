@@ -1293,6 +1293,120 @@ static void NativeChecks(void)
     StoreFree(&s);
 }
 
+// ---- declaring a kind again (§5.7) ------------------------------------------------------------
+static char redeclareLog[1024];
+
+static void CollectRedeclare(int level, const char *text, va_list args)
+{
+    char line[512];
+    vsnprintf(line, sizeof line, text, args);
+    if (level == LOG_WARNING && strstr(line, "declared again"))
+    {
+        size_t used = strlen(redeclareLog);
+        snprintf(redeclareLog + used, sizeof redeclareLog - used, "%s\n", line);
+    }
+}
+
+static int IntField(Store *s, StoreId id, const char *name)
+{
+    StoreValue v;
+    int f = StoreFieldIndex(s, StoreKindOf(s, id), name);
+    return f >= 0 && StoreGet(s, id, f, &v) && v.type == STORE_INT ? v.as.i : -12345;
+}
+
+/* unit (hp int, speed float, tag symbol, mood :local int) and soldier, which extends it with ammo.
+   unit is declared again: hp kept, speed retyped to int, tag removed, armor added. */
+static void RedeclareChecks(void)
+{
+    Store s;
+    StoreInit(&s, 3);
+    StoreFieldDecl unitFields[4] = {{"hp", STORE_INT, 0, 0, 0, 0, 0, {STORE_INT, {.i = 100}}},
+                                    {"speed", STORE_FLOAT, 0, 0, 0, 0, 0, {STORE_FLOAT, {.f = 1.5f}}},
+                                    {"tag", STORE_SYMBOL, 0, 0, 0, 0, 0, {0}},
+                                    {"mood", STORE_INT, 0, 0, 0, 0, STORE_LOCAL, {STORE_INT, {.i = 1}}}};
+    StoreFieldDecl soldierFields[1] = {{"ammo", STORE_INT, 0, 0, 0, 0, 0, {STORE_INT, {.i = 30}}}};
+    StoreKind unit = StoreDeclareKind(&s, "unit", -1, unitFields, 4, NULL);
+    StoreKind soldier = StoreDeclareKind(&s, "soldier", unit, soldierFields, 1, NULL);
+    StoreKind other = StoreDeclareKind(&s, "crate", -1, soldierFields, 1, NULL);
+    StoreId u = StoreSpawn(&s, unit, 1, STORE_NULL, STORE_NO_SYMBOL);
+    StoreId a = StoreSpawn(&s, soldier, 1, STORE_NULL, STORE_NO_SYMBOL);
+    StoreId c = StoreSpawn(&s, other, 1, STORE_NULL, STORE_NO_SYMBOL);
+    StoreValue v = Int(71);
+    StoreSet(&s, u, StoreFieldIndex(&s, unit, "hp"), &v);
+    v = Int(42);
+    StoreSet(&s, a, StoreFieldIndex(&s, soldier, "hp"), &v);
+    v = Int(7);
+    StoreSet(&s, a, StoreFieldIndex(&s, soldier, "ammo"), &v);
+    v = Float(9.0f);
+    StoreSet(&s, a, StoreFieldIndex(&s, soldier, "speed"), &v);
+    v = Int(3);
+    StoreSet(&s, a, StoreFieldIndex(&s, soldier, "mood"), &v);
+    StoreTick(&s, 0.1f);
+    StoreSnapshot *before = StoreSnapshotTake(&s);
+    uint64_t hashBefore = StoreHash(&s), crateHash = 0;
+
+    // What must be refused leaves everything as it was: a field declared twice, and a derived
+    // kind's own field that the base would now declare with another type.
+    StoreFieldDecl twice[2] = {{"hp", STORE_INT, 0, 0, 0, 0, 0, {0}}, {"hp", STORE_INT, 0, 0, 0, 0, 0, {0}}};
+    Expect(!StoreRedeclareKind(&s, unit, twice, 2) && Prefix(&s, "kind") && StoreHash(&s) == hashBefore,
+           "a redeclaration that names a field twice is refused and changes nothing");
+    StoreFieldDecl clash[2] = {{"hp", STORE_INT, 0, 0, 0, 0, 0, {0}}, {"ammo", STORE_FLOAT, 0, 0, 0, 0, 0, {0}}};
+    Expect(!StoreRedeclareKind(&s, unit, clash, 2) && strstr(StoreLastError(&s), "soldier declares ammo") &&
+               StoreHash(&s) == hashBefore && StoreFieldCount(&s, unit) == 4,
+           "a base that would clash with a derived kind's own field is refused, naming it, and changes nothing");
+    Expect(!StoreRedeclareKind(&s, 99, unitFields, 4), "an unknown kind is refused");
+
+    StoreFieldDecl next[4] = {{"armor", STORE_INT, 0, 0, 0, 0, 0, {STORE_INT, {.i = 5}}},
+                              {"hp", STORE_INT, 0, 0, 0, 0, 0, {STORE_INT, {.i = 100}}},
+                              {"speed", STORE_INT, 0, 0, 0, 0, 0, {STORE_INT, {.i = 2}}},
+                              {"mood", STORE_INT, 0, 0, 0, 0, STORE_LOCAL, {STORE_INT, {.i = 1}}}};
+    redeclareLog[0] = 0;
+    SetTraceLogCallback(CollectRedeclare);
+    bool ok = StoreRedeclareKind(&s, unit, next, 4);
+    SetTraceLogCallback(NULL);
+    printf("store redeclare: unit #%u hp %d armor %d speed %d; soldier #%u hp %d ammo %d armor %d speed %d mood %d; "
+           "reports:\n%s",
+           u.index, IntField(&s, u, "hp"), IntField(&s, u, "armor"), IntField(&s, u, "speed"), a.index,
+           IntField(&s, a, "hp"), IntField(&s, a, "ammo"), IntField(&s, a, "armor"), IntField(&s, a, "speed"),
+           IntField(&s, a, "mood"), redeclareLog);
+    Expect(ok && StoreKindNamed(&s, "unit") == unit && StoreKindNamed(&s, "soldier") == soldier &&
+               StoreKindBase(&s, soldier) == unit,
+           "a kind declared again keeps its id, and its derived kind keeps its id and base");
+    Expect(IntField(&s, u, "hp") == 71 && IntField(&s, a, "hp") == 42,
+           "a field whose name and type are unchanged keeps each thing's value");
+    Expect(IntField(&s, u, "armor") == 5 && IntField(&s, a, "armor") == 5, "a new field takes its default");
+    Expect(IntField(&s, u, "speed") == 2 && IntField(&s, a, "speed") == 2,
+           "a field whose type changed takes its default");
+    Expect(StoreFieldIndex(&s, unit, "tag") < 0 && StoreFieldIndex(&s, soldier, "tag") < 0,
+           "a removed field is gone from the kind and its derived kind");
+    Expect(IntField(&s, a, "ammo") == 7 && IntField(&s, a, "mood") == 3 && StoreFieldIndex(&s, soldier, "ammo") == 4,
+           "the derived kind is laid out again over the new base, keeping its own field and a :local one");
+    Expect(strstr(redeclareLog, "kind unit declared again: field tag was removed; 1 thing(s)") &&
+               strstr(redeclareLog, "kind unit declared again: field speed changed from float to int; 1 thing(s)") &&
+               strstr(redeclareLog, "kind soldier declared again: field tag was removed") &&
+               strstr(redeclareLog, "kind soldier declared again: field speed changed from float to int") &&
+               !strstr(redeclareLog, "field hp") && !strstr(redeclareLog, "crate"),
+           "each removed or retyped field is reported once per kind, and nothing else");
+    crateHash = (uint64_t)IntField(&s, c, "ammo");
+    Expect(crateHash == 30, "a kind that does not derive from it is left alone");
+    // Handlers and ticking carry on; spawning takes the new defaults.
+    StoreTick(&s, 0.1f);
+    StoreId fresh = StoreSpawn(&s, soldier, 1, STORE_NULL, STORE_NO_SYMBOL);
+    Expect(IntField(&s, fresh, "armor") == 5 && IntField(&s, fresh, "hp") == 100 && IntField(&s, fresh, "ammo") == 30,
+           "a thing spawned after takes the new layout's defaults");
+    // The snapshot's layout is gone; declaring the kind back as it was makes it good again.
+    Expect(!StoreSnapshotRestore(&s, before) && strstr(StoreLastError(&s), "kind unit was declared again"),
+           "a snapshot taken before the redeclaration is refused, naming the kind");
+    printf("store redeclare: restoring the old snapshot: %s\n", StoreLastError(&s));
+    SetTraceLogCallback(CollectRedeclare); /* quiet */
+    Expect(StoreRedeclareKind(&s, unit, unitFields, 4) && StoreSnapshotRestore(&s, before) &&
+               StoreHash(&s) == hashBefore,
+           "declared back as it was, the kind takes the old snapshot and hashes as before");
+    SetTraceLogCallback(NULL);
+    StoreSnapshotFree(before);
+    StoreFree(&s);
+}
+
 int StoreChecks(void)
 {
     failures = 0;
@@ -1308,5 +1422,6 @@ int StoreChecks(void)
     SaveChecks();
     LocalChecks();
     NativeChecks();
+    RedeclareChecks();
     return failures;
 }

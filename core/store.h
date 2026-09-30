@@ -182,6 +182,28 @@ const char *StoreSymbolName(const Store *store, StoreSymbol symbol);
 StoreKind StoreDeclareKind(Store *store, const char *name, StoreKind base,
                            const StoreFieldDecl *fields, int count, const char **error);
 
+/** @brief Declares an existing kind again with other fields, migrating its things (a reload, §5.7).
+ *
+ * The kind keeps its id, its base, its handler and its handled events. Its fields become its base's
+ * followed by fields, as StoreDeclareKind lays them out; every kind derived from it is laid out
+ * again over the new base with its own fields unchanged. Every existing thing of those kinds keeps
+ * each field whose name and type (and a collection's element, key, capacity and height) are
+ * unchanged, :local or not; a new field takes its default; a removed field is dropped; a field whose
+ * type changed takes its default. Each removed or retyped field is reported once per kind with
+ * TraceLog(LOG_WARNING, "STORE: kind K declared again: field F ..."), naming how many things of the
+ * kind lost it. A field whose name and type are unchanged keeps the kind's current default unless
+ * its declaration gives one (init); a collection always keeps it. Snapshots taken before are refused
+ * by StoreSnapshotRestore (the layout they hold is gone) until the kind is declared back as it was.
+ * Field indices and block offsets change: native code that cached them for this kind looks them up
+ * again. Pointers from StoreSharedBlock and StoreLocalBlock for these kinds are invalid.
+ * @param store Store, between ticks.
+ * @param kind Kind to declare again.
+ * @param fields Its own field declarations, as StoreDeclareKind takes them; may be NULL when count is 0.
+ * @param count Number of declarations.
+ * @return True when the kind and its derived kinds were migrated; false with StoreLastError set and
+ * nothing changed (a bad declaration, a derived kind whose own field now clashes with the base's). */
+bool StoreRedeclareKind(Store *store, StoreKind kind, const StoreFieldDecl *fields, int count);
+
 /** @brief Finds a kind by name.
  * @param store Store.
  * @param name Kind name.

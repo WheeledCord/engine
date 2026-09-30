@@ -49,12 +49,21 @@ bool GameS7LoadGame(const char *path);
 
 /** @brief Loads the last game file again into a fresh environment and swaps its handlers in.
  *
- * Kinds keep their ids. A kind whose fields differ from the live declaration (names or types)
- * refuses the reload with a message naming the kind and the field; the old handlers stay.
+ * Kinds keep their ids. A kind whose fields differ from the live declaration is declared again with
+ * StoreRedeclareKind as the file declares it, migrating its things and those of kinds derived from
+ * it (docs/developer/store.md §5.7); each dropped or retyped field is reported once per kind. A file
+ * that fails declares those kinds back and restores the world as it was before the reload, and the
+ * old handlers stay. In a networked session (GameS7Network.session) a reload that changes a kind's
+ * fields or adds a kind is refused, naming the kind and saying to restart the session, and changes
+ * nothing; one that changes only handlers and helpers goes ahead.
  * @return True when reloaded; false with the reason reported through the error sink. */
 bool GameS7Reload(void);
 
 /** @brief Evaluates REPL text in the game environment (the rootlet before a game is loaded).
+ *
+ * REPL code runs outside handlers, so the store's rules do not apply to it, except that in a
+ * networked session a write to a thing this machine does not own (a field, a map or grid cell, or
+ * remove) is refused with rule 5's message naming the owner.
  * @param text One or more forms.
  * @param answer Receives the printed value, or the error message; malloced, release with free.
  * May be NULL.
@@ -79,6 +88,9 @@ typedef struct GameS7Network
     /* Start a session; false with why filled when it can't. */
     bool (*host)(void *user, int port, char *why, size_t size);
     bool (*join)(void *user, const char *address, int port, char *why, size_t size);
+    /* Whether this machine is in a networked session now (hosting, joined, or replaying one); NULL
+       answers no. A reload may not change kinds then, and the REPL may not write others' things. */
+    bool (*session)(void *user);
 } GameS7Network;
 
 /** @brief Gives the calls their network; it survives GameS7Close.
