@@ -45,11 +45,25 @@ static bool LineWith(const char *log, const char *text, char *out, size_t size)
     return found;
 }
 
+/* A run that does not exit cleanly prints how it ended and the end of its log, so a rare failure
+   leaves its evidence in the suite's output instead of in a log the next run overwrites. */
 static int Trench(const char *arguments, const char *log)
 {
     char command[1024];
     snprintf(command, sizeof command, "./build/core/trench run %s < /dev/null > %s 2>&1", arguments, log);
-    return system(command);
+    int status = system(command);
+    if (status != 0)
+    {
+        if (WIFSIGNALED(status))
+            printf("present: run %s ended by signal %d\n", arguments, WTERMSIG(status));
+        else
+            printf("present: run %s exited %d\n", arguments, WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        snprintf(command, sizeof command, "grep -v '^INFO' %s | tail -12 | sed 's/^/  | /'", log);
+        fflush(stdout);
+        if (system(command) != 0)
+            printf("  | (no log)\n");
+    }
+    return status;
 }
 
 /* Mean absolute difference per channel between two screenshots of one size, over all but the bottom
