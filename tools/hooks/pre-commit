@@ -1,0 +1,128 @@
+#!/bin/sh
+# The pre-commit hook of docs/developer/hooks.md: protected paths, then the build, then a replay of
+# every recorded session under sessions/. Turn it on with `make hooks`.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+staged=$(git -c core.quotepath=false diff --cached --name-only --no-renames)
+[ -n "$staged" ] || exit 0
+
+# 1. Protected paths. A path matches a pattern of protected.txt the way `case` matches it, so `*`
+# also crosses `/`.
+protected=
+other=
+while IFS= read -r path; do
+    hit=
+    while IFS= read -r pattern; do
+        case $pattern in '' | '#'*) continue ;; esac
+        # shellcheck disable=SC2254
+        case $path in $pattern) hit=1 ;; esac
+    done < tools/hooks/protected.txt
+    if [ -n "$hit" ]; then
+        protected="$protected$path
+"
+    else
+        other=1
+    fi
+done <<EOS
+$staged
+EOS
+
+if [ -n "$protected" ]; then
+    tree=$(git write-tree) || exit 1
+    if [ "${TRENCH_APPROVED:-}" != "$tree" ]; then
+        echo "pre-commit: refused. This commit touches protected paths:" >&2
+        printf '%s' "$protected" | sed 's/^/  /' >&2
+        echo "The owner reads the diff and runs tools/hooks/approve, then sets the TRENCH_APPROVED" >&2
+        echo "line it prints in the environment of this commit." >&2
+        exit 1
+    fi
+    if [ -n "$other" ] && [ "${TRENCH_APPROVED_MIXED:-}" != 1 ]; then
+        echo "pre-commit: refused. This commit touches protected paths and other paths together:" >&2
+        printf '%s' "$protected" | sed 's/^/  /' >&2
+        echo "Code and the recordings or store changes that check it must not land together. Split the" >&2
+        echo "commit, or set TRENCH_APPROVED_MIXED=1 as well as TRENCH_APPROVED to accept it as one." >&2
+        exit 1
+    fi
+fi
+
+# 4. A commit that touches only docs/ needs no build and no replay.
+code=
+while IFS= read -r path; do
+    case $path in docs/*) ;; *) code=1 ;; esac
+done <<EOS
+$staged
+EOS
+[ -n "$code" ] || exit 0
+
+# 2. Build.
+log=$(mktemp) || exit 1
+trap 'rm -f "$log"' EXIT
+if ! { make all && make -f Makefile.core build/core/trench; } >"$log" 2>&1; then
+    tail -n 40 "$log" >&2
+    echo "pre-commit: refused. The build failed." >&2
+    exit 1
+fi
+
+# 3. Replays. sessions/index.txt maps a session directory to its game directory.
+[ -f sessions/index.txt ] || exit 0
+expected=$(mktemp) || exit 1
+actual=$(mktemp) || exit 1
+trap 'rm -f "$log" "$expected" "$actual"' EXIT
+failed=
+while read -r name game; do
+    case $name in '' | '#'*) continue ;; esac
+    for replay in sessions/"$name"/*.replay; do
+        [ -e "$replay" ] || continue
+        session=${replay%.replay}
+        if [ ! -f "$session.hashes" ]; then
+            echo "pre-commit: session $session has no .hashes file" >&2
+            failed=1
+            continue
+        fi
+        if ! build/core/trench run "$game" --headless --replay "$replay" --hash-every 60 >"$actual" 2>/dev/null; then
+            echo "pre-commit: session $session: the replay did not run to the end" >&2
+            failed=1
+            continue
+        fi
+        # Line for line: the first line that differs names its tick (or the end of one file).
+        result=$(awk '
+            NR == FNR { want[FNR] = $0; wants = FNR; next }
+            { got[FNR] = $0; gots = FNR }
+            END {
+                n = wants > gots ? wants : gots
+                for (i = 1; i <= n; i++)
+                    if (want[i] != got[i]) {
+                        line = (i in got) ? got[i] : want[i]
+                        split(line, f, " ")
+                        if (!(i in got)) why = "the replay ended early"
+                        else if (!(i in want)) why = "the replay printed more than expected"
+                        else why = "expected [" want[i] "], got [" got[i] "]"
+                        where = (f[1] == "tick") ? "tick " f[2] : "the closing line (" f[1] " " f[2] ")"
+                        print "first differs at " where ": " why
+                        exit 1
+                    }
+            }' "$session.hashes" "$actual")
+        if [ $? -ne 0 ]; then
+            echo "pre-commit: session $session: $result" >&2
+            failed=1
+        fi
+    done
+done <sessions/index.txt
+for dir in sessions/*/; do
+    [ -d "$dir" ] || continue
+    name=${dir#sessions/}
+    name=${name%/}
+    grep -q "^$name[[:space:]]" sessions/index.txt || {
+        echo "pre-commit: sessions/$name is not listed in sessions/index.txt" >&2
+        failed=1
+    }
+done
+if [ -n "$failed" ]; then
+    echo "pre-commit: refused. A recorded session no longer replays to its recorded hashes." >&2
+    exit 1
+fi
+exit 0

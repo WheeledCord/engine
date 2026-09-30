@@ -1,0 +1,13 @@
+#!/bin/sh
+# The owner's step before a commit that touches protected paths: read the diff, then use the line
+# this prints. The approval is for exactly this staged tree; change the index and it is void.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+git diff --cached --stat
+tree=$(git write-tree) || exit 1
+echo
+echo "staged tree $tree"
+echo "export TRENCH_APPROVED=$tree"

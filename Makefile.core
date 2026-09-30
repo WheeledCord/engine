@@ -26,7 +26,7 @@ RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
 # What the SDK says it is: the revision it was built from, and whether that tree had uncommitted
 # changes, so a build can always be traced back to an engine someone can check out.
 ENGINE_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
-.PHONY: sdk install sdk-example run-authoring all run test-gameplay test-regression integration smoke full-check api-docs-update docs-check script-api clean boundary FORCE
+.PHONY: sdk install sdk-example run-authoring all run test-gameplay test-regression integration smoke full-check api-docs-update docs-check script-api clean boundary hooks FORCE
 # A normal build produces the engine and its authoring tools. Tests are opt-in commands below.
 all: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
@@ -152,6 +152,9 @@ smoke: test-gameplay test-regression
 	python3 tools/test_engine_build.py
 	$(MAKE) -f Makefile.core docs-check
 full-check: smoke integration
+# The owner turns the commit gate on (docs/developer/hooks.md); it is not part of all.
+hooks:
+	git config core.hooksPath tools/hooks
 api-docs-update:
 	python3 tools/generate_api_docs.py --write
 docs-check:
