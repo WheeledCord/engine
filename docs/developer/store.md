@@ -689,8 +689,8 @@ change them on the other machines mid-session. A reload that changes only handle
 allowed there.
 
 **The REPL in recordings (B5.5).** Each REPL line is recorded as a developer command with the tick
-it ran before; a replay evaluates it at the same point (after the tick's input is set, before
-`StoreTick`), and its printed answer is discarded. REPL code runs outside handlers, so the store's
+it ran before; a replay evaluates it at the same point the live line ran (between frames, before the next
+tick's input reaches the game), so replay and play agree, and its printed answer is discarded. REPL code runs outside handlers, so the store's
 rules do not apply to it, except in a networked session, where a write to a thing this machine does
 not own is refused with the rule 5 message: the owner's next state would overwrite it silently,
 which is the failure rule 5 exists to make loud.
