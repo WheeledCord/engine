@@ -672,6 +672,23 @@ left room:
   turns off, freed when the thing goes); the stream is loaded whole, as `play-sound`'s sounds are.
   `GameSoundHeard` (`gameplay/game.h`) is the gain and pan it is heard at, for checks.
 
+
+**Reload migrates changed kinds (B5.1, B4).** `(reload)` re-declares a kind whose fields changed
+with `StoreRedeclareKind(store, kind, fields, count)`: every existing thing of that kind (and of
+kinds derived from it) keeps each field whose name and type are unchanged, a new field gets its
+default, a removed field is dropped, and a field whose type changed gets its default; each dropped
+or reset field is reported once per kind and field, as loading a save does. Kind ids do not change.
+In a networked session a reload that changes any kind's fields is refused with a message saying to
+restart the session: every machine must agree on the kinds (the B3.7 kinds check), and nothing can
+change them on the other machines mid-session. A reload that changes only handlers and helpers is
+allowed there.
+
+**The REPL in recordings (B5.5).** Each REPL line is recorded as a developer command with the tick
+it ran before; a replay evaluates it at the same point (after the tick's input is set, before
+`StoreTick`), and its printed answer is discarded. REPL code runs outside handlers, so the store's
+rules do not apply to it, except in a networked session, where a write to a thing this machine does
+not own is refused with the rule 5 message: the owner's next state would overwrite it silently,
+which is the failure rule 5 exists to make loud.
 ## 6. The runner (`gameplay/game.c`)
 
 ### 6.1 Projects and entry points
