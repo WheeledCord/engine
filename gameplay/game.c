@@ -107,15 +107,14 @@ typedef struct StaticModel
     uint64_t look;   /* what it was batched with (LookOf): another look unbatches it */
     DrawItem *items; /* its world-space items, as they went into the batch */
     int itemCount;
-} StaticModel;
-
-/* A node whose transform a batch depends on: a batched model and each node above it up to its
-   :static thing, with the fields it was batched at. */
-typedef struct StaticNode
-{
-    StoreId thing, root;
+    /* Where it was batched: its gameplay world matrix (World3DWorldMatrix, so a moved ancestor
+       counts too), its own position, rotation and scale (to say whether it or an ancestor moved)
+       and its :static thing. */
+    Matrix world;
     Vector3 position, rotation, scale;
-} StaticNode;
+    StoreId root;
+    uint32_t movedFrame; /* the CheckStatics pass that took it out as moved: one error per root there */
+} StaticModel;
 
 /* A tilemap's 8x8-cell region (map null: things standing on no tilemap) and its batches. */
 typedef struct StaticRegion
@@ -237,8 +236,6 @@ typedef struct Runner
     bool noStaticBatch;        /* --no-static-batch: every static model drawn as itself (a check's switch) */
     StaticModel *statics;      /* per thing index */
     uint32_t staticCapacity;
-    StaticNode *staticNodes;
-    int staticNodeCount, staticNodeCapacity;
     StaticRegion *regions;
     int regionCount, regionCapacity;
     DrawItem *scratch; /* one model's items while they are built */
@@ -631,7 +628,10 @@ static void NetTap(void *user, int peer, int channel, const void *data, size_t s
     (void)user;
     Note(peer, channel, data, size);
     if (channel == REPLAY_PEER_LEFT)
+    {
         printf("net: player %d left\n", peer);
+        fflush(stdout); /* as the joined and hosting lines are: something may be watching the log */
+    }
 }
 
 /* Starts a session: from --host/--join (atStart, before the first tick), from (host-game) or
@@ -1507,27 +1507,13 @@ static bool NodeFields(StoreId id, Vector3 *p, Vector3 *r, Vector3 *s)
     return true;
 }
 
-/* Remembers the transform of every node from a batched model up to its :static thing. */
-static void TrackStaticChain(StoreId model, StoreId root)
-{
-    for (StoreId at = model; StoreAlive(&run.store, at); at = StoreParent(&run.store, at))
-    {
-        bool known = false;
-        for (int n = 0; n < run.staticNodeCount && !known; n++)
-            known = SameThing(run.staticNodes[n].thing, at);
-        StaticNode node = {at, root, {0, 0, 0}, {0, 0, 0}, {1, 1, 1}};
-        if (!known && NodeFields(at, &node.position, &node.rotation, &node.scale) &&
-            Reserve((void **)&run.staticNodes, &run.staticNodeCapacity, run.staticNodeCount + 1,
-                    sizeof *run.staticNodes))
-            run.staticNodes[run.staticNodeCount++] = node;
-        if (SameThing(at, root))
-            break;
-    }
-}
-
 /* Puts a model's items in its region's batch, which is rebuilt at this frame's end. */
 static bool StaticBatch(StaticModel *s, StoreId root, const DrawItem *items, int count, Vector3 at)
 {
+    Matrix world;
+    Vector3 position, rotation, scale;
+    if (!World3DWorldMatrix(&run.world, s->thing, &world) || !NodeFields(s->thing, &position, &rotation, &scale))
+        return false;
     int region = RegionAt(at);
     DrawItem *copy = count > 0 ? malloc(sizeof *copy * (size_t)count) : NULL;
     if (region < 0 || !copy)
@@ -1541,65 +1527,71 @@ static bool StaticBatch(StaticModel *s, StoreId root, const DrawItem *items, int
     s->region = region;
     s->state = STATIC_BATCHED;
     s->look = LookOf(s->thing, root);
+    s->world = world;
+    s->position = position, s->rotation = rotation, s->scale = scale;
+    s->root = root;
     run.regions[region].dirty = true;
-    TrackStaticChain(s->thing, root);
     return true;
 }
 
-/* Whether a batched model hangs from node (or is it). */
-static bool Under(StoreId model, StoreId node)
-{
-    for (StoreId at = model; StoreAlive(&run.store, at); at = StoreParent(&run.store, at))
-        if (SameThing(at, node))
-            return true;
-    return false;
-}
-
-/* Before the models are gathered: a batched node whose position, rotation or scale was written is an
-   error naming the flag, reported once, and the models under it leave the batch and are drawn as
-   themselves; a removed model leaves its region's batch. Checked here, at the next frame, and not
-   when the field is written: batching happens only where a window draws, so refusing the write
-   would make gameplay differ between a headless replay and play (rule 1). */
+/* Before the models are gathered: a batched model whose gameplay world matrix changed since it was
+   batched (its own position, rotation or scale, or any ancestor's) leaves its batch. On the machine
+   that owns it the write was this machine's game code, so it is an error naming the flag, reported
+   once per :static thing per frame, and the model is drawn as itself from then on. Elsewhere the
+   move came from its owner and is no error: the model is batched again where it now stands. A
+   removed model leaves its region's batch. Checked here, at the next frame, and not when the field
+   is written: batching happens only where a window draws, so refusing the write would make gameplay
+   differ between a headless replay and play (rule 1). */
 static void CheckStatics(void)
 {
     static const char *const names[3] = {"position", "rotation", "scale"};
-    for (int n = run.staticNodeCount - 1; n >= 0; n--)
+    static uint32_t frame;
+    frame++;
+    for (uint32_t i = 0; i < run.staticCapacity; i++)
     {
-        StaticNode *node = &run.staticNodes[n];
-        Vector3 now[3];
-        bool alive = StoreAlive(&run.store, node->thing) && StoreAlive(&run.store, node->root) &&
-                     NodeFields(node->thing, &now[0], &now[1], &now[2]);
+        StaticModel *s = &run.statics[i];
+        if (s->state != STATIC_BATCHED)
+            continue;
+        Matrix world;
+        bool alive = StoreAlive(&run.store, s->thing);
+        if (alive && World3DWorldMatrix(&run.world, s->thing, &world) && !memcmp(&world, &s->world, sizeof world))
+            continue;
+        if (!alive || !StoreOwnedHere(&run.store, s->thing) || !StoreAlive(&run.store, s->root) ||
+            !FieldTrue(s->root, "static"))
+        {
+            StaticRelease(s, STATIC_NONE);
+            continue;
+        }
+        bool reported = false;
+        for (uint32_t j = 0; j < run.staticCapacity && !reported; j++)
+            reported = run.statics[j].state == STATIC_MOVED && run.statics[j].movedFrame == frame &&
+                       SameThing(run.statics[j].root, s->root);
+        StaticRelease(s, STATIC_MOVED);
+        s->movedFrame = frame;
+        if (reported)
+            continue;
+        Vector3 now[3] = {{0, 0, 0}, {0, 0, 0}, {1, 1, 1}};
+        NodeFields(s->thing, &now[0], &now[1], &now[2]);
+        const Vector3 was[3] = {s->position, s->rotation, s->scale};
         int changed = -1;
-        const Vector3 was[3] = {node->position, node->rotation, node->scale};
-        for (int f = 0; alive && f < 3 && changed < 0; f++)
+        for (int f = 0; f < 3 && changed < 0; f++)
             if (memcmp(&was[f], &now[f], sizeof now[f]))
                 changed = f;
-        if (alive && changed < 0)
-            continue;
-        if (changed >= 0 && FieldTrue(node->root, "static"))
-        {
-            char text[256];
-            const char *kind = StoreKindName(&run.store, StoreKindOf(&run.store, node->thing));
-            const char *rootKind = StoreKindName(&run.store, StoreKindOf(&run.store, node->root));
-            if (SameThing(node->thing, node->root))
-                snprintf(text, sizeof text, "%s on %s #%u changed, but %s is :static; remove :static if it moves",
-                         names[changed], kind, node->thing.index, kind);
-            else
-                snprintf(text, sizeof text,
-                         "%s on %s #%u changed, but it hangs from %s #%u, which is :static; remove :static if "
-                         "it moves",
-                         names[changed], kind, node->thing.index, rootKind, node->root.index);
-            TraceLog(LOG_ERROR, "RUN: %s", text);
-            OnError(text);
-            for (uint32_t i = 0; i < run.staticCapacity; i++)
-                if (run.statics[i].state == STATIC_BATCHED && Under(run.statics[i].thing, node->thing))
-                    StaticRelease(&run.statics[i], STATIC_MOVED);
-        }
-        run.staticNodes[n] = run.staticNodes[--run.staticNodeCount];
+        char what[128], text[256];
+        const char *kind = StoreKindName(&run.store, StoreKindOf(&run.store, s->thing));
+        const char *rootKind = StoreKindName(&run.store, StoreKindOf(&run.store, s->root));
+        if (changed >= 0)
+            snprintf(what, sizeof what, "%s on %s #%u changed", names[changed], kind, s->thing.index);
+        else
+            snprintf(what, sizeof what, "an ancestor of %s #%u moved it", kind, s->thing.index);
+        if (SameThing(s->thing, s->root))
+            snprintf(text, sizeof text, "%s, but %s is :static; remove :static if it moves", what, kind);
+        else
+            snprintf(text, sizeof text, "%s, but it hangs from %s #%u, which is :static; remove :static if it moves",
+                     what, rootKind, s->root.index);
+        TraceLog(LOG_ERROR, "RUN: %s", text);
+        OnError(text);
     }
-    for (uint32_t i = 0; i < run.staticCapacity; i++)
-        if (run.statics[i].state == STATIC_BATCHED && !StoreAlive(&run.store, run.statics[i].thing))
-            StaticRelease(&run.statics[i], STATIC_NONE);
 }
 
 /* After the models are gathered: each region whose members changed is merged again, and every
@@ -1669,16 +1661,14 @@ static void FreeStatics(void)
     for (int r = 0; r < run.regionCount; r++)
         free(run.regions[r].batches);
     free(run.statics);
-    free(run.staticNodes);
     free(run.regions);
     free(run.scratch);
     free(run.viewItems);
     run.statics = NULL;
-    run.staticNodes = NULL;
     run.regions = NULL;
     run.scratch = run.viewItems = NULL;
     run.staticCapacity = 0;
-    run.staticNodeCount = run.staticNodeCapacity = run.regionCount = run.regionCapacity = 0;
+    run.regionCount = run.regionCapacity = 0;
     run.scratchCapacity = run.viewCount = run.viewCapacity = 0;
 }
 

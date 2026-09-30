@@ -28,6 +28,7 @@ int GameChecks(void);
 /* The project runner: a headless bot session recorded and replayed to the same hash, another seed,
    recordings refused, and the store's pending commands. (main.c's own RunnerChecks is another.) */
 int GameRunnerChecks(void);
+int NetInterruptChecks(void); /* only the Ctrl+C-on-a-client check (regression_test --net-interrupt) */
 int NetChecks(void); /* networking on the store: host and two clients, in-memory and lossy (§9.7) */
 
 /* What the runner draws and plays beyond models (§3.1): static batching, point lights, the viewmodel
