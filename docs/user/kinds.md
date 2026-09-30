@@ -102,6 +102,23 @@ the host leaving each print `run: the session ended: <why>` and end the run with
 Ctrl+C on a client leaves the session cleanly. A headless host that reaches its `--ticks` waits up
 to 5 s for its clients to finish theirs before it leaves.
 
+**Carrying things.** A thing is owned by whoever owns the root of the tree it hangs from, so picking
+something up is `(attach! item (child soldier 'hand) :at (vec3 0 0 0))` and putting it down is
+`(detach! item :at point :up normal :yaw y)`; only the item's owner may do either. A free item is
+the host's, so a player asks for it with a message (`(send item 'grab self)`), and the item's `grab`
+handler, on the host, attaches it and answers; from then on the holder's machine runs the item's
+handlers and its drop is instant. `(first-child hand)` is what a hand holds. A `socket` child
+(`(child hand (socket :bone "hand.R" :of (arms body)))`) is where a held thing hangs; phase 1 has
+no bone lookup, so it sits at its own `:at`. When a holder's player leaves, or the host removes a
+holder, the item is detached where the hand was, becomes the host's, and its `(on (orphaned))` runs
+there, so it can seat itself on the floor (a client removing its own holder drops the item where the
+hand was, but `orphaned` does not run yet). `(on (parent-changed was now))` runs on every machine
+(presentation; `was` is `#f` when the thing first appears) for pickup and drop sounds.
+`(aimed-at 'kind distance)` from a handler looks through the first camera under its thing and finds
+areas by their sphere, `raycast` takes `:ignore (list self item)`, and `(draw-ring x y r fill)` draws
+a hold ring. The whole case is `examples/carried-item/`; `tests/regression/net_carry/` runs it on
+three machines.
+
 Each machine can record its side (`--record`); replaying it opens no socket, takes whether it
 hosted or joined from the recording (a `--host` or `--join` given with `--replay` is ignored, with
 a note) and reaches the same hashes as the live run. `tests/regression/net_game/` is a minimal

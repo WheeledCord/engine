@@ -141,13 +141,21 @@
 ;;; helper, %kind-states, and one %kind-handler per handler. Field defaults, :init values, child
 ;;; settings and is settings are expressions, evaluated once when the kind is declared.
 
-(define (%settings-expr kind args)            ; (:k v ... positional) -> (list (cons 'k v) (cons #f p))
+;;; A child setting whose value is a list of the kind's own child names, such as a socket's
+;;; :of (arms body), names those children: it is quoted rather than called (B6).
+(define (%names-of-children? v names)
+  (and (pair? v) (list? v) (not (null? names))
+       (let loop ((v v)) (or (null? v) (and (symbol? (car v)) (memq (car v) names) (loop (cdr v)))))))
+
+(define* (%settings-expr kind args (names '())) ; (:k v ... positional) -> (list (cons 'k v) (cons #f p))
   (let loop ((a args) (out '()))
     (cond ((null? a) (cons 'list (reverse out)))
           ((keyword? (car a))
            (if (null? (cdr a))
                (error 'game-error "define-kind ~A: ~A needs a value" kind (car a)))
-           (loop (cddr a) (cons (list 'cons (list 'quote (keyword->symbol (car a))) (cadr a)) out)))
+           (loop (cddr a) (cons (list 'cons (list 'quote (keyword->symbol (car a)))
+                                      (if (%names-of-children? (cadr a) names) (list 'quote (cadr a)) (cadr a)))
+                                out)))
           (else (loop (cdr a) (cons (list 'cons #f (car a)) out))))))
 
 (define (%spec-expr x)                        ; a declared type; its counts are expressions
@@ -176,13 +184,13 @@
     (list 'list (list 'quote (cadr f)) (if spec? (%spec-expr x) #f) (if spec? #f x)
           (if local ''(local) ''()) (if (null? init) ''() (list 'list (car init))))))
 
-(define (%child-expr kind c)                  ; (child name (kind setting ...) child ...)
+(define* (%child-expr kind c (names '()))     ; (child name (kind setting ...) child ...)
   (unless (and (pair? (cdr c)) (symbol? (cadr c)) (pair? (cddr c)) (pair? (caddr c)) (symbol? (caaddr c)))
     (error 'game-error "define-kind ~A: ~S should be (child name (kind :setting value ...))" kind c))
   (cons 'list (cons (list 'quote (cadr c))
                     (cons (list 'quote (caaddr c))
-                          (cons (%settings-expr kind (cdaddr c))
-                                (map (lambda (n) (%child-expr kind n)) (cdddr c)))))))
+                          (cons (%settings-expr kind (cdaddr c) names)
+                                (map (lambda (n) (%child-expr kind n names)) (cdddr c)))))))
 
 (define (%child-names c)                      ; a child and every child declared inside it
   (cons (cadr c) (apply append (map %child-names (cdddr c)))))
@@ -258,7 +266,7 @@
         (append
          (list 'begin
                (list '%kind-declare (list 'quote name) (list 'quote base) (cons 'list field-exprs)
-                     (cons 'list (map (lambda (c) (%child-expr name c)) children)) settings))
+                     (cons 'list (map (lambda (c) (%child-expr name c (map car child-alist))) children)) settings))
          (if states
              (list (list '%kind-states (list 'quote name) (list 'quote (cadr states)) (list 'quote (map car (cddr states)))))
              '())

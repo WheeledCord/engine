@@ -490,6 +490,17 @@ bool StoreGetAt(const Store *store, StoreId id, int field, int index, StoreValue
  * @return True when written; false with StoreLastError set. */
 bool StoreSetList(Store *store, StoreId id, int field, const StoreValue *items, int count);
 
+/** @brief Replaces a LIST or SET field through the engine's own path, skipping the rules (type and
+ * capacity still checked), as StoreSetEngine does for scalars: a spawn's settings on a thing it
+ * gives to another owner.
+ * @param store Store.
+ * @param id Thing.
+ * @param field LIST or SET field index.
+ * @param items The new elements.
+ * @param count How many.
+ * @return True when written; false with StoreLastError set. */
+bool StoreSetListEngine(Store *store, StoreId id, int field, const StoreValue *items, int count);
+
 /** @brief Reads a MAP field's value for a key.
  * @param store Store.
  * @param id Thing.

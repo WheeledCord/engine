@@ -219,7 +219,10 @@ void StoreSetLocalOwners(Store *, const int *owners, int count);    /* which own
    once per kind and event through `TraceLog(LOG_WARNING, ...)`.
 6. Systems run (`StoreAddSystem`, in registration order) and the events they queue are delivered.
 7. Removals apply: storage of things removed this tick is freed, declared children with them, guests
-   detached (§2.3). Then the store records which shared fields changed since the last `StoreFrame`
+   detached (§2.3). A detached guest whose kind handles `orphaned` and whose new owner (the host) is
+   local gets `orphaned` as a timer due next tick (B1, B3.7); a machine that is not the host leaves it
+   (a client removing its own holder: nothing runs `orphaned` yet; a leaver's guests get it from
+   store_net, §9.4). Then the store records which shared fields changed since the last `StoreFrame`
    (compare the shared pools against a shadow copy per kind, only for kinds that registered any
    `-changed` event; fields are compared per declared field, so a collection is one change).
    `start` always reaches a thing before its first `tick`. A thing spawned during a tick (from a
@@ -237,8 +240,11 @@ walk the base chain itself.
 `StoreFrame` sets PRESENTATION and runs, for every thing (owned anywhere): `frame` with `{dt}`;
 then, for every field with a registered `<field>-changed` event whose value differs from the
 shadow, `<field>-changed` with `{was, now}` (`was` is `STORE_NONE` when the thing appeared since the
-last frame, B2.1); then `draw-hud` with no args; then it refreshes the shadow. A `-changed` event
-symbol is the field name with `-changed` appended, interned by `StoreKindHandles`.
+last frame, B2.1); then `parent-changed` with `{was, now}` for a kind that handles it, when the
+thing's parent differs from the one the last frame saw (`was` `STORE_NONE` when it appeared, a null
+REF for a root; a detach and re-attach between two frames is invisible); then `draw-hud` with no
+args; then it refreshes the shadow. A `-changed` event symbol is the field name with `-changed`
+appended, interned by `StoreKindHandles`.
 
 ### 2.6 Hooks the runner and world3d install
 
@@ -497,7 +503,9 @@ one (B2.5).
 `(spawn 'kind :at v :owner p :parent thing)` spawns the kind and, in declaration order, every
 declared child recursively, applying each child's settings as field writes, then queues `start`.
 It answers the thing at once. `(remove thing)`, `(attach! thing parent :at v :rotation r)`,
-`(detach! thing :at world-position :up normal :yaw y)` and `(detach! thing :keep-world #t)`,
+`(detach! thing :at world-position :up normal :yaw y)` and `(detach! thing :keep-world #t)` (a
+thing that is already a root and is given a placement is only placed, under the rules, so an
+`orphaned` handler can seat what the engine detached; a root with no placement is refused),
 `(parent t)`, `(children t)`, `(first-child t)`, `(child t 'name)`, `(is? t 'kind)`, `(kind-of t)`,
 `(things 'kind)`, `(game)` (the root thing of kind `game`), `(local-player)`, `(players)`.
 
@@ -541,12 +549,13 @@ Input (read from the tick's `GameInput`, §6.2): `(define-actions (name "Key") .
 'action)`, `(pressed? 'action)`, `(input-vector 'left 'right 'forward 'back)` -> vec3 (x, 0, z)
 normalised, `(mouse-motion)` -> vec3 (dx, dy, 0). Vectors: `vec3 vx vy vz v+ v- v* vscale vlength
 vdistance vnormalize vdot vcross rotate-y heading aim spread clamp`. World: `world-position`,
-`raycast` (from dir max :ignore) -> hit or #f, `hit-thing hit-point hit-normal hit-distance`,
+`raycast` (from dir max :ignore thing-or-list, up to 16) -> hit or #f, `hit-thing hit-point hit-normal hit-distance`,
 `line-of-sight?`, `nearest` (kind point :max :where), `overlapping` (area kind), `aimed-at` (camera
-kind distance), `path-next` (tilemap from to), `cell->world`, `world->cell`, `move-and-slide!`,
+kind distance, or kind distance from a handler: the first camera under its thing; area spheres are
+targets), `path-next` (tilemap from to), `cell->world`, `world->cell`, `move-and-slide!`,
 `teleport!`, `random` (n; from `self`'s stream, or the presentation stream in presentation phase),
 `tick-time`. Presentation: `draw-text` (text x y :size :color :align), `draw-rect` (x y w h :color),
-`draw-ring` (x y r :color), `draw-image` (name x y), `screen-width`, `screen-height`, `rgba`,
+`draw-ring` (x y r [fill 0-1, clockwise from the top] :color), `draw-image` (name x y), `screen-width`, `screen-height`, `rgba`,
 colour symbols `white black red ...`, `play-sound` (name :at), `burst` (preset :at), `profile-ref`,
 `profile-set!` (a per-player key/value file beside the project, presentation only), `format` (s7's).
 Networking: `(host-game port)`, `(join-game address port)` (presentation or REPL only; §9.6),
@@ -765,7 +774,8 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
   tick, per sender, `renderTick = newest sender tick received + ticks since it arrived - 6` (100 ms);
   every remote thing from that sender is written (with `StoreSetEngine`) as it stood at `renderTick`:
   fields registered with `StoreNetInterpolate(net, kind, field)` (any FLOAT or VEC3, not only
-  transforms) are blended between the two received states either side of `renderTick`; every other
+  transforms) are blended between the two received states either side of `renderTick` (equal values
+  are copied, so a -0.0 at rest stays -0.0 and a still game hashes the same everywhere); every other
   field, the header (parent, owner) and spawns and removes come from the earlier of the two. A parent
   change between the two states is a jump (the later value). So a remote thing never shows two
   ticks at once. A thing whose new owner is this machine stops being remote on arrival: that state's
@@ -948,5 +958,10 @@ How it is built:
   per client printed (SWAT Tower is never still, so its state hashes are not compared). Also: things
   store_net creates reach world3d's spawned hook; `(host-game port)` from a frame handler hosts and
   its recording replays; a join nobody answers, a kinds refusal and a host leaving exit 1; Ctrl+C on
-  a client leaves cleanly. The checks are skipped with a note when ENet cannot bind a loopback
+  a client leaves cleanly. Three processes of `tests/regression/net_carry` (the carried-item
+  example's carryable and a test-only carrier per player that grabs the nearest free item and drops
+  it 3 m away after 2 s; 2,400 ticks, the last 120 still) agree on every item's holder and every
+  player's counts, answer every grab, reach at least 5 grants and the same net state hash; a second
+  session whose carriers keep what they get, with one client run for 1,200 ticks, shows the host
+  running that client's item's `orphaned` once and the item on the floor when `player-left` runs. The checks are skipped with a note when ENet cannot bind a loopback
   port.

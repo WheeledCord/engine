@@ -428,6 +428,7 @@ static void FreeKind(StoreKindData *k)
     free(k->local);
     free(k->shadow);
     free(k->shadowThing);
+    free(k->shadowParent);
     free(k->freeRows);
     free(k->events);
     free(k->warned);
@@ -470,7 +471,12 @@ static void RecomputeKinds(Store *store)
         k->handlesTick = StoreKindHandlesEvent(store, kind, SYMBOL_TICK);
         k->handlesFrame = StoreKindHandlesEvent(store, kind, SYMBOL_FRAME);
         k->handlesDrawHud = StoreKindHandlesEvent(store, kind, SYMBOL_DRAW_HUD);
-        k->watches = false;
+        // parent-changed is watched like a field (B1, C4): a guest attached or detached.
+        StoreSymbol parentChanged = Lookup(store, "parent-changed");
+        k->parentChanged = parentChanged != STORE_NO_SYMBOL && StoreKindHandlesEvent(store, kind, parentChanged)
+                               ? parentChanged
+                               : STORE_NO_SYMBOL;
+        k->watches = k->parentChanged != STORE_NO_SYMBOL;
         for (int f = 0; f < k->fieldCount; f++)
         {
             k->changed[f] = STORE_NO_SYMBOL;
@@ -1327,6 +1333,7 @@ static void ApplyRemovals(Store *store)
     store->phase = STORE_PHASE_NONE;
     store->current = STORE_NULL;
     store->currentOwner = -1;
+    StoreSymbol orphaned = Lookup(store, "orphaned");
     for (uint32_t i = 0; i < store->thingCount; i++)
     {
         if ((store->things[i].flags & (STORE_THING_LIVE | STORE_THING_REMOVED)) !=
@@ -1341,6 +1348,13 @@ static void ApplyRemovals(Store *store)
                 if (store->hooks.orphan)
                     store->hooks.orphan(store->hooks.user, IdOf(store, c));
                 DetachIndex(store, c);
+                // Its orphaned runs on its new owner, the host (B1, B3.7): a timer due next
+                // tick, so it is saved, snapshotted and hashed like any other. A machine that
+                // is not the host leaves it to the host, which sees the drop in its state.
+                const StoreThing *g = &store->things[c];
+                if (orphaned != STORE_NO_SYMBOL && IsLocalOwner(store, g->owner) &&
+                    StoreKindHandlesEvent(store, g->kind, orphaned))
+                    StoreAfter(store, IdOf(store, c), 0.0f, orphaned, NULL, 0);
             }
             c = next;
         }
@@ -1694,15 +1708,25 @@ static bool ResolveWrite(Store *store, StoreId id, int field, Access *a)
     return Resolve(store, id, field, a) && CheckWrite(store, a);
 }
 
-bool StoreSetList(Store *store, StoreId id, int field, const StoreValue *items, int count)
+static bool SetList(Store *store, StoreId id, int field, const StoreValue *items, int count, bool engine)
 {
     Access a;
-    if (!ResolveWrite(store, id, field, &a))
+    if (!(engine ? Resolve(store, id, field, &a) : ResolveWrite(store, id, field, &a)))
         return false;
     if (a.decl->type != STORE_LIST && a.decl->type != STORE_SET)
         return StoreFail(store, true, "type: %s on %s is a %s, not a list or set", a.decl->name,
                          a.kind->name, StoreTypeName(a.decl->type));
     return ListPut(store, a.decl, a.p, items, count, a.decl->name);
+}
+
+bool StoreSetList(Store *store, StoreId id, int field, const StoreValue *items, int count)
+{
+    return SetList(store, id, field, items, count, false);
+}
+
+bool StoreSetListEngine(Store *store, StoreId id, int field, const StoreValue *items, int count)
+{
+    return SetList(store, id, field, items, count, true);
 }
 
 bool StoreMapGet(const Store *store, StoreId id, int field, const StoreValue *key, StoreValue *out)
@@ -2243,8 +2267,12 @@ static bool ReserveShadow(StoreKindData *k)
     if (!owners)
         return false;
     k->shadowThing = owners;
+    StoreId *parents = realloc(k->shadowParent, (size_t)cap * sizeof *parents);
+    if (!parents)
+        return false;
+    k->shadowParent = parents;
     for (uint32_t r = k->shadowCapacity; r < cap; r++)
-        owners[r] = (StoreId){UINT32_MAX, 0};
+        owners[r] = parents[r] = (StoreId){UINT32_MAX, 0};
     k->shadowCapacity = cap;
     return true;
 }
@@ -2288,6 +2316,23 @@ static void Changes(Store *store, uint32_t index)
         ValueAt(&k->fields[f], now, &args[1]);
         Call(store, index, k->changed[f], args, 2, STORE_PHASE_PRESENTATION);
     }
+    // parent-changed: was is none when the thing appeared, and a ref (null for a root) after.
+    if (k->parentChanged == STORE_NO_SYMBOL || !Visible(&store->things[index]) ||
+        store->things[index].generation != id.generation)
+        return;
+    StoreId parent = IdOf(store, store->things[index].parent), before = k->shadowParent[row];
+    if (!appeared && parent.index == before.index && parent.generation == before.generation)
+        return;
+    StoreValue args[2];
+    memset(args, 0, sizeof args);
+    args[1].type = STORE_REF;
+    args[1].as.ref = parent;
+    if (!appeared)
+    {
+        args[0].type = STORE_REF;
+        args[0].as.ref = before;
+    }
+    Call(store, index, k->parentChanged, args, 2, STORE_PHASE_PRESENTATION);
 }
 
 void StoreFrame(Store *store, float dt)
@@ -2322,6 +2367,7 @@ void StoreFrame(Store *store, float dt)
         size_t at = (size_t)t->row * (size_t)k->sharedSize;
         memcpy(k->shadow + at, k->shared + at, (size_t)k->sharedSize);
         k->shadowThing[t->row] = (StoreId){i, t->generation};
+        k->shadowParent[t->row] = IdOf(store, t->parent);
     }
     ApplyRemovals(store);
     store->framing = false;

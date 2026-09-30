@@ -15,6 +15,7 @@
 #include "core/world3d.h"
 #include "gameplay/game.h"
 #include "raylib.h"
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,6 +216,79 @@ static int RunLogged(char **argv, const char *log)
     close(err);
     fclose(capture);
     return result;
+}
+
+/* What carrying needs from the Scheme layer on one machine (proposal B1, B3.7, B6, C4):
+   tests/regression/carry prints "check NAME #t|#f" for each call it tries, with its expected
+   failures, and "event ..." for each parent-changed and orphaned it hears. Every check must say #t,
+   and the events must come in this order: the soldier's socket and the crates appear (was and now
+   #f), the host attaches the crate (#f -> socket), the holder drops it (socket -> #f), it is
+   attached again and let go, attached a third time, and the holder is removed: the crate is
+   detached where the hand was (its old parent is gone, so was reads #f) and its orphaned runs on the
+   host, once. */
+static void CarryChecks(void)
+{
+    static const char *const names[] = {
+        "socket-of-names", "socket-of-given-away", "spawn-list-given-away", "spawn-list-over-capacity-refused",
+        "draw-ring-fill", "socket-of-not-owner-refused", "first-child-empty",
+        "aimed-at-needs-a-camera", "raycast-ignore-list-hits", "raycast-ignore-list-skips",
+        "raycast-ignore-list-refuses-a-number", "draw-ring-fill-refuses-a-symbol", "aimed-at-in-reach",
+        "aimed-at-out-of-reach", "aimed-at-with-camera", "first-child-holds", "socket-local-transform",
+        "dropped-at", "detach-root-no-placement-refused", "detach-root-not-owner-refused", "detach-root-placed",
+        "detach-held-not-owner-refused", "keep-world", "orphan-detached", "orphaned-seated",
+        "parent-changed-is-presentation"};
+    static const char *const events[] = {
+        "event parent-changed #f #f", "event parent-changed #f #f", "event parent-changed #f socket",
+        "event parent-changed socket #f", "event parent-changed #f socket", "event parent-changed socket #f",
+        "event parent-changed #f socket", "event parent-changed #f #f", "event orphaned #f owner-root 1.5"};
+    const char *log = "build/core/runner_carry.log";
+    char *argv[] = {"trench", "run", "tests/regression/carry", "--headless", "--present", "--ticks", "30", NULL};
+    int result = RunLogged(argv, log);
+    Expect(result == 0 && !FileHasLine(log, "ERROR", true), "the carry project runs 30 ticks with no ERROR");
+    FILE *file = fopen(log, "r");
+    char line[512];
+    int seen[sizeof names / sizeof names[0]] = {0}, next = 0, eventCount = 0;
+    bool inOrder = true;
+    while (file && fgets(line, sizeof line, file))
+    {
+        line[strcspn(line, "\r\n")] = 0;
+        if (!strncmp(line, "check ", 6))
+        {
+            char name[128], value[8];
+            if (sscanf(line, "check %127s %7s", name, value) != 2 || strcmp(value, "#t"))
+            {
+                printf("FAIL: runner: carry: %s\n", line);
+                failures++;
+                continue;
+            }
+            for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+                if (!strcmp(name, names[i]))
+                    seen[i]++;
+        }
+        else if (!strncmp(line, "event ", 6))
+        {
+            eventCount++;
+            inOrder = inOrder && next < (int)(sizeof events / sizeof events[0]) && !strcmp(line, events[next]);
+            next++;
+        }
+    }
+    if (file)
+        fclose(file);
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        if (!seen[i])
+        {
+            printf("FAIL: runner: carry: check %s never ran\n", names[i]);
+            failures++;
+        }
+    Expect(inOrder && eventCount == (int)(sizeof events / sizeof events[0]),
+           "parent-changed fires on attach, drop and orphaning with was and now, and orphaned runs once on the host");
+
+    // The example itself loads and runs, presenting, with bot input on its keys (grab and drop).
+    const char *exampleLog = "build/core/runner_carried_item.log";
+    char *example[] = {"trench", "run", "examples/carried-item", "--headless", "--present", "--bot", "--ticks", "600", NULL};
+    Expect(RunLogged(example, exampleLog) == 0 && FileHasLine(exampleLog, "tick 600 hash ", false) &&
+               !FileHasLine(exampleLog, "ERROR", true),
+           "examples/carried-item runs 600 presented ticks with bot input and no ERROR");
 }
 
 /* A floor of swat-tower can end (playtest 2 froze there: populate's do loop drew a new random count
@@ -591,8 +665,9 @@ static int Status(const char *dir, const char *name)
 }
 
 /* A host and two clients of project as three processes over loopback: the host starts, the clients
-   0.2 s later. Each writes DIR/<h|c2|c3>.log, its pid to .pid and its exit status to .status. */
-static void RunThree(const char *dir, const char *project, int port, const char *flags)
+   0.2 s later. Each writes DIR/<h|c2|c3>.log, its pid to .pid and its exit status to .status.
+   lastFlags go to the second client only, after flags (a later --ticks wins). */
+static void RunThree(const char *dir, const char *project, int port, const char *flags, const char *lastFlags)
 {
     char script[4096];
     snprintf(script, sizeof script,
@@ -601,12 +676,124 @@ static void RunThree(const char *dir, const char *project, int port, const char 
              " echo $! > $D/h.pid; sleep 0.2;"
              "( $T --join 127.0.0.1:%d --seed 2 --record $D/C2.rec $F > $D/c2.log 2>&1; echo $? > $D/c2.status ) &"
              " echo $! > $D/c2.pid;"
-             "( $T --join 127.0.0.1:%d --seed 3 --record $D/C3.rec $F > $D/c3.log 2>&1; echo $? > $D/c3.status ) &"
+             "( $T --join 127.0.0.1:%d --seed 3 --record $D/C3.rec $F %s > $D/c3.log 2>&1; echo $? > $D/c3.status ) &"
              " echo $! > $D/c3.pid; wait",
-             dir, project, flags, port, port, port);
+             dir, project, flags, port, port, port, lastFlags);
     fflush(stdout);
     if (system(script) == -1)
         Expect(false, "the three processes start");
+}
+
+/* The carried item of proposal C4 over the network (tests/regression/net_carry): the example's
+   carryable, and a carrier per player that walks to the nearest free carryable, grabs it within
+   1.5 m and drops it 3 m ahead after 2 s. A host and two clients for 2,400 ticks, the last 120 still:
+   every machine's last report names the same holder for each item and the same counts, the grants
+   add up to at least 5, every grab was answered (sent = got + grab-failed), the net state hashes are
+   equal, and nothing prints ERROR. Then a leave: carriers that never drop, and the second client
+   run for 1,200 ticks only. On the host, the item that client's last `hand` line named runs its
+   orphaned there (once, on player 1's machine), hangs from nothing at floor height, and is on the
+   floor (holder 0) when player-left runs; the host and the client that stayed agree at the end. */
+static void CarryNetChecks(const char *dir, int port)
+{
+    static const char *const names[3] = {"h", "c2", "c3"};
+    char log[3][300], holders[3][64], counts[3][3][96], hash[3][64];
+    for (int i = 0; i < 3; i++)
+        snprintf(log[i], sizeof log[i], "%s/%s.log", dir, names[i]);
+    RunThree(dir, "tests/regression/net_carry", port, "--ticks 2400 --present", "");
+    bool clean = true, exited = true, agree = true, answered = true;
+    int grants = 0;
+    for (int i = 0; i < 3; i++)
+    {
+        LineValue(log[i], "carry holders ", holders[i], sizeof holders[i]);
+        LineValue(log[i], "net state hash ", hash[i], sizeof hash[i]);
+        for (int p = 0; p < 3; p++)
+        {
+            char prefix[32];
+            snprintf(prefix, sizeof prefix, "carry player %d ", p + 1);
+            LineValue(log[i], prefix, counts[i][p], sizeof counts[i][p]);
+            agree = agree && counts[i][p][0] && !strcmp(counts[i][p], counts[0][p]);
+        }
+        agree = agree && holders[i][0] && !strcmp(holders[i], holders[0]);
+        clean = clean && !FileHasLine(log[i], "ERROR", true);
+        exited = exited && Status(dir, names[i]) == 0;
+    }
+    for (int p = 0; p < 3; p++)
+    {
+        int sent = 0, got = 0, failed = 0, drops = 0;
+        answered = answered && sscanf(counts[0][p], "sent %d got %d failed %d drops %d", &sent, &got, &failed,
+                                      &drops) == 4 && sent == got + failed;
+        grants += got;
+        printf("runner net carry: player %d: grabs sent %d, got %d, grab-failed %d, drops %d\n", p + 1, sent, got,
+               failed, drops);
+    }
+    printf("runner net carry: holders of items 1-3: host %s, client 2 %s, client 3 %s; net state hashes %s %s %s; "
+           "exits %d %d %d\n",
+           holders[0], holders[1], holders[2], hash[0], hash[1], hash[2], Status(dir, "h"), Status(dir, "c2"),
+           Status(dir, "c3"));
+    Expect(agree, "the host and both clients agree on who holds each carryable, and on every player's counts");
+    Expect(grants >= 5, "the carriers are granted at least 5 grabs in all");
+    Expect(answered, "every grab sent is answered with got or grab-failed");
+    Expect(hash[0][0] && !strcmp(hash[0], hash[1]) && !strcmp(hash[0], hash[2]),
+           "a still carry session ends with the same net state hash on all three");
+    Expect(clean, "no process of the carry session prints ERROR");
+    Expect(exited, "the three processes of the carry session exit 0");
+
+    // The leave: the project with carriers that keep what they get, and a report from 23 s.
+    char project[300], path[340];
+    snprintf(project, sizeof project, "%s/leave", dir);
+    mkdir(project, 0755);
+    static const char *const files[2] = {"engine.project", "net_carry.scm"};
+    for (int f = 0; f < 2; f++)
+    {
+        char from[128];
+        snprintf(from, sizeof from, "tests/regression/net_carry/%s", files[f]);
+        snprintf(path, sizeof path, "%s/%s", project, files[f]);
+        FILE *in = fopen(from, "r"), *out = fopen(path, "w");
+        for (int c; in && out && (c = fgetc(in)) != EOF;)
+            fputc(c, out);
+        if (out && f == 1)
+            fputs("(define hold-for 1000.0)\n(define still-at 23.0)\n", out);
+        if (in)
+            fclose(in);
+        if (out)
+            fclose(out);
+    }
+    RunThree(dir, project, port + 1, "--ticks 1500 --present", "--ticks 1200");
+    char joined[16], hand[16], orphaned[128], after[128], prefix[96];
+    LineValue(log[2], "net: joined as player ", joined, sizeof joined);
+    snprintf(prefix, sizeof prefix, "hand player %s item ", joined);
+    LineValue(log[2], prefix, hand, sizeof hand);
+    snprintf(prefix, sizeof prefix, "orphaned item %s ", hand);
+    LineValue(log[0], prefix, orphaned, sizeof orphaned);
+    snprintf(prefix, sizeof prefix, "after player-left %s item %s ", joined, hand);
+    LineValue(log[0], prefix, after, sizeof after);
+    int orphanings = 0;
+    FILE *file = fopen(log[0], "r");
+    char line[512];
+    while (file && fgets(line, sizeof line, file))
+        orphanings += !strncmp(line, "orphaned item ", 14);
+    if (file)
+        fclose(file);
+    float y = -1;
+    bool seated = sscanf(orphaned, "on player 1 parent #f y %f", &y) == 1 && fabsf(y) < 0.01f;
+    LineValue(log[0], "carry holders ", holders[0], sizeof holders[0]);
+    LineValue(log[1], "carry holders ", holders[1], sizeof holders[1]);
+    printf("runner net carry leave: player %s left holding item %s; on the host: orphaned %d time(s), \"%s\"; "
+           "at player-left \"%s\"; holders at the end host %s, client %s; exits %d %d %d\n",
+           joined, hand, orphanings, orphaned, after, holders[0], holders[1], Status(dir, "h"), Status(dir, "c2"),
+           Status(dir, "c3"));
+    Expect(joined[0] && hand[0] && strcmp(hand, "0"), "the client that leaves is holding an item when it goes");
+    Expect(orphanings == 1 && seated,
+           "the leaver's item runs orphaned once, on the host, and ends hanging from nothing on the floor");
+    Expect(!strcmp(after, "holder 0 parent #f"), "when player-left runs the leaver's item is on the floor");
+    Expect(!FileHasLine(log[1], "orphaned item ", false), "orphaned does not run on the client that stayed");
+    Expect(holders[0][0] && !strcmp(holders[0], holders[1]),
+           "after the leave the host and the client that stayed agree on every holder");
+    clean = true;
+    for (int i = 0; i < 3; i++)
+        clean = clean && !FileHasLine(log[i], "ERROR", true);
+    Expect(clean && Status(dir, "h") == 0 && Status(dir, "c2") == 0 && Status(dir, "c3") == 0,
+           "the leave session prints no ERROR and its three processes exit 0");
 }
 
 static void NetRunChecks(void)
@@ -634,7 +821,7 @@ static void NetRunChecks(void)
 
     // The net test game: 1500 ticks, bots for the first 600, then still.
     RunThree(dir, "tests/regression/net_game", port,
-             "--ticks 1500 --bot --bot-until 600 --hash-every 1500 --print-field game hellos --bench");
+             "--ticks 1500 --bot --bot-until 600 --hash-every 1500 --print-field game hellos --bench", "");
     char netHash[3][64], liveHash[3][64], hellos[3][32];
     bool clean = true, exited = true;
     for (int i = 0; i < 3; i++)
@@ -676,7 +863,7 @@ static void NetRunChecks(void)
     }
 
     // SWAT Tower in co-op: bots throughout, 1200 ticks; every machine holds three soldiers.
-    RunThree(dir, "examples/swat-tower", port + 1, "--ticks 1200 --bot --print-count soldier --bench");
+    RunThree(dir, "examples/swat-tower", port + 1, "--ticks 1200 --bot --print-count soldier --bench", "");
     char soldiers[3][32], sent[256];
     clean = true;
     exited = true;
@@ -700,6 +887,8 @@ static void NetRunChecks(void)
     Expect(up > 0, "the host's --bench prints the bytes it sent per second");
     if (!FileHasLine("examples/swat-tower/profile.txt", "", true))
         remove("examples/swat-tower/profile.txt");
+
+    CarryNetChecks(dir, port + 6);
 
     // What must fail: a join nobody answers, and a client whose kinds differ from the host's.
     char failLog[300];
@@ -853,6 +1042,7 @@ int GameRunnerChecks(void)
     remove(recording);
     remove(wrong);
     PresentChecks();
+    CarryChecks();
     FloorChecks();
     RebindChecks();
     NoDisplayChecks();

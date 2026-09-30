@@ -1101,15 +1101,37 @@ static bool Under(World3D *w, StoreId id, StoreId ancestor)
     return false;
 }
 
+/* The nearest entry of a ray into a sphere, at or beyond 0 and within max; not from inside. */
+static bool RaySphere(Vector3 from, Vector3 dir, Vector3 centre, float radius, float max, float *t,
+                      Vector3 *normal)
+{
+    Vector3 m = Vector3Subtract(from, centre);
+    float b = Vector3DotProduct(m, dir), c = Vector3DotProduct(m, m) - radius * radius;
+    if (c <= 0 || b > 0)
+        return false;
+    float disc = b * b - c;
+    if (disc < 0)
+        return false;
+    float at = -b - sqrtf(disc);
+    if (at < 0 || at > max)
+        return false;
+    *t = at;
+    *normal = Vector3Normalize(Vector3Subtract(Vector3Add(from, Vector3Scale(dir, at)), centre));
+    return true;
+}
+
 static World3DHit Cast(World3D *w, Vector3 from, Vector3 direction, float maxDistance,
-                       StoreId ignore, bool characters)
+                       const StoreId *ignore, int ignoreCount, bool characters, bool areas)
 {
     World3DHit hit;
     memset(&hit, 0, sizeof hit);
     hit.thing = STORE_NULL;
     float length = Vector3Length(direction);
-    if (length == 0 || !(maxDistance >= 0) || (!IsNull(ignore) && !StoreAlive(w->store, ignore)))
+    if (length == 0 || !(maxDistance >= 0))
         return hit;
+    for (int k = 0; k < ignoreCount; k++)
+        if (!IsNull(ignore[k]) && !StoreAlive(w->store, ignore[k]))
+            return hit;
     Vector3 dir = Vector3Scale(direction, 1.0f / length);
     int count;
     StoreId *nodes = List(w, w->node, &count);
@@ -1119,10 +1141,15 @@ static World3DHit Cast(World3D *w, Vector3 from, Vector3 direction, float maxDis
         StoreId id = nodes[i];
         float t;
         Vector3 normal;
-        bool got = false;
-        if (!IsNull(ignore) && Under(w, id, ignore))
+        bool got = false, skip = false;
+        for (int k = 0; k < ignoreCount && !skip; k++)
+            skip = !IsNull(ignore[k]) && Under(w, id, ignore[k]);
+        if (skip)
             continue;
-        if (Is(w, id, w->tilemap))
+        if (areas && Is(w, id, w->area))
+            got = RaySphere(from, dir, Translation(TickWorld(w, id)), fabsf(GetFloat(w, id, w->areaRadius)),
+                            best, &t, &normal);
+        else if (Is(w, id, w->tilemap))
         {
             got = RayMap(w, id, from, dir, best, &t, &normal);
             MapInfo m;
@@ -1163,7 +1190,13 @@ static World3DHit Cast(World3D *w, Vector3 from, Vector3 direction, float maxDis
 World3DHit World3DRaycast(World3D *w, Vector3 from, Vector3 direction, float maxDistance,
                           StoreId ignore)
 {
-    return Cast(w, from, direction, maxDistance, ignore, true);
+    return Cast(w, from, direction, maxDistance, &ignore, 1, true, false);
+}
+
+World3DHit World3DRaycastIgnoring(World3D *w, Vector3 from, Vector3 direction, float maxDistance,
+                                  const StoreId *ignore, int count, bool areas)
+{
+    return Cast(w, from, direction, maxDistance, ignore, count < 0 ? 0 : count, true, areas);
 }
 
 bool World3DLineOfSight(World3D *w, Vector3 from, Vector3 to)
@@ -1171,7 +1204,7 @@ bool World3DLineOfSight(World3D *w, Vector3 from, Vector3 to)
     float distance = Vector3Distance(from, to);
     if (distance == 0)
         return true;
-    World3DHit hit = Cast(w, from, Vector3Subtract(to, from), distance, STORE_NULL, false);
+    World3DHit hit = Cast(w, from, Vector3Subtract(to, from), distance, NULL, 0, false, false);
     return !hit.hit || hit.distance >= distance - CONTACT_EPSILON;
 }
 
