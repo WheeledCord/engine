@@ -2072,7 +2072,7 @@ static void DrawHud(void)
     run.hudCount = 0;
 }
 
-// The stdin REPL, between frames, as script_s7.c's.
+// The stdin REPL, between frames.
 static void PollRepl(void)
 {
     if (!run.replGreeted)
@@ -3238,15 +3238,29 @@ static void FreePresentation(void)
     run.gl = false;
 }
 
+/* One of the engine's own files, named as it sits in the engine's tree ("core/shaders/world.vs"). An
+   SDK installs them under share/engine/ beside its bin/ (make sdk, make install), so a trench there
+   looks first in ../share/engine/ from its own directory; a trench in a build tree finds them under
+   core/ through the root EngineRunApplication set, which walks up to the engine's checkout. */
+static const char *EngineFile(const char *path, char *buf, size_t size)
+{
+    const char *inside = strncmp(path, "core/", 5) ? path : path + 5;
+    if ((size_t)snprintf(buf, size, "%s../share/engine/%s", GetApplicationDirectory(), inside) < size &&
+        Readable(buf))
+        return buf;
+    return CoreResolvePath(path, buf, size);
+}
+
 static bool Init(void *context)
 {
     (void)context;
-    // The prelude is the engine's, found through the root EngineRunApplication just set; the
-    // project's own directory becomes the root after that.
+    // The prelude is the engine's, found beside the binary (EngineFile); the project's own
+    // directory becomes the root after that.
     char buf[1024];
-    const char *prelude = CoreResolvePath("core/scheme/kinds.scm", buf, sizeof buf);
+    const char *prelude = EngineFile("core/scheme/kinds.scm", buf, sizeof buf);
     if (!prelude || !Readable(prelude))
-        return Fail("no Scheme prelude core/scheme/kinds.scm beside the engine%s", "");
+        return Fail("no Scheme prelude core/scheme/kinds.scm (share/engine/scheme/kinds.scm in an SDK) "
+                    "beside the engine%s", "");
     snprintf(run.prelude, sizeof run.prelude, "%s", prelude);
     // The world shader and the HUD font are the engine's too, found the same way.
     static const char *const engineFiles[4] = {"core/shaders/world.vs", "core/shaders/world.fs",
@@ -3254,7 +3268,7 @@ static bool Init(void *context)
     char *targets[4] = {run.worldVs, run.worldFs, run.fontPath, run.skinVs};
     for (int i = 0; i < 4; i++)
     {
-        const char *path = CoreResolvePath(engineFiles[i], buf, sizeof buf);
+        const char *path = EngineFile(engineFiles[i], buf, sizeof buf);
         if (!run.headless && (!path || !Readable(path)))
             return Fail("no %s beside the engine", engineFiles[i]);
         snprintf(targets[i], sizeof run.worldVs, "%s", path ? path : "");

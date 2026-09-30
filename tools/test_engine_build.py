@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
-"""Focused regression checks for engine-build's filesystem and compile contracts."""
+"""Focused regression checks for engine-build's filesystem and compile contracts, and for engine-new's
+Scheme project, run by trench from the build tree and, with --sdk DIR, from an SDK outside it."""
+import argparse
 import contextlib
 import io
 import os
 import pathlib
 import shutil
+import subprocess
+import sys
 import tempfile
 import time
 
 import engine_build
+
+TOOLS = pathlib.Path(__file__).resolve().parent
+ENGINE = TOOLS.parent
 
 
 def check(condition, message):
@@ -78,12 +85,88 @@ def compiles_only_what_changed(root):
     check(built == 2, 'changing the compile flags recompiles everything')
 
 
+def new_project(root, name='starter'):
+    """engine-new --language scheme into root/name; answers the project directory."""
+    project = root / name
+    made = subprocess.run([sys.executable, str(TOOLS / 'engine_new.py'), str(project), '--language', 'scheme'],
+                          capture_output=True, text=True)
+    check(made.returncode == 0, f'engine-new --language scheme runs: {made.stderr.strip()}')
+    return project
+
+
+def run_headless(trench, project, cwd):
+    """trench run <project> --headless --ticks 60 from cwd; answers (exit status, all output)."""
+    ran = subprocess.run([str(trench), 'run', str(project), '--headless', '--ticks', '60',
+                          '--print-count', 'walker'],
+                         capture_output=True, text=True, cwd=cwd, timeout=120)
+    return ran.returncode, ran.stdout + ran.stderr
+
+
+def scheme_project_runs(root):
+    """What engine-new writes for Scheme is a store project trench runs as it is."""
+    project = new_project(root)
+    manifest = (project / 'engine.project').read_text().split('\n')
+    check('name starter' in manifest and 'game starter.scm' in manifest,
+          'the manifest names the project and its game file')
+    game = (project / 'starter.scm').read_text()
+    check(all(part in game for part in ('(define-kind game', '(tilemap', '(on (player-joined p)',
+                                        '(define-actions', '(input-vector', '(light', '(draw-hud)')),
+          'the game file is a define-kind game with a floor, a player-joined spawn, actions, a light and a HUD')
+    check('trench run .' in (project / 'README.md').read_text(), 'the README says how to run it')
+    check(not (project / 'src').exists(), 'a Scheme project has no C sources to build')
+    trench = ENGINE / 'build' / 'core' / 'trench'
+    if not trench.is_file():
+        print('engine-build tests: skipping the run of the Scheme project, no build/core/trench')
+        return
+    status, output = run_headless(trench, project, root)
+    check(status == 0 and 'ERROR' not in output and 'count walker 1' in output,
+          f'the generated project runs 60 ticks headless with one walker and no ERROR:\n{output}')
+
+    # Expected failures: a directory that is not empty is refused, and so is a project whose game
+    # file is missing.
+    refused = subprocess.run([sys.executable, str(TOOLS / 'engine_new.py'), str(project), '--language', 'scheme'],
+                             capture_output=True, text=True)
+    check(refused.returncode != 0 and 'not empty' in refused.stderr, 'engine-new refuses a directory that is not empty')
+    (project / 'starter.scm').unlink()
+    status, output = run_headless(trench, project, root)
+    check(status != 0, 'a project whose game file is missing does not run')
+
+
+def sdk_trench_runs_outside_the_tree(root, sdk):
+    """The SDK's trench finds its prelude, shaders and font under share/engine/, with nothing of the
+    engine's checkout in reach: the runtime half of the SDK is copied outside the tree and run from
+    there, on a project outside it."""
+    sdk = pathlib.Path(sdk).resolve()
+    check((sdk / 'bin' / 'trench').is_file() and (sdk / 'share' / 'engine' / 'scheme' / 'kinds.scm').is_file(),
+          f'{sdk} has bin/trench and share/engine/scheme/kinds.scm')
+    moved = root / 'sdk'
+    (moved / 'bin').mkdir(parents=True)
+    shutil.copy2(sdk / 'bin' / 'trench', moved / 'bin' / 'trench')
+    shutil.copytree(sdk / 'share', moved / 'share')
+    check(ENGINE not in moved.resolve().parents, 'the copied SDK is outside the engine tree')
+    project = new_project(root)
+    for trench in (sdk / 'bin' / 'trench', moved / 'bin' / 'trench'):
+        status, output = run_headless(trench, project, root)
+        check(status == 0 and 'ERROR' not in output and 'count walker 1' in output,
+              f'{trench} run <project> --headless --ticks 60 works from outside the engine tree:\n{output}')
+    # Expected failure: without share/engine there is no prelude to find, and it says so.
+    shutil.rmtree(moved / 'share')
+    status, output = run_headless(moved / 'bin' / 'trench', project, root)
+    check(status != 0 and 'no Scheme prelude' in output, 'an SDK trench without share/engine says what it lacks')
+
+
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--sdk', help='also run the SDK\'s trench on a generated project, from outside the tree')
+    args = parser.parse_args()
     for test in (sync_tree_replaces_stale_files, module_lines_are_ignored_with_a_warning,
-                 same_named_sources_get_separate_objects, compiles_only_what_changed):
+                 same_named_sources_get_separate_objects, compiles_only_what_changed, scheme_project_runs):
         with tempfile.TemporaryDirectory() as temporary:
             test(pathlib.Path(temporary))
-    print('engine-build tests: PASS')
+    if args.sdk:
+        with tempfile.TemporaryDirectory() as temporary:
+            sdk_trench_runs_outside_the_tree(pathlib.Path(temporary), args.sdk)
+    print('engine-build tests: PASS' + (f' (and the SDK at {args.sdk})' if args.sdk else ''))
 
 
 if __name__ == '__main__':

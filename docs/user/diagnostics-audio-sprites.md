@@ -6,8 +6,7 @@ add a global game state or impose entity components.
 `CoreDebug` queues screen-space lines, circles, rectangles and copied text from an update or draw
 callback. Call `CoreDebugUpdate` to age persistent primitives, then `CoreDebugDraw` from `Draw`.
 With `overlay` enabled it also shows the current FPS, fixed updates this frame, and remaining fixed
-step backlog. `GameplayDebugEntityCounts` adds one-frame entity count lines to that queue; it is a
-bridge, not a world debugger or query visualizer.
+step backlog.
 
 `CoreAudioInit` prepares an empty service with `master`, `sfx`, and `music` volume groups. The first
 play opens raylib's device. Sounds and music resolve paths through the data root and are cached once
@@ -20,8 +19,8 @@ range given — Godot's `max_distance` with attenuation disabled — and the sou
 it is on. A sound out of range is not started. For a sound that has to be held — moved while it
 plays, looped, stopped by itself — make a voice with `CoreAudioVoiceCreate` and use the
 `CoreAudioVoice*` calls; `CoreAudioUpdate`, once per rendered frame, keeps held voices placed for
-where the listener now is, restarts looping ones, and feeds music. Scripts reach the same through
-the `audio` object's `play-sound-at!`, `set-listener!` and `stop-sound!`, and the `voice` object.
+where the listener now is, restarts looping ones, and feeds music. A Scheme game plays sounds through
+the runner (`play-sound`, and the `sound` kind; see [Running a Scheme game](kinds.md)).
 
 `CoreAudioFree` unloads everything and closes only a device the service itself opened. Buses are
 volume/mute groups, not effects sends or a mixer graph.

@@ -7,8 +7,11 @@
 /* Each module's checks are a plain function in tests/regression/<module>_checks.c. It prints
    "FAIL: <what>" for every check that fails and returns how many failed. main.c adds them up. */
 
-/* A headless engine run (no window), and the network byte counters over loopback. */
+/* A headless engine run (no window) and its tick timing. */
 int HeadlessChecks(void);
+
+/* Input routing between frames and updates, 3D and 2D transforms, 2D queries and the 2D camera. */
+int SpaceChecks(void);
 
 /* The draw path: keys, sort, cull, static batching, and a submit under the hidden window. */
 int DrawPathChecks(void);
@@ -26,7 +29,7 @@ int World3DChecks(void);
 int GameChecks(void);
 
 /* The project runner: a headless bot session recorded and replayed to the same hash, another seed,
-   recordings refused, and the store's pending commands. (main.c's own RunnerChecks is another.) */
+   recordings refused, and the store's pending commands. */
 int GameRunnerChecks(void);
 int NetInterruptChecks(void); /* only the Ctrl+C-on-a-client check (regression_test --net-interrupt) */
 int NetChecks(void); /* networking on the store: host and two clients, in-memory and lossy (§9.7) */

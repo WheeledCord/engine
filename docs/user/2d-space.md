@@ -4,7 +4,7 @@
 
 ## Space convention
 
-Use `Transform2D` for an object's local-to-world work. Its world convention is screen-like: positive X is right and positive Y is down. Store the transform in the project payload that needs it; do not duplicate it in an engine-owned entity type.
+Use `Transform2D` for an object's local-to-world work. Its world convention is screen-like: positive X is right and positive Y is down. Store the transform in the project payload that needs it; do not duplicate it elsewhere.
 
 For a camera, keep one `CoreCamera2D` in project state. Set its viewport whenever the drawable size changes, update it from the fixed simulation, and use `alpha` passed to `Draw` for display conversion:
 

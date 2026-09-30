@@ -9,7 +9,9 @@ in its report rather than changing it quietly.
 Rules that hold for every task:
 
 - Nothing here removes or changes an existing API. Games on the entity, object and net-sync paths
-  (Trenchfoot, Skyrift) build and run unchanged. New code goes in new files.
+  (Trenchfoot, Skyrift) build and run unchanged. New code goes in new files. (That held while the
+  store was built; phase 4 later retired the entity, net-sync and old script paths once Trenchfoot
+  had moved to the store and no game used them. `core/object.h` stays.)
 - `core/` depends only on core, raylib and system headers; the build checks it. Nothing in `core/`
   includes `s7.h`.
 - No new file opens a window or touches GL unless it says so here (`draw_path.c` and the
@@ -477,9 +479,9 @@ batched. `DrawPathMeshPositions` rewrites a mesh's positions and normals in plac
 
 ## 5. The Scheme layer (`gameplay/script/game_s7.c`, `core/scheme/kinds.scm`)
 
-The existing `script_s7.c` is untouched. `game_s7.c` is a second frontend for the store, with its own
-`s7_scheme`. Read `.claude/skills/s7-embedding/SKILL.md` in the design repository and `vendor/s7/s7.h`
-before writing it.
+`game_s7.c` is the Scheme frontend for the store, with its own `s7_scheme` (it was built beside the
+old `script_s7.c`, since retired). Read `.claude/skills/s7-embedding/SKILL.md` in the design
+repository and `vendor/s7/s7.h` before writing it.
 
 ### 5.1 Things as values
 
@@ -596,9 +598,8 @@ Networking: `(host-game port)`, `(join-game address port)` (presentation or REPL
 `(things 'kind)`, `(inspect thing)` prints every field, `(reload)`, `(save-game path)`,
 `(load-game path)`, `(snapshot)`, `(restore s)`.
 
-Every one is a row-like C function in `game_s7.c`; there is no `script_api.def` row for them
-because they take keyword arguments and things, which that table has no types for. State that in
-`gameplay/script/README.md`.
+Every one is a row-like C function in `game_s7.c`, registered with `GameS7Define` or
+`GameS7DefineTyped`; `gameplay/script/README.md` lists them.
 
 ### 5.7 Environment, freeze, reload
 
@@ -609,7 +610,7 @@ and file functions listed in §5.5 are shadowed in that environment by procedure
 rule 3 error. `(reload)` loads the game files into a fresh environment, re-registers every kind's
 handlers (kinds keep their ids; a kind whose fields changed is migrated, as "Reload migrates changed
 kinds" below says), and re-resolves cached closures. The stdin REPL evaluates in that
-environment between frames, as `script_s7.c`'s does, and records each line as a developer command
+environment between frames, and records each line as a developer command
 in the recording (§6.3).
 
 ### 3.1 What the first version draws (B6, B9)
@@ -799,7 +800,7 @@ over every kind's name and field declarations) with a message naming the mismatc
 fresh process with the same build, seed and file reaches the same `StoreHash` at every tick; the
 `--hash-every` output is what the go/no-go compares across three processes.
 
-## 7. Phase 0 (in `core/engine.h`, `core/diagnostics.h`, `core/net_session.h`)
+## 7. Phase 0 (in `core/engine.h`, `core/diagnostics.h`, and the since-retired `core/net_session.h`)
 
 - `EngineConfig.headless` (bool) and `EngineConfig.maxTicks` (uint64, 0 = unlimited). Headless:
   no `InitWindow`, no capability check, no audio, no `Draw`, no `BuildUi`; the loop runs `Update`
@@ -813,7 +814,8 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
   receiveRate;` (bytes per second over the last whole second).
 - Regression checks: a headless run of 100 ticks through `EngineRunApplication` (no window is
   created; the check asserts `ticks == 100` and that `tickMicrosTotal > 0`); a loopback session
-  step showing the counters rise.
+  step showing the counters rise (retired with `net_session`; store_net_enet's `wireSent` and
+  `wireReceived` are its successors).
 
 ## 8. Checks and benches
 
@@ -899,7 +901,7 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
   acknowledged it. Which things go to peer `p`:
   - a client sends the things it owns;
   - the host sends every thing not owned by `p`, including other clients' things as it last had them
-    (the host relays; the session is a star, as `core/net_session.c` is);
+    (the host relays; the session is a star);
   - both also send a thing whose ownership moved to `p` until `p` has acknowledged a capture in which
     it did (the transfer's last write, B3.1).
 - State packets go unreliable-sequenced on channel 1. Header: sender tick (u32), the latest sender

@@ -21,7 +21,7 @@ static double Now(void)
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 
-// ENet's own byte counts since the last look, as core/net_session.c's SampleTraffic takes them.
+// ENet's own byte counts since the last look, added to the link's totals; ENet's are then zeroed.
 static void Sample(StoreNetLink *link)
 {
     ENetHost *host = (ENetHost *)link->endpoint.host;

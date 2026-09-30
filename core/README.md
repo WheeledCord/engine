@@ -5,8 +5,9 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
 - `engine`: window lifetime, accumulator loop, project callback signatures and input buffering.
 - `object`: engine types described once — properties, methods and signals in a table beside the
   type — and a caller-owned pool of objects named by generational handles, with signal connections.
-  Camera, audio, collision world, network clocks, texture and timer each declare their type in
-  their own file.
+  Audio, camera2d, collision2d, the network clocks, particles, texture, timer and waypoints each
+  declare their type in their own file. No Scheme frontend reads these tables: a Scheme game reaches
+  the engine through the store's frontend (`gameplay/script/game_s7.c`).
 - `store`: the world store the Scheme-first game runner is built on — kinds with typed fields
   (scalars and bounded lists, sets, maps and grids) in per-kind pools, things named by generational
   handles in a tree whose root decides the owner, the ordered tick (commands, timers, `tick`
@@ -41,15 +42,10 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   sight, breadth-first paths over tilemap cells cached per tick, and tilemap floor, wall and
   ceiling geometry in 8x8-cell chunks of CPU vertex arrays, rebuilt when their cells change. The
   contract is [docs/developer/store.md](../docs/developer/store.md) §3.
-- `node`: a `node3d` object with a local position, rotation and scale and an optional parent, whose
-  world transform is its parent's world transform times its own, as in Godot's Node3D.
-- `network`, `net_clock`, `net_sync`, `net_session`: multiplayer. `network` is the ENet transport;
-  `net_clock` the server tick and the client's interpolation clock; `net_sync` the registry of
-  replicated objects, whose schemas mark which fields are shared, with delta snapshots and ownership;
-  `net_session` hosting and joining around it — the host is the server, with one registry, and its own
-  player's commands run in place; a joiner is checked for engine protocol, game and version, welcomed
-  with what it needs to build the world, and sent snapshots once ready. Commands go up to the
-  server, events come down to players. See `docs/user/networking.md`.
+- `network`, `net_clock`: `network` is the ENet transport (endpoints, peers, channels, and a
+  fixed-width big-endian writer and reader) that `store_net_enet` puts under `store_net`;
+  `net_clock` a fixed-rate tick clock with a lower send rate, the client's interpolation clock, and
+  `CoreNetClockNow`, a monotonic clock in seconds. See `docs/user/networking.md`.
 - `waypoints`: a fixed-capacity point graph -- up to 256 points, 8 links each -- with shortest-path
   queries by summed straight-line edge distance (A*, as Godot's AStar3D). A project builds its own
   graph over it; `next-hop` and `path` answer the route between two of its points.
@@ -94,9 +90,7 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   curl-noise turbulence, an optional pull toward an anchor and a rotation spin-up -- with a `step`
   hook run after each particle moves and a `look` hook that can replace a particle's drawn size,
   colour, up vector or rotation. A game owns what a `kind` means, its textures and its presets; the
-  pool only ages, pushes and draws them. As the `"particles"` engine type, a script sets a
-  template's life/size/gravity/drag and calls `emit!`/`clear!`; drawing is not reachable from
-  scripts.
+  pool only ages, pushes and draws them.
 - `iso_grid`: the two grids Fallout 1/2 lay over the same ground -- a square tile grid for the floor
   and a hex grid twice as fine for everything that moves -- in their own trimetric projection, which
   leans rather than mirroring. Screen conversion both ways, hex neighbours, distance and facing,
@@ -109,8 +103,7 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   +Y, right -X, matching FpsCamera, ActorLookAt and glTF models. [Usage](TRANSFORMS.md).
 - `collision3d`: a fixed-capacity set of Models with layers and a caller tag, and a closest-hit ray
   query over their meshes -- the 3D counterpart to `collision2d`'s shape queries. It stores each
-  Model pointer, so a query always sees that model's current transform and meshes. Not a Scheme
-  engine type yet: scripts cannot add models to it.
+  Model pointer, so a query always sees that model's current transform and meshes.
 - `ui`: integer-pixel bevel primitives, immediate widgets, single-line text editing with caret,
   selection and system clipboard, nested clipped indent regions
   and an externally loaded bitmap font. Widgets only answer to the pointer where they are visible:
@@ -167,7 +160,7 @@ that is null, walking up until the engine's own `core/` data is in reach — an 
 directory sits several levels below it. Shader, font and layout loads resolve through it; writes
 never redirect, since the caller is naming where the file should go.
 
-Ownership: shader tables own loaded shaders; the uniform registry copies names but borrows shaders. MB transfers buffers to raylib when uploaded. Actor borrows its model, clips and aim-joint list, and owns its pose state. Call `ActorUploadPose` immediately before drawing each instance when models are shared. Models load through raylib's loaders; the engine's own formats are the sprite-sheet sidecar, UI documents, scenes, saves and input maps.
+Ownership: shader tables own loaded shaders; the uniform registry copies names but borrows shaders. MB transfers buffers to raylib when uploaded. Actor borrows its model, clips and aim-joint list, and owns its pose state. Call `ActorUploadPose` immediately before drawing each instance when models are shared. Models load through raylib's loaders; the engine's own formats are the sprite-sheet sidecar, UI documents, saves and input maps.
 
 `make` always runs `tools/check_core_dependencies.py` on compiler-produced dependency lists for core sources and headers before compilation/linking. Relative, absolute and transitive includes escaping the allowed roots fail the build. The executable project includes only core headers and system C headers. This is build enforcement, not a sandbox against deliberately disabling the build rules.
 
@@ -188,7 +181,7 @@ no `main` of its own. Returning a descriptor
 does not extend the lifetime of its pointers: use static state or otherwise retain it for the run.
 Games are built with `engine-build` from an `engine.project` manifest; see the root README.
 
-A complete core-only moving rectangle needs no entity registration or initialization callback:
+A complete core-only moving rectangle needs no initialization callback:
 
 ```c
 #include "core/engine.h"

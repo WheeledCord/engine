@@ -7,7 +7,7 @@ Thank you for improving the engine. Keep a change small enough that it can be re
 1. Build and run `make smoke`.
 2. Add a regression check for a bug fix, and success plus expected-failure coverage for a feature.
 3. Update documentation as part of the same logical commit or pull request.
-4. Use a clear imperative commit subject, such as `Add sprite playback anchors` or `Gameplay: Reject invalid entity fields`.
+4. Use a clear imperative commit subject, such as `Add sprite playback anchors` or `Store: Reject a field of the wrong type`.
 
 ## Documentation is part of the change
 
@@ -27,21 +27,18 @@ Do not describe an unfinished feature as supported. Record deliberate limits in 
 - Public APIs must state ownership, lifetime, failure behaviour, and cleanup responsibility.
 - Do not add hidden process-wide game state. Pass project state through the documented context.
 - Preserve the OpenGL 2.1 contract unless a deliberate, documented compatibility change is accepted.
-- Treat every game-usable public engine capability as script-facing by default. Add its binding in
-  the same change as the C API; do not wait for a scripted project to discover the omission.
-- Something a script makes, holds and changes is an engine type (`core/object.h`): declare its
-  properties, methods and signals in a table beside the type and register it in `ScriptHostInit`,
-  rather than adding a call per operation. A free-standing call is one row in
-  `gameplay/script/script_api.def`.
+- Treat every game-usable public engine capability as reachable from Scheme by default: a game
+  written in Scheme gets it through the store's frontend, as a built-in kind or field (world3d) or
+  as a call registered with `GameS7Define` beside the module it belongs to. Add it in the same
+  change as the C API; do not wait for a Scheme game to discover the omission.
 - Rendering, networking, input, audio, UI, animation, collision, and other normal game facilities
-  are not exempt merely because their C APIs use owned state. Expose safe lifecycle operations and
-  opaque handles where scripts can use them meaningfully; never expose raw pointers or platform
-  handles.
-- Omitting a binding is acceptable only when the operation is engine-internal plumbing, has no
-  meaningful scripted use, or cannot be exposed without an unsafe/broken contract. Document that
-  exception and its concrete reason in `gameplay/script/README.md`. Binding inconvenience or lack of
-  an immediate scripted caller is not a reason to omit it.
-- Exercise new types and rows from the regression checks, including success and expected-failure
-  cases, and check the script API outputs with `make smoke`.
+  are not exempt merely because their C APIs use owned state. Expose them through things and calls
+  that keep the store's rules (gameplay stays replayable; presentation never feeds gameplay); never
+  expose raw pointers or platform handles.
+- Omitting a Scheme call is acceptable only when the operation is engine-internal plumbing, has no
+  meaningful use from a game, or cannot be exposed without breaking the store's rules. Document that
+  exception and its concrete reason in `gameplay/script/README.md`.
+- Exercise new kinds and calls from the regression checks, including success and expected-failure
+  cases, and run `make smoke`.
 
 Read the [developer documentation](docs/developer/index.md) before changing engine internals.
