@@ -3801,6 +3801,8 @@ int main(int argc, char **argv)
         return RunnerChecks();
     if (argc > 1 && !strcmp(argv[1], "--present")) /* only the presentation checks, which are also in the full run */
         return PresentationChecks() ? 1 : 0;
+    if (argc > 1 && !strcmp(argv[1], "--net-interrupt")) /* only the Ctrl+C-on-a-client check, also in the full run */
+        return NetInterruptChecks() ? 1 : 0;
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320, 240, "regression");
     if (!UiInit(&ui, UiThemeDefault()))

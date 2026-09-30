@@ -619,9 +619,11 @@ in the recording (§6.3).
   it) exists, the runner merges static models by material into world-space meshes with
   `DrawPathStaticBatch`, one batch per material per 8x8-cell region of the tilemap they stand on
   (or per material when there is no tilemap), and draws the batches instead of the things. A
-  static thing whose position, rotation or scale is written after it was batched is an error
-  naming the flag (`position on lamp #12 changed, but lamp is :static; remove :static if it moves`);
-  a removed static thing rebuilds its region's batch at the next frame.
+  batched static thing that moves (its own position, rotation or scale, or an ancestor's) is, on
+  the machine that owns it, an error naming the flag (`position on lamp #12 changed, but lamp is
+  :static; remove :static if it moves`); on another machine it is no error, and it leaves its batch
+  and is batched again where it now stands. A removed static thing rebuilds its region's batch at
+  the next frame.
 - **Lights (B6).** The world shader takes the ambient light, one directional light, and up to four
   point lights (`type 'point`, `color`, `energy`, `range`): the four nearest the camera among the
   visible ones, lit per pixel with a fixed loop of four (unused slots have zero energy), attenuation
@@ -648,14 +650,18 @@ left room:
   `DrawPathMeshRelease`) at the end of a frame in which a member joined, was removed, stopped being
   drawn here, or changed `mesh`, `tint`, `spin`, `viewmodel`, `cull-distance` or its static thing.
   The transform error is **the runner's check at the next frame**, not a store rule at the write:
-  it compares the position, rotation and scale of every node from each batched model up to its
-  static thing with the values it was batched at. A store rule could name the handler's line, but
-  batching happens only where a window draws, so refusing the write there would make gameplay differ
-  between a headless replay and play (rule 1); the write stands, the error is reported once (the
-  bottom-of-screen line and `ERROR: RUN: ...`), and the models under the node are drawn as
-  themselves from then on. When the moving node is not the static thing itself the message is
-  `position on bulb #13 changed, but it hangs from lamp #12, which is :static; ...`. A write to a
-  thing's parent above the static thing is not seen. `--no-static-batch` draws everything as itself.
+  it compares every batched model's gameplay world matrix (`World3DWorldMatrix`, so a moved
+  ancestor anywhere above it counts) with the one it was batched at. A store rule could name the
+  handler's line, but batching happens only where a window draws, so refusing the write there would
+  make gameplay differ between a headless replay and play (rule 1). Only the machine that owns the
+  model (`StoreOwnedHere`) reports it, since only there did its own game code make the write: the
+  write stands, the error is reported once per static thing per frame (the bottom-of-screen line
+  and `ERROR: RUN: ...`), and the moved models are drawn as themselves from then on. On any other
+  machine the move came from its owner: the model leaves its batch without an error and is batched
+  again at its new place in the same frame. The error names the model whose matrix changed: when
+  its own fields changed, `position on bulb #13 changed, but it hangs from lamp #12, which is
+  :static; ...` (or `... but lamp is :static; ...` for the static thing itself); when they did not,
+  `an ancestor of bulb #13 moved it, but ...`. `--no-static-batch` draws everything as itself.
 - *Lights.* "Visible" is the light's `visible` field and its range sphere reaching into the view
   frustum; the nearest four by distance from the camera to the light are uploaded as
   `pointPosition[4]`, `pointColor[4]` (colour times energy) and `pointRange[4]`, and unused slots
@@ -832,8 +838,9 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
 - `tests/regression/present_checks.c` (§3.1; `regression_test --present` runs only these): the
   gain and pan `GameSoundHeard` gives at 0, 15, 30 and 45 m and on either side; then, in a window,
   `tests/regression/statics/` (200 static crates: draws against regions x materials + non-static
-  items, the same pixels as `--no-static-batch` before and after a move and a removal, and the
-  moved crate's error), `lights/` (the floor under a point light against twice its range away, lit
+  items, the same pixels as `--no-static-batch` before and after a move and a removal, the moved
+  crate's error, the error naming a crate whose parent node moved, and a crate handed to player 2
+  by `attach!` that moves with no error here and is drawn at its new place), `lights/` (the floor under a point light against twice its range away, lit
   and at energy 0, a skinned rig lit, a fifth light left out), `viewmodel/` (a box behind a wall
   hidden as a model and drawn as a viewmodel; another player's `:for-owner` viewmodel not drawn)
   and `emitters/` (a run with sound things and no audio device ends cleanly).
@@ -1099,7 +1106,11 @@ How it is built:
   per client printed (SWAT Tower is never still, so its state hashes are not compared). Also: things
   store_net creates reach world3d's spawned hook; `(host-game port)` from a frame handler hosts and
   its recording replays; a join nobody answers, a kinds refusal and a host leaving exit 1; Ctrl+C on
-  a client leaves cleanly. Three processes of `tests/regression/net_carry` (the carried-item
+  a client leaves cleanly (`regression_test --net-interrupt` runs only this one: it waits for the
+  host's `net: hosting`, the client's `net: joined` and the host's `net: player 2 left` lines rather
+  than for times, and sends the client one SIGINT through `timeout --foreground`, since plain
+  `timeout` also signals the child's process group and a client that runs between the two sees a
+  second Ctrl+C and is killed). Three processes of `tests/regression/net_carry` (the carried-item
   example's carryable and a test-only carrier per player that grabs the nearest free item and drops
   it 3 m away after 2 s; 2,400 ticks, the last 120 still) agree on every item's holder and every
   player's counts, answer every grab, reach at least 5 grants and the same net state hash; a second

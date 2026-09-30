@@ -894,6 +894,76 @@ static void CarryNetChecks(const char *dir, int port)
            "the leave session prints no ERROR and its three processes exit 0");
 }
 
+/* Ctrl+C on a client leaves cleanly and the host hears it leave at once. Each step waits for the
+   line saying the last one happened (up to 30 s each), not for a time: the client joins once the
+   host is hosting, is interrupted once it has joined, and the host is stopped once it heard the
+   leave. The runner takes a second SIGINT as "kill now", so each gets exactly one: plain `timeout`
+   sends the one it is given to its child and again to the child's process group, and when the child
+   runs between the two it sees two presses (a 1-in-30 failure); `--foreground` sends it once. */
+static void InterruptChecks(const char *dir, int port)
+{
+    char script[2048];
+    snprintf(script, sizeof script,
+             "D=%s; T='timeout --foreground 60 ./build/core/trench run tests/regression/net_game --headless';"
+             "until_line() { n=0; until grep -q \"$2\" \"$1\" 2>/dev/null; do"
+             " n=$((n+1)); [ $n -gt 300 ] && return 1; sleep 0.1; done; };"
+             "$T --host %d --ticks 3000 > $D/int_host.log 2>&1 & H=$!;"
+             "until_line $D/int_host.log 'net: hosting on UDP port';"
+             "$T --join 127.0.0.1:%d --ticks 3000 > $D/int.log 2>&1 & C=$!;"
+             "until_line $D/int.log 'net: joined as player'; kill -INT $C;"
+             "wait $C; echo $? > $D/int.status;"
+             "until_line $D/int_host.log 'net: player 2 left'; kill -INT $H; wait",
+             dir, port, port);
+    fflush(stdout);
+    if (system(script) == -1)
+        Expect(false, "the Ctrl+C runs start");
+    char hostLog[300], intLog[300];
+    snprintf(hostLog, sizeof hostLog, "%s/int_host.log", dir);
+    snprintf(intLog, sizeof intLog, "%s/int.log", dir);
+    printf("runner net leaving: Ctrl+C'd client exit %d, host saw it leave: %s\n", Status(dir, "int"),
+           FileHasLine(hostLog, "net: player 2 left", false) ? "yes" : "no");
+    Expect(Status(dir, "int") == 0 && FileHasLine(intLog, "run: interrupted", false) &&
+               FileHasLine(hostLog, "net: player 2 left", false),
+           "Ctrl+C on a client ends it cleanly and the host hears it leave");
+}
+
+// A client outlives a host that ends, is told the host left and exits 1.
+static void HostGoneChecks(const char *dir, int port)
+{
+    char script[1024];
+    snprintf(script, sizeof script,
+             "D=%s; T='timeout 60 ./build/core/trench run tests/regression/net_game --headless';"
+             "$T --host %d --ticks 60 > $D/gone_host.log 2>&1 & sleep 0.2;"
+             "$T --join 127.0.0.1:%d --ticks 3000 > $D/gone.log 2>&1; echo $? > $D/gone.status; wait",
+             dir, port, port);
+    fflush(stdout);
+    if (system(script) == -1)
+        Expect(false, "the host-leaving runs start");
+    char goneLog[300];
+    snprintf(goneLog, sizeof goneLog, "%s/gone.log", dir);
+    printf("runner net leaving: client of an ending host exit %d\n", Status(dir, "gone"));
+    Expect(Status(dir, "gone") == 1 && FileHasLine(goneLog, "run: the session ended: the host left the game", false),
+           "a client whose host ends says the host left and exits 1");
+}
+
+// Only InterruptChecks (regression_test --net-interrupt), in a temporary directory it keeps for
+// reading when a check fails.
+int NetInterruptChecks(void)
+{
+    failures = 0;
+    char dir[] = "build/core/int_XXXXXX";
+    if (!mkdtemp(dir))
+        return 1;
+    InterruptChecks(dir, 20000 + (int)(getpid() % 20000));
+    char script[300];
+    snprintf(script, sizeof script, "rm -rf %s", dir);
+    if (!failures && system(script) == -1)
+        printf("note: runner: could not remove %s\n", dir);
+    if (failures)
+        printf("note: runner: the logs are in %s\n", dir);
+    return failures;
+}
+
 static void NetRunChecks(void)
 {
     int port = 20000 + (int)(getpid() % 20000);
@@ -1027,30 +1097,8 @@ static void NetRunChecks(void)
     Expect(Status(dir, "refused") == 1 && strstr(value, "kinds differ:") && strstr(value, "crate"),
            "a client whose kinds differ is refused, names the kind and exits 1");
 
-    // Ctrl+C on a client leaves cleanly (the host hears at once); a client outlives a host that
-    // ends, is told the host left and exits 1.
-    snprintf(script, sizeof script,
-             "D=%s; T='timeout 60 ./build/core/trench run tests/regression/net_game --headless';"
-             "$T --host %d --ticks 300 > $D/int_host.log 2>&1 & sleep 0.2;"
-             "$T --join 127.0.0.1:%d --ticks 3000 > $D/int.log 2>&1 & C=$!; sleep 2; kill -INT $C;"
-             "wait $C; echo $? > $D/int.status;"
-             "$T --host %d --ticks 60 > $D/gone_host.log 2>&1 & sleep 0.2;"
-             "$T --join 127.0.0.1:%d --ticks 3000 > $D/gone.log 2>&1; echo $? > $D/gone.status; wait",
-             dir, port + 4, port + 4, port + 5, port + 5);
-    fflush(stdout);
-    if (system(script) == -1)
-        Expect(false, "the Ctrl+C and host-leaving runs start");
-    snprintf(failLog, sizeof failLog, "%s/int_host.log", dir);
-    char intLog[300], goneLog[300];
-    snprintf(intLog, sizeof intLog, "%s/int.log", dir);
-    snprintf(goneLog, sizeof goneLog, "%s/gone.log", dir);
-    printf("runner net leaving: Ctrl+C'd client exit %d, host saw it leave: %s; client of an ending host exit %d\n",
-           Status(dir, "int"), FileHasLine(failLog, "net: player 2 left", false) ? "yes" : "no", Status(dir, "gone"));
-    Expect(Status(dir, "int") == 0 && FileHasLine(intLog, "run: interrupted", false) &&
-               FileHasLine(failLog, "net: player 2 left", false),
-           "Ctrl+C on a client ends it cleanly and the host hears it leave");
-    Expect(Status(dir, "gone") == 1 && FileHasLine(goneLog, "run: the session ended: the host left the game", false),
-           "a client whose host ends says the host left and exits 1");
+    InterruptChecks(dir, port + 4);
+    HostGoneChecks(dir, port + 5);
     snprintf(script, sizeof script, "rm -rf %s", dir);
     if (system(script) == -1)
         printf("note: runner: could not remove %s\n", dir);

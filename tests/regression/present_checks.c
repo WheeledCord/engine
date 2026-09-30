@@ -93,9 +93,26 @@ static Bench ReadBench(const char *log)
 
 /* ---- static batching ------------------------------------------------------------------------- */
 
+/* Pixels of the green crate (tests/regression/statics) in the left and right halves of a shot, above
+   the bottom `skip` rows (where the runner prints errors); -1 each when the shot is missing. */
+static void Green(const char *path, int skip, long *left, long *right)
+{
+    Image image = LoadImage(path);
+    Color *p = image.data ? LoadImageColors(image) : NULL;
+    *left = *right = p ? 0 : -1;
+    long n = p ? (long)image.width * (image.height > skip ? image.height - skip : 0) : 0;
+    for (long i = 0; i < n; i++)
+        if (p[i].g > 100 && p[i].r < p[i].g / 2 && p[i].b < p[i].g / 2)
+            *(i % image.width < image.width / 2 ? left : right) += 1;
+    UnloadImageColors(p);
+    UnloadImage(image);
+}
+
 /* tests/regression/statics: 200 static crates of two tints on a 3x3-region tilemap, batched and not.
    By tick 60 one was moved (tick 45) and one removed (tick 50), so both shots compare what the
-   batches draw before and after a rebuild. */
+   batches draw before and after a rebuild. At tick 45 a green static crate owned by player 2 (not a
+   local owner here) moves from the left of the view to the right, and a plain node carrying a static
+   crate moves. */
 static void StaticChecks(void)
 {
     const char *on = "build/core/statics_on.log", *off = "build/core/statics_off.log";
@@ -108,13 +125,20 @@ static void StaticChecks(void)
                            "--no-static-batch",
                            off);
     Bench a = ReadBench(on), b = ReadBench(off);
-    /* The batched run shows the moved crate's error along the bottom from tick 45; the world above it
-       is what is compared. */
+    /* The batched run shows the moved crates' errors along the bottom from tick 45; the world above
+       them is what is compared. */
     double at30 = MeanDifference("build/core/statics_on/shot_30.png", "build/core/statics_off/shot_30.png", 0);
     double at60 = MeanDifference("build/core/statics_on/shot_60.png", "build/core/statics_off/shot_60.png", 80);
-    char line[1024] = "";
+    char line[1024] = "", ancestor[1024] = "";
     bool error = LineWith(on, "position on crate #", line, sizeof line) &&
                  strstr(line, "changed, but crate is :static; remove :static if it moves");
+    bool carried = LineWith(on, "an ancestor of crate #", ancestor, sizeof ancestor) &&
+                   strstr(ancestor, "moved it, but crate is :static; remove :static if it moves");
+    long green[4][2]; /* batched tick 30, 60; unbatched tick 30, 60: left, right */
+    Green("build/core/statics_on/shot_30.png", 0, &green[0][0], &green[0][1]);
+    Green("build/core/statics_on/shot_60.png", 80, &green[1][0], &green[1][1]);
+    Green("build/core/statics_off/shot_30.png", 0, &green[2][0], &green[2][1]);
+    Green("build/core/statics_off/shot_60.png", 80, &green[3][0], &green[3][1]);
     int nonStatic = a.items - a.batches;
     printf("present statics: batched: items %d draws %d, %d models in %d regions as %d batches of %d materials "
            "(bound regions x materials + non-static items = %d); unbatched: items %d draws %d; mean pixel "
@@ -122,17 +146,31 @@ static void StaticChecks(void)
            a.items, a.draws, a.models, a.regions, a.batches, a.materials, a.regions * a.materials + nonStatic, b.items,
            b.draws, at30, at60);
     printf("present statics: the moved crate: %s", error ? line : "(no error line)\n");
+    printf("present statics: the crate whose parent moved: %s", carried ? ancestor : "(no error line)\n");
+    printf("present statics: player 2's green crate (left, right pixels): batched tick 30 %ld %ld, tick 60 %ld %ld; "
+           "unbatched tick 30 %ld %ld, tick 60 %ld %ld\n",
+           green[0][0], green[0][1], green[1][0], green[1][1], green[2][0], green[2][1], green[3][0], green[3][1]);
     Expect(statusOn == 0 && statusOff == 0, "statics: both runs exit cleanly");
-    Expect(a.models == 198 && a.regions == 9 && a.materials == 2,
-           "statics: 198 crates (200, one moved and one removed) ride in batches in 9 regions of 2 materials");
+    Expect(a.models == 199 && a.regions == 9 && a.materials == 3,
+           "statics: 199 crates (202, one moved, one carried off by its parent and one removed; the green one "
+           "batched again) ride in batches in 9 regions of 3 materials");
     Expect(a.draws >= 0 && a.draws <= a.regions * a.materials + nonStatic && a.draws * 4 < 200,
            "statics: draws <= regions x materials + non-static items, and far fewer than the crates");
     Expect(b.models == 0 && b.draws >= 200, "statics: --no-static-batch draws every crate as itself");
     Expect(at30 >= 0 && at30 < 1.0 && at60 >= 0 && at60 < 1.0,
            "statics: batched and unbatched shots differ by under 1.0 per channel, before and after a rebuild");
     Expect(error, "statics: moving a batched static crate is the error naming :static");
+    Expect(carried, "statics: moving the parent of a batched static crate is the error naming the crate, saying an "
+                    "ancestor moved it");
     Expect(!LineWith(on, "loose-crate #", line, sizeof line) && !LineWith(off, "ERROR", line, sizeof line),
            "statics: moving a loose crate, or a static one that was never batched, is no error");
+    Expect(!LineWith(on, "green-crate #", line, sizeof line),
+           "statics: a batched static crate owned elsewhere that moves is no error here");
+    bool moved = true;
+    for (int r = 0; r < 4; r += 2)
+        moved = moved && green[r][0] > 50 && green[r][1] == 0 && green[r + 1][0] == 0 && green[r + 1][1] > 50;
+    Expect(moved, "statics: a batched static crate owned elsewhere draws at its new place after it moves, batched "
+                  "or not");
     int refused = Trench("tests/regression/statics --headless --ticks 1 --no-static-batch", "build/core/statics_headless.log");
     Expect(WIFEXITED(refused) && WEXITSTATUS(refused) == 2, "statics: --no-static-batch is refused headless");
 }
