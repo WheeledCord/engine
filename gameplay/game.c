@@ -1560,7 +1560,7 @@ static StoreId CameraUnder(StoreId thing)
 
 /* (aimed-at camera 'kind distance), or (aimed-at 'kind distance) from a handler: the camera is then
    the first one under the handler's thing (a soldier's eye, C4). Areas count as targets by their
-   sphere, since a carried item is an area that rays otherwise walk through. */
+   shape (sphere or box), since a carried item is an area that rays otherwise walk through. */
 static s7_pointer SchemeAimedAt(s7_scheme *sc, s7_pointer args)
 {
     StoreId camera;

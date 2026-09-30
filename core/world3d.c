@@ -397,8 +397,12 @@ bool World3DInit(World3D *w, Store *store)
                                   Field("velocity", STORE_VEC3, 0, zero),
                                   Field("on-floor", STORE_BOOL, STORE_ENGINE, None())};
     StoreFieldDecl solid[] = {Field("size", STORE_VEC3, 0, one)};
+    StoreValue sphere = None();
+    sphere.type = STORE_SYMBOL;
+    sphere.as.sym = StoreIntern(store, "sphere");
     StoreFieldDecl area[] = {
-        Field("radius", STORE_FLOAT, 0, FloatValue(1)),
+        Field("radius", STORE_FLOAT, 0, FloatValue(1)), Field("shape", STORE_SYMBOL, 0, sphere),
+        Field("size", STORE_VEC3, 0, one),
         Collection("%inside", STORE_LIST, STORE_REF, 16, 0, STORE_HIDDEN | STORE_ENGINE)};
     StoreFieldDecl tilemap[] = {
         Field("width", STORE_INT, 0, IntValue(16)),
@@ -440,6 +444,9 @@ bool World3DInit(World3D *w, Store *store)
     w->onFloor = StoreFieldIndex(store, w->character, "on-floor");
     w->size = StoreFieldIndex(store, w->solid, "size");
     w->areaRadius = StoreFieldIndex(store, w->area, "radius");
+    w->areaShape = StoreFieldIndex(store, w->area, "shape");
+    w->areaSize = StoreFieldIndex(store, w->area, "size");
+    w->box = StoreIntern(store, "box");
     w->inside = StoreFieldIndex(store, w->area, "%inside");
     w->width = StoreFieldIndex(store, w->tilemap, "width");
     w->depth = StoreFieldIndex(store, w->tilemap, "depth");
@@ -715,6 +722,47 @@ static bool SphereMeetsBox(Vector3 c, float r, Box b)
     return Vector3DistanceSqr(c, q) <= r * r;
 }
 
+/* An area's volume where it is now: a sphere of `radius`, or with `shape` box an axis-aligned box
+   of `size` centred on its world position, like a solid. Any other shape reads as a sphere. */
+typedef struct AreaShape
+{
+    bool box;
+    Vector3 centre;
+    float radius;
+    Box bounds;
+} AreaShape;
+
+static AreaShape AreaShapeOf(World3D *w, StoreId area)
+{
+    AreaShape a;
+    memset(&a, 0, sizeof a);
+    a.centre = Translation(TickWorld(w, area));
+    StoreValue v;
+    a.box = StoreGet(w->store, area, w->areaShape, &v) && v.type == STORE_SYMBOL && v.as.sym == w->box;
+    if (a.box)
+    {
+        Vector3 s = GetVec(w, area, w->areaSize);
+        Vector3 half = {fabsf(s.x) * 0.5f, fabsf(s.y) * 0.5f, fabsf(s.z) * 0.5f};
+        a.bounds = (Box){Vector3Subtract(a.centre, half), Vector3Add(a.centre, half)};
+    }
+    else
+        a.radius = fabsf(GetFloat(w, area, w->areaRadius));
+    return a;
+}
+
+static bool AreaMeetsBox(const AreaShape *a, Box b)
+{
+    if (!a->box)
+        return SphereMeetsBox(a->centre, a->radius, b);
+    return a->bounds.min.x <= b.max.x && b.min.x <= a->bounds.max.x && a->bounds.min.y <= b.max.y &&
+           b.min.y <= a->bounds.max.y && a->bounds.min.z <= b.max.z && b.min.z <= a->bounds.max.z;
+}
+
+static bool AreaHolds(const AreaShape *a, Vector3 p)
+{
+    return AreaMeetsBox(a, (Box){p, p});
+}
+
 typedef struct Boxes
 {
     Box *items;
@@ -882,8 +930,7 @@ static void AreaSystem(Store *store, float dt, void *user)
     for (int a = 0; areas && chars && a < areaCount; a++)
     {
         StoreId area = areas[a];
-        Vector3 centre = Translation(TickWorld(w, area));
-        float radius = fabsf(GetFloat(w, area, w->areaRadius));
+        AreaShape shape = AreaShapeOf(w, area);
         StoreValue now[16], was[16];
         int nowCount = 0, wasCount = StoreCountOf(store, area, w->inside);
         wasCount = wasCount < 0 ? 0 : wasCount > 16 ? 16 : wasCount;
@@ -891,7 +938,7 @@ static void AreaSystem(Store *store, float dt, void *user)
             if (!StoreGetAt(store, area, w->inside, i, NULL, &was[i]))
                 was[i].as.ref = STORE_NULL;
         for (int c = 0; c < charCount && nowCount < 16; c++)
-            if (!Same(chars[c], area) && SphereMeetsBox(centre, radius, CharacterBox(w, chars[c])))
+            if (!Same(chars[c], area) && AreaMeetsBox(&shape, CharacterBox(w, chars[c])))
             {
                 memset(&now[nowCount], 0, sizeof now[nowCount]);
                 now[nowCount].type = STORE_REF;
@@ -918,8 +965,7 @@ int World3DOverlapping(World3D *w, StoreId area, StoreKind kind, StoreId *out, i
         return -1;
     if (!StoreKindName(w->store, kind))
         return 0;
-    Vector3 centre = Translation(TickWorld(w, area));
-    float radius = fabsf(GetFloat(w, area, w->areaRadius));
+    AreaShape shape = AreaShapeOf(w, area);
     int count, n = 0;
     StoreId *things = List(w, kind, &count);
     for (int i = 0; things && i < count; i++)
@@ -929,11 +975,11 @@ int World3DOverlapping(World3D *w, StoreId area, StoreKind kind, StoreId *out, i
         if (Same(id, area) || !Is(w, id, w->node))
             continue;
         if (Is(w, id, w->character))
-            meets = SphereMeetsBox(centre, radius, CharacterBox(w, id));
+            meets = AreaMeetsBox(&shape, CharacterBox(w, id));
         else if (Is(w, id, w->solid))
-            meets = SphereMeetsBox(centre, radius, SolidBox(w, id));
+            meets = AreaMeetsBox(&shape, SolidBox(w, id));
         else
-            meets = Vector3DistanceSqr(centre, Translation(TickWorld(w, id))) <= radius * radius;
+            meets = AreaHolds(&shape, Translation(TickWorld(w, id)));
         if (!meets)
             continue;
         if (out)
@@ -1147,8 +1193,11 @@ static World3DHit Cast(World3D *w, Vector3 from, Vector3 direction, float maxDis
         if (skip)
             continue;
         if (areas && Is(w, id, w->area))
-            got = RaySphere(from, dir, Translation(TickWorld(w, id)), fabsf(GetFloat(w, id, w->areaRadius)),
-                            best, &t, &normal);
+        {
+            AreaShape shape = AreaShapeOf(w, id);
+            got = shape.box ? RayBox(from, dir, shape.bounds, best, &t, &normal)
+                            : RaySphere(from, dir, shape.centre, shape.radius, best, &t, &normal);
+        }
         else if (Is(w, id, w->tilemap))
         {
             got = RayMap(w, id, from, dir, best, &t, &normal);

@@ -5,9 +5,9 @@
 ;;;; What carrying needs from the Scheme layer (proposal B1, B3.7, B6, C4), on one machine: a socket
 ;;;; declared with :of (arms body), a soldier with one given to another player, aimed-at from a
 ;;;; handler, raycast ignoring a list, attach! and detach! with their placements, first-child,
-;;;; parent-changed, orphaned, and a socket with no bone lookup at its local transform. Run by
-;;;; tests/regression/runner_checks.c with --headless --present; every line it checks is printed
-;;;; as "check NAME #t" or "event ...", and a #f is a failure.
+;;;; parent-changed, orphaned, a socket with no bone lookup at its local transform, and a box area.
+;;;; Run by tests/regression/runner_checks.c with --headless --present; every line it checks is
+;;;; printed as "check NAME #t" or "event ...", and a #f is a failure.
 
 (define-actions (interact "E"))
 
@@ -50,6 +50,16 @@
     (format #t "event parent-changed ~A ~A~%" (name-of was) (name-of now))
     (check 'parent-changed-is-presentation (refused? (lambda () (set! radius 1.0))))))
 
+;; A box area (B6): the sphere its default radius of 1 gives would not reach x 21.7, the box does.
+(define-kind shelf
+  (is area :shape (box 4 1 1))
+  (field touches 0)
+  (field leaves 0)
+  (on (touched other) (set! touches (+ touches 1)))
+  (on (untouched other) (set! leaves (+ leaves 1))))
+
+(define-kind walker (is character))
+
 (define-kind bag                                       ; a list setting on a spawn given away
   (is node)
   (field tags (list-of symbol :max 2)))
@@ -60,6 +70,8 @@
   (field s2 (ref soldier))
   (field c (ref crate))
   (field c3 (ref crate))
+  (field sh (ref shelf))
+  (field w (ref walker))
   (on (start)
     (set! s (spawn 'soldier :owner 1 :at (vec3 5 0 5)))
     ;; Given to a player who is not here: its socket's :of was written by the spawn anyway.
@@ -75,6 +87,16 @@
        (check 'socket-of-given-away (equal? ((child s2 'hand) 'of) '(arms body)))
        (check 'socket-of-not-owner-refused (refused? (lambda () (set! ((child s2 'hand) 'of) '(body)))))
        (check 'first-child-empty (not (first-child (child s 'hand))))
+       (set! sh (spawn 'shelf :at (vec3 20 0.5 20)))
+       (set! w (spawn 'walker :at (vec3 21.7 0 23)))
+       (check 'box-kind-setting (and (eq? (sh 'shape) 'box) (near? (sh 'size) (vec3 4 1 1))))
+       (let ((a (spawn 'area :shape (box 1 2 3))))
+         (check 'box-spawn-setting (and (eq? (a 'shape) 'box) (near? (a 'size) (vec3 1 2 3))))
+         (remove a))
+       (check 'shape-unknown-refused
+              (and (string-position "cylinder" (message-of (lambda () (spawn 'area :shape 'cylinder))))
+                   (string-position "cone" (message-of (lambda () (set! (sh 'shape) 'cone))))
+                   (eq? (sh 'shape) 'box)))
        (check 'spawn-list-given-away (equal? ((spawn 'bag :owner 2 :tags '(a b)) 'tags) '(a b)))
        (check 'spawn-list-over-capacity-refused (refused? (lambda () (spawn 'bag :owner 2 :tags '(a b c)))))
        (check 'aimed-at-needs-a-camera
@@ -84,11 +106,17 @@
          (check 'raycast-ignore-list-hits (eq? (hit-thing (raycast from (vec3 1 0 0) 20 :ignore (list s))) s2))
          (check 'raycast-ignore-list-skips (not (raycast from (vec3 1 0 0) 20 :ignore (list s s2))))
          (check 'raycast-ignore-list-refuses-a-number (refused? (lambda () (raycast from (vec3 1 0 0) 20 :ignore (list 5)))))))
+      ((3)
+       (teleport! w (vec3 21.7 0 20)))
       ((5)
+       (check 'box-area-touched (and (= (sh 'touches) 1) (= (sh 'leaves) 0)
+                                     (equal? (overlapping sh 'walker) (list w))))
+       (teleport! w (vec3 21.7 0 23))
        (attach! c (child s 'hand) :at (vec3 0 0 0))
        (check 'first-child-holds (eq? (first-child (child s 'hand)) c))
        (check 'socket-local-transform (near? (world-position c) (vec3 5.3 1.0 4.6))))
       ((8)
+       (check 'box-area-untouched (and (= (sh 'touches) 1) (= (sh 'leaves) 1) (null? (overlapping sh 'walker))))
        (send s 'drop-it c (vec3 7 0.3 7) 1.5))
       ((10)
        (check 'dropped-at (and (not (parent c)) (near? (c 'position) (vec3 7 0.3 7))

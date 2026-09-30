@@ -102,9 +102,7 @@
 ;;; there, and only there. `holder` is not needed for ownership; it names who has it for game logic.
 
 (define-kind carryable
-  ;; ENGINE: the paper has (is area :shape (box 0.4 0.3 0.4)); the engine's area is a sphere, with
-  ;; no :shape setting yet (docs/developer/store.md §3), so the crate is a 0.3 m sphere here.
-  (is area :radius 0.3)                                ; aimed at and walked through, not collided with
+  (is area :shape (box 0.4 0.3 0.4))                   ; aimed at and walked through, not collided with
   (field label "crate")
   (field holder (ref soldier))
   (child look (model "crate.glb"))

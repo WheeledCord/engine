@@ -789,6 +789,48 @@ static bool ConvertList(s7_scheme *sc, s7_pointer list, const StoreFieldDecl *d,
     return true;
 }
 
+/* Whether a field is an area's `shape` (the built-in area kind or one derived from it), which takes
+   a shape rather than a plain symbol (B6). */
+static bool ShapeField(StoreKind kind, int field)
+{
+    Store *store = game.store;
+    StoreKind area = StoreKindNamed(store, "area");
+    return area >= 0 && StoreKindIs(store, kind, area) && field == StoreFieldIndex(store, area, "shape");
+}
+
+/* An area's shape setting: sphere or box as a symbol, or (box x y z), which also gives the box's
+   size. On failure err holds the sentence, naming an unknown shape. */
+static bool ShapeValue(s7_scheme *sc, s7_pointer value, StoreValue *shape, StoreValue *size,
+                       bool *sized, char *err, size_t n)
+{
+    memset(shape, 0, sizeof *shape);
+    memset(size, 0, sizeof *size);
+    *sized = false;
+    s7_pointer head = s7_is_pair(value) ? s7_car(value) : value;
+    if (!s7_is_symbol(head) || s7_is_keyword(head))
+        return snprintf(err, n, "shape is sphere, box or (box x y z), not %s", What(sc, value)), false;
+    const char *name = s7_symbol_name(head);
+    if (strcmp(name, "sphere") && strcmp(name, "box"))
+        return snprintf(err, n, "shape: there is no shape named %s; an area is a sphere or a (box x y z)",
+                        name),
+               false;
+    if (s7_is_pair(value))
+    {
+        s7_pointer rest = s7_cdr(value);
+        if (strcmp(name, "box") || s7_list_length(sc, rest) != 3 || !s7_is_real(s7_car(rest)) ||
+            !s7_is_real(s7_cadr(rest)) || !s7_is_real(s7_caddr(rest)))
+            return snprintf(err, n, "shape: a box is (box x y z), three sizes in metres"), false;
+        size->type = STORE_VEC3;
+        size->as.v = (Vector3){(float)s7_number_to_real(sc, s7_car(rest)),
+                               (float)s7_number_to_real(sc, s7_cadr(rest)),
+                               (float)s7_number_to_real(sc, s7_caddr(rest))};
+        *sized = true;
+    }
+    shape->type = STORE_SYMBOL;
+    shape->as.sym = StoreIntern(game.store, name);
+    return true;
+}
+
 /* Writes a field from Scheme: a scalar, a list for LIST and SET, an alist for MAP; a grid only
    through its view. engine writes a spawn's settings, which the spawner decides (rules 1 and 5 are
    not asked of scalars, as for a default). On failure err holds the sentence. */
@@ -845,6 +887,20 @@ static bool WriteField(s7_scheme *sc, StoreId id, int field, s7_pointer value, b
         free(keys);
         free(values);
         return ok;
+    }
+    if (ShapeField(kind, field))
+    {
+        StoreValue shape, box;
+        bool sized;
+        if (!ShapeValue(sc, value, &shape, &box, &sized, err, size))
+            return false;
+        int sizeField = StoreFieldIndex(store, kind, "size");
+        bool ok = engine ? StoreSetEngine(store, id, field, &shape) : StoreSet(store, id, field, &shape);
+        if (!ok)
+            return FailureText(id, field, err, size), false;
+        if (sized && !(engine ? StoreSetEngine(store, id, sizeField, &box) : StoreSet(store, id, sizeField, &box)))
+            return FailureText(id, sizeField, err, size), false;
+        return true;
     }
     StoreValue v;
     const char *why;
@@ -1556,6 +1612,17 @@ static s7_pointer SchemeKindDeclare(s7_scheme *sc, s7_pointer args)
         if (IsCollection(d->type))
             return Fail(sc, "define-kind %s: %s is a %s; give its default with (field %s ... :init ...)",
                         name, d->name, d->type == STORE_MAP ? "map" : "collection", d->name);
+        if (ShapeField(kind, field))
+        {
+            StoreValue shape, box;
+            bool sized;
+            if (!ShapeValue(sc, value, &shape, &box, &sized, err, sizeof err))
+                return Fail(sc, "define-kind %s: %s", name, err);
+            if (!StoreKindSetDefault(store, kind, field, &shape) ||
+                (sized && !StoreKindSetDefault(store, kind, StoreFieldIndex(store, kind, "size"), &box)))
+                return Fail(sc, "define-kind %s: %s", name, Rest(StoreLastError(store)));
+            continue;
+        }
         StoreValue v;
         ConvertOrFail(sc, value, d->type, d->name, &v);
         if (!StoreKindSetDefault(store, kind, field, &v))
@@ -2002,6 +2069,11 @@ static bool ApplySettings(s7_scheme *sc, StoreId id, StoreKind kind, s7_pointer 
     {
         int field = SettingField(kind, s7_car(s7_car(p)), child, err, size);
         if (field == -1)
+            return false;
+        StoreValue shape, box;
+        bool sized;
+        if (check && field >= 0 && ShapeField(kind, field) &&
+            !ShapeValue(sc, s7_cdr(s7_car(p)), &shape, &box, &sized, err, size))
             return false;
         if (!check && field >= 0 && !WriteField(sc, id, field, s7_cdr(s7_car(p)), true, err, size))
             return false;
@@ -2569,6 +2641,15 @@ static s7_pointer SchemeVec3(s7_scheme *sc, s7_pointer args)
                NumberArg(sc, s7_caddr(args), "vec3", 3));
 }
 
+// (box x y z): an area's shape, as the data (box x y z) that :shape reads (B6).
+static s7_pointer SchemeBox(s7_scheme *sc, s7_pointer args)
+{
+    double x = NumberArg(sc, s7_car(args), "box", 1), y = NumberArg(sc, s7_cadr(args), "box", 2),
+           z = NumberArg(sc, s7_caddr(args), "box", 3);
+    return s7_list(sc, 4, s7_make_symbol(sc, "box"), s7_make_real(sc, x), s7_make_real(sc, y),
+                   s7_make_real(sc, z));
+}
+
 static s7_pointer SchemeVx(s7_scheme *sc, s7_pointer args) { return s7_make_real(sc, VecArg(sc, s7_car(args), "vx", 1).x); }
 static s7_pointer SchemeVy(s7_scheme *sc, s7_pointer args) { return s7_make_real(sc, VecArg(sc, s7_car(args), "vy", 1).y); }
 static s7_pointer SchemeVz(s7_scheme *sc, s7_pointer args) { return s7_make_real(sc, VecArg(sc, s7_car(args), "vz", 1).z); }
@@ -2829,6 +2910,7 @@ static const Call calls[] = {
     {"input-vector", SchemeInputVector, 4, 0, false, true, "(input-vector 'left 'right 'forward 'back)"},
     {"mouse-motion", SchemeMouseMotion, 0, 0, false, true, "(mouse-motion): vec3 dx dy 0"},
     {"vec3", SchemeVec3, 3, 0, false, true, "(vec3 x y z)"},
+    {"box", SchemeBox, 3, 0, false, true, "(box x y z) -> an area shape for :shape"},
     {"vx", SchemeVx, 1, 0, false, true, "(vx v)"},
     {"vy", SchemeVy, 1, 0, false, true, "(vy v)"},
     {"vz", SchemeVz, 1, 0, false, true, "(vz v)"},

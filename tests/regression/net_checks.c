@@ -62,6 +62,7 @@ enum { POSITION, N, MOOD, SEEN, SCORE, TARGET };
 enum { ALIVE, AGE };
 static int joinedField, leftField;
 static StoreSymbol pokeEvent, lookEvent, orphanedEvent, joinedEvent, leftEvent, tickEvent;
+static int orphanedRuns[MACHINES]; /* orphaned handlers run on each machine since the last reset */
 
 static uint64_t SplitMix(uint64_t *state)
 {
@@ -250,6 +251,8 @@ static bool Handler(Store *s, StoreId self, StoreSymbol event, const StoreValue 
     }
     else if (event == orphanedEvent)
     {
+        for (int i = 0; i < MACHINES; i++)
+            orphanedRuns[i] += s == &machines[i].store;
         StoreValue seen = Int(-7);
         StoreSet(s, self, SEEN, &seen);
     }
@@ -803,6 +806,41 @@ int NetChecks(void)
     for (int i = 0; i < 9; i++)
         StoreRemove(i < 8 ? host : a, shells[i]);
     Step(40);
+
+    // A client removes its own soldier while it holds a thing (B1, B3.7): the thing is detached to
+    // the host, and its orphaned runs there, once, sent on from the client by the message path.
+    StoreAttach(host, units[50], Unit(host, 1002));
+    Step(40);
+    Expect(Placed(50, 1002, 2, -1), "the client's soldier holds a thing on every machine");
+    memset(orphanedRuns, 0, sizeof orphanedRuns);
+    StoreRemove(a, Unit(a, 1002));
+    Step(60);
+    printf("net: client removes its holder: orphaned ran %d time(s) on the host, %d and %d on the clients\n",
+           orphanedRuns[0], orphanedRuns[1], orphanedRuns[2]);
+    Expect(orphanedRuns[0] == 1 && GetInt(host, units[50], SEEN) == -7,
+           "a client removing its own holder: the held thing's orphaned runs on the host, once");
+    Expect(orphanedRuns[1] == 0 && orphanedRuns[2] == 0, "... and on neither client");
+    Expect(!StoreAlive(host, Unit(host, 1002)) && Placed(50, 0, 0, -1),
+           "... and the thing is the host's, with no parent, on every machine");
+
+    // The host removing a holder runs it once too: the clients, applying that removal from the
+    // host's state, send nothing. The holder and the thing are new, so the clients reach the
+    // holder's removal before the thing's own detach and still see it as a guest then.
+    StoreId holder = StoreSpawn(host, unitKind, 0, STORE_NULL, STORE_NO_SYMBOL),
+            held = StoreSpawn(host, unitKind, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreValue holderN = Int(6000), heldN = Int(6001);
+    StoreSet(host, holder, N, &holderN);
+    StoreSet(host, held, N, &heldN);
+    StoreAttach(host, held, holder);
+    Step(40);
+    Expect(Placed(6001, 6000, 0, -1), "the host's holder holds a thing on every machine");
+    memset(orphanedRuns, 0, sizeof orphanedRuns);
+    StoreRemove(host, holder);
+    Step(60);
+    printf("net: host removes a holder: orphaned ran %d time(s) on the host, %d and %d on the clients\n",
+           orphanedRuns[0], orphanedRuns[1], orphanedRuns[2]);
+    Expect(orphanedRuns[0] == 1 && orphanedRuns[1] == 0 && orphanedRuns[2] == 0 && Placed(6001, 0, 0, -1),
+           "the host removing a holder runs the held thing's orphaned once, on the host");
 
     // A leaver's roots are removed and the guests under them orphaned.
     StoreAttach(host, units[40], Unit(host, 1003));

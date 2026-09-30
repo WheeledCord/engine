@@ -219,10 +219,13 @@ void StoreSetLocalOwners(Store *, const int *owners, int count);    /* which own
    once per kind and event through `TraceLog(LOG_WARNING, ...)`.
 6. Systems run (`StoreAddSystem`, in registration order) and the events they queue are delivered.
 7. Removals apply: storage of things removed this tick is freed, declared children with them, guests
-   detached (§2.3). A detached guest whose kind handles `orphaned` and whose new owner (the host) is
-   local gets `orphaned` as a timer due next tick (B1, B3.7); a machine that is not the host leaves it
-   (a client removing its own holder: nothing runs `orphaned` yet; a leaver's guests get it from
-   store_net, §9.4). Then the store records which shared fields changed since the last `StoreFrame`
+   detached (§2.3). A detached guest whose kind handles `orphaned` gets it as a timer due next tick
+   (B1, B3.7), which is delivered like any message: its new owner is the host, so on the host it runs
+   there, and on a client that removed its own holder it goes out through the `outgoing` hook to the
+   host (B3.4, §9.3). A removal store_net applies from another machine's state
+   (`StoreRemoveReplica`, `core/store_internal.h`) sends nothing, since the machine that made it did,
+   so `orphaned` runs once, on the host (a leaver's guests get it from store_net, §9.4). Then the
+   store records which shared fields changed since the last `StoreFrame`
    (compare the shared pools against a shadow copy per kind, only for kinds that registered any
    `-changed` event; fields are compared per declared field, so a collection is one change).
    `start` always reaches a thing before its first `tick`. A thing spawned during a tick (from a
@@ -338,13 +341,16 @@ registers one system (areas). It holds no GL objects: geometry is CPU arrays; §
 | `light` | node | `type` SYMBOL (`ambient` `directional` `point`), `energy` FLOAT 1, `color` VEC3 (1 1 1), `range` FLOAT 10 |
 | `character` | node | `radius` FLOAT 0.4, `height` FLOAT 1.8, `velocity` VEC3, `on-floor` BOOL ENGINE |
 | `solid` | node | `size` VEC3 (1 1 1): an axis-aligned box centred on the node |
-| `area` | node | `radius` FLOAT 1: a sphere; `%inside` LIST of REF max 16 HIDDEN ENGINE (who was overlapping last tick) |
+| `area` | node | `radius` FLOAT 1 (a sphere's), `shape` SYMBOL `sphere` (or `box`: an axis-aligned box of `size` centred on the node, like a `solid`; any other symbol reads as a sphere), `size` VEC3 (1 1 1) (a box's); `%inside` LIST of REF max 16 HIDDEN ENGINE (who was overlapping last tick) |
 | `tilemap` | node | `width` INT 16, `depth` INT 16, `cell-size` FLOAT 2, `height` FLOAT 3, `cells` GRID of INT (width x depth, 0 open, 1 solid; declared with max = width, height = depth at the kind level, so the grid is 64 x 64 at most and the tilemap's `width`/`depth` say how much is used), `floor-texture` STRING, `wall-texture` STRING, `ceiling-texture` STRING |
 | `sound` | node | `stream` STRING, `volume` FLOAT 1, `playing` BOOL |
 
 Kind settings in a `(child eye (camera :at v :fov 75 :for-owner #t))` form are just field writes
 after spawn (`:at` is `position`); the Scheme layer does that (§5.3). Settings on `(is character
-:radius 0.35)` are default overrides for the derived kind (`StoreKindSetDefault`).
+:radius 0.35)` are default overrides for the derived kind (`StoreKindSetDefault`). An area's
+`:shape` (in `is`, spawn and child settings, and `set!`) takes `'sphere`, `'box` or `(box x y z)`,
+which sets `shape` to `box` and `size` to (x y z); any other shape is refused with a message naming
+it.
 
 Functions (all deterministic; no GL; every one refuses a stale id):
 
@@ -378,7 +384,7 @@ int  World3DTilemapChunks(World3D *, StoreId tilemap, World3DChunk *out, int max
   `velocity.y` is zeroed; the final position is written with `StoreSetEngine`. Deterministic:
   boxes are tested in id order.
 - **Areas**: the system runs each tick: for every `area`, the set of `character`s whose box
-  intersects the sphere, in id order; a newcomer gets `touched` sent to the area with `{other}`, a
+  intersects its shape (the sphere, or the box), in id order; a newcomer gets `touched` sent to the area with `{other}`, a
   leaver `untouched`. `%inside` holds the current set (so a save restores it).
 - **Rays**: 3D DDA over tilemap cells, slab tests on solids and character boxes; nearest hit wins;
   `ignore` and things under it are skipped. `line-of-sight?` tests tilemap and solids only.
@@ -550,9 +556,9 @@ Input (read from the tick's `GameInput`, §6.2): `(define-actions (name "Key") .
 normalised, `(mouse-motion)` -> vec3 (dx, dy, 0). Vectors: `vec3 vx vy vz v+ v- v* vscale vlength
 vdistance vnormalize vdot vcross rotate-y heading aim spread clamp`. World: `world-position`,
 `raycast` (from dir max :ignore thing-or-list, up to 16) -> hit or #f, `hit-thing hit-point hit-normal hit-distance`,
-`line-of-sight?`, `nearest` (kind point :max :where), `overlapping` (area kind), `aimed-at` (camera
-kind distance, or kind distance from a handler: the first camera under its thing; area spheres are
-targets), `path-next` (tilemap from to), `cell->world`, `world->cell`, `move-and-slide!`,
+`line-of-sight?`, `nearest` (kind point :max :where), `box` (x y z: an area's `:shape`), `overlapping` (area kind), `aimed-at` (camera
+kind distance, or kind distance from a handler: the first camera under its thing; areas are
+targets by their shape), `path-next` (tilemap from to), `cell->world`, `world->cell`, `move-and-slide!`,
 `teleport!`, `random` (n; from `self`'s stream, or the presentation stream in presentation phase),
 `tick-time`. Presentation: `draw-text` (text x y :size :color :align), `draw-rect` (x y w h :color),
 `draw-ring` (x y r [fill 0-1, clockwise from the top] :color), `draw-image` (name x y), `screen-width`, `screen-height`, `rgba`,
@@ -694,7 +700,7 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
   B2.2 order and that `remove` drops queued messages); timers; rules 1, 5, engine-field, type;
   snapshot/restore/hash equality; save/load round trip and a changed-kind load.
 - `tests/regression/world3d_checks.c`: collide-and-slide into a wall and onto a floor; area
-  touched/untouched; raycast against a cell and a character; line of sight; path-next around a
+  touched/untouched, for a sphere and a box (with overlapping and a ray that tests areas); raycast against a cell and a character; line of sight; path-next around a
   wall; chunk rebuild on a cell change; transform caching (a child under a moved parent moves, a
   child under an unmoved parent's matrix is bit-identical to last frame's).
 - `tests/regression/draw_path_checks.c`: key order for opaque and translucent items; radix sort
@@ -938,7 +944,9 @@ How it is built:
   Assert: spawns, updates and removes reach both clients; `StoreNetStateHash` equal on all three
   after 60 still ticks; a client's message reaches a host-owned thing and a host message reaches a
   client-owned thing after its carried state; an attach by the host moves ownership to the client
-  and a detach back; a kinds mismatch is refused with the kind named; a leaver's roots are removed and
+  and a detach back; a kinds mismatch is refused with the kind named; a client removing its own
+  holder, and the host removing one, each run the held thing's `orphaned` once, on the host, and on
+  no client, with the thing the host's and unparented everywhere; a leaver's roots are removed and
   guests orphaned; bytes per state packet for 300 things with one field changing is under 1 KB.
   For the §9.2-§9.5 rules: a `look` message's handler reads the sender's position as written in the
   sending tick; a shell kind (`alive` BOOL, `age` FLOAT registered) whose owner clears `alive` in the

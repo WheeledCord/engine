@@ -236,7 +236,8 @@ static void CarryChecks(void)
         "aimed-at-out-of-reach", "aimed-at-with-camera", "first-child-holds", "socket-local-transform",
         "dropped-at", "detach-root-no-placement-refused", "detach-root-not-owner-refused", "detach-root-placed",
         "detach-held-not-owner-refused", "keep-world", "orphan-detached", "orphaned-seated",
-        "parent-changed-is-presentation"};
+        "parent-changed-is-presentation", "box-kind-setting", "box-spawn-setting", "shape-unknown-refused",
+        "box-area-touched", "box-area-untouched"};
     static const char *const events[] = {
         "event parent-changed #f #f", "event parent-changed #f #f", "event parent-changed #f socket",
         "event parent-changed socket #f", "event parent-changed #f socket", "event parent-changed socket #f",
