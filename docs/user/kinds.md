@@ -51,7 +51,7 @@ screen for five seconds, prefixed `game:`, besides being printed.
 | `--bench` | print tick (and, in a window, frame) microseconds p50/p99/max and the draw stats; in a session also `net sent X B/s received Y B/s` |
 | `--save FILE` / `--load FILE` | save the world on exit / load one after the game file |
 | `--present` | with `--headless` only: also run the `frame`, `-changed` and `draw-hud` handlers each tick, drawing nothing; `--bench` then prints the HUD calls per frame |
-| `--shot-every N` | in a window only: save a screenshot every N ticks, printing `shot T PATH` |
+| `--shot-every N` | in a window only: save a screenshot every N ticks (on the first frame at or after each multiple, named by the multiple, since a frame can run several ticks), printing `shot T PATH` |
 | `--shot-dir DIR` | where the screenshots go, as `DIR/shot_<tick>.png` (default: the current directory) |
 | `--no-time-limit` | let handlers run as long as they take (by default one running over 50 ms is stopped) |
 | `--host PORT` | host a co-op session on that UDP port |
