@@ -312,9 +312,27 @@ static bool MeshCopy(DrawPathMeshData *out, const Mesh *mesh)
     return true;
 }
 
-/* Takes ownership of a filled record: uploads it and appends it. Releases it on failure. */
+/* A released slot has no positions (DrawPathMeshRelease); every live mesh has them. */
+static bool MeshLive(const DrawPath *path, uint32_t id)
+{
+    return id >= 1 && id <= (uint32_t)path->meshCount && path->meshes[id - 1].positions;
+}
+
+/* Takes ownership of a filled record: uploads it into the first released slot, or appends it.
+   Releases it on failure. */
 static uint32_t MeshAdopt(DrawPath *path, DrawPathMeshData *m)
 {
+    for (int i = 0; i < path->meshCount; i++)
+        if (!path->meshes[i].positions)
+        {
+            if (!MeshUpload(m))
+            {
+                MeshRelease(m);
+                return 0;
+            }
+            path->meshes[i] = *m;
+            return (uint32_t)i + 1;
+        }
     if (path->meshCount >= DRAW_PATH_MAX_MESHES)
     {
         MeshRelease(m);
@@ -344,15 +362,23 @@ static uint32_t MeshAdopt(DrawPath *path, DrawPathMeshData *m)
 uint32_t DrawPathMesh(DrawPath *path, const Mesh *mesh)
 {
     DrawPathMeshData m;
-    if (!path || path->meshCount >= DRAW_PATH_MAX_MESHES || !MeshCopy(&m, mesh))
+    if (!path || !MeshCopy(&m, mesh))
         return 0;
     return MeshAdopt(path, &m);
+}
+
+bool DrawPathMeshRelease(DrawPath *path, uint32_t id)
+{
+    if (!path || !MeshLive(path, id))
+        return false;
+    MeshRelease(&path->meshes[id - 1]);
+    return true;
 }
 
 uint32_t DrawPathMeshUpdate(DrawPath *path, uint32_t id, const Mesh *mesh)
 {
     DrawPathMeshData m;
-    if (!path || id < 1 || id > (uint32_t)path->meshCount || !MeshCopy(&m, mesh))
+    if (!path || !MeshLive(path, id) || !MeshCopy(&m, mesh))
         return 0;
     if (!MeshUpload(&m))
     {
@@ -366,7 +392,7 @@ uint32_t DrawPathMeshUpdate(DrawPath *path, uint32_t id, const Mesh *mesh)
 
 bool DrawPathMeshPositions(DrawPath *path, uint32_t id, const float *positions, const float *normals)
 {
-    if (!path || id < 1 || id > (uint32_t)path->meshCount || !positions)
+    if (!path || !MeshLive(path, id) || !positions)
         return false;
     DrawPathMeshData *m = &path->meshes[id - 1];
     size_t bytes = (size_t)m->vertexCount * 3 * sizeof(float);
@@ -437,7 +463,7 @@ uint32_t DrawPathMaterial(DrawPath *path, Shader shader, Texture2D texture, Colo
 // ---- static batching --------------------------------------------------------------------------
 static bool ItemValid(const DrawPath *path, const DrawItem *item)
 {
-    return item->mesh >= 1 && item->mesh <= (uint32_t)path->meshCount && item->material >= 1 &&
+    return MeshLive(path, item->mesh) && item->material >= 1 &&
            item->material <= (uint32_t)path->materialCount && item->layer <= 3;
 }
 

@@ -74,8 +74,9 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   (opaque by shader, material, mesh, then near to far; translucent far to near), an 8-bit radix sort,
   and a submit that switches shader and texture only when they change and uploads one MVP per item.
   It owns copies of the meshes it uploads, and merges items of one material into world-space meshes
-  for static batching. The viewmodel layer is drawn last without depth testing, phase 1's stand-in
-  for its own depth clear and projection. The project runner draws its world through it; see
+  for static batching (and frees a batch's meshes when it is rebuilt). The viewmodel layer is drawn
+  last without depth testing, a stand-in for its own depth clear and projection, which the project
+  runner does with `DrawViewmodelCleared` instead. The project runner draws its world through it; see
   `docs/developer/store.md` section 4.
   Skinning: items carry bone matrices (`DrawItem.bones`), uploaded only for materials whose shader
   has `boneMatrices` (`core/shaders/skinning.vs`); `DrawPathMeshPositions` rewrites a mesh for CPU skinning.
@@ -102,7 +103,8 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   the cell outlines that tile exactly, and the far-to-near order an isometric scene must be painted
   in. No camera and no map size: those belong to a project.
 - `fps_camera`: movement smoothing, accepted-distance gait, footfall events, breath/bob and viewmodel sway. Input mappings and collision/terrain policy belong to callers.
-- `viewmodel`: one scoped projection/depth function and camera-space transform helper.
+- `viewmodel`: one scoped projection/depth function (and a variant that clears depth and sets its own
+  clip planes first) and a camera-space transform helper.
 - `transform`: local/world movement, rotation, conversion and bounded turning. Forward is +Z, up
   +Y, right -X, matching FpsCamera, ActorLookAt and glTF models. [Usage](TRANSFORMS.md).
 - `collision3d`: a fixed-capacity set of Models with layers and a caller tag, and a closest-hit ray

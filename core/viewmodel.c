@@ -5,10 +5,13 @@
 #include "viewmodel.h"
 #include "raymath.h"
 #include "rlgl.h"
-bool DrawViewmodel(ViewmodelProjection c, void (*draw)(void *), void *ctx)
+#include <GL/gl.h>
+static bool Valid(ViewmodelProjection c, void (*draw)(void *))
 {
-    if (!draw || !(c.fov > 0 && c.fov < 180) || !(c.aspect > 0) || !(c.depth > 0 && c.depth <= 1))
-        return false;
+    return draw && c.fov > 0 && c.fov < 180 && c.aspect > 0 && c.depth > 0 && c.depth <= 1;
+}
+static void Pass(ViewmodelProjection c, void (*draw)(void *), void *ctx)
+{
     rlDrawRenderBatchActive();
     Matrix saved = rlGetMatrixProjection();
     Matrix p = MatrixPerspective(c.fov * DEG2RAD, c.aspect, rlGetCullDistanceNear(), rlGetCullDistanceFar());
@@ -18,6 +21,24 @@ bool DrawViewmodel(ViewmodelProjection c, void (*draw)(void *), void *ctx)
     draw(ctx);
     rlDrawRenderBatchActive();
     rlSetMatrixProjection(saved);
+}
+bool DrawViewmodel(ViewmodelProjection c, void (*draw)(void *), void *ctx)
+{
+    if (!Valid(c, draw))
+        return false;
+    Pass(c, draw, ctx);
+    return true;
+}
+bool DrawViewmodelCleared(ViewmodelProjection c, float nearPlane, float farPlane, void (*draw)(void *), void *ctx)
+{
+    if (!Valid(c, draw) || !(nearPlane > 0 && farPlane > nearPlane))
+        return false;
+    rlDrawRenderBatchActive();
+    glClear(GL_DEPTH_BUFFER_BIT); /* rlgl clears depth only together with colour */
+    double savedNear = rlGetCullDistanceNear(), savedFar = rlGetCullDistanceFar();
+    rlSetClipPlanes(nearPlane, farPlane);
+    Pass(c, draw, ctx);
+    rlSetClipPlanes(savedNear, savedFar);
     return true;
 }
 Matrix ViewmodelTransform(Vector3 pos, Vector3 f, Vector3 up, Vector3 offset)

@@ -3799,6 +3799,8 @@ int main(int argc, char **argv)
     SetTraceLogLevel(LOG_WARNING);
     if (argc > 1 && !strcmp(argv[1], "--runner"))
         return RunnerChecks();
+    if (argc > 1 && !strcmp(argv[1], "--present")) /* only the presentation checks, which are also in the full run */
+        return PresentationChecks() ? 1 : 0;
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320, 240, "regression");
     if (!UiInit(&ui, UiThemeDefault()))
@@ -3856,6 +3858,7 @@ int main(int argc, char **argv)
     failures += World3DChecks();
     failures += GameChecks();
     failures += GameRunnerChecks();
+    failures += PresentationChecks();
     failures += NetChecks();
     printf("REGRESSION TEST failures=%d checks=%d\n", failures, checks);
     return failures ? 1 : 0;

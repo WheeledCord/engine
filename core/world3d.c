@@ -388,7 +388,8 @@ bool World3DInit(World3D *w, Store *store)
     StoreFieldDecl socket[] = {Field("bone", STORE_STRING, 0, None()),
                                Collection("of", STORE_LIST, STORE_SYMBOL, 4, 0, 0)};
     StoreFieldDecl camera[] = {Field("fov", STORE_FLOAT, 0, FloatValue(75)),
-                               Field("for-owner", STORE_BOOL, 0, None())};
+                               Field("for-owner", STORE_BOOL, 0, None()),
+                               Field("viewmodel-fov", STORE_FLOAT, 0, FloatValue(60))};
     StoreFieldDecl light[] = {
         Field("type", STORE_SYMBOL, 0, None()), Field("energy", STORE_FLOAT, 0, FloatValue(1)),
         Field("color", STORE_VEC3, 0, one), Field("range", STORE_FLOAT, 0, FloatValue(10))};

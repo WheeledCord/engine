@@ -146,9 +146,11 @@ static void KindChecks(void)
     StoreId cam = Spawn(s, "camera", STORE_NULL);
     StoreValue v;
     StoreKind camera = StoreKindNamed(s, "camera"), tilemap = StoreKindNamed(s, "tilemap");
+    StoreValue vfov;
     Expect(StoreGet(s, cam, StoreFieldIndex(s, camera, "fov"), &v) && v.as.f == 75 &&
+               StoreGet(s, cam, StoreFieldIndex(s, camera, "viewmodel-fov"), &vfov) && vfov.as.f == 60 &&
                NearVec(GetVec(s, cam, "scale"), (Vector3){1, 1, 1}) && GetBool(s, cam, "visible"),
-           "defaults: fov 75, scale 1 1 1, visible");
+           "defaults: fov 75, viewmodel-fov 60, scale 1 1 1, visible");
     const StoreFieldDecl *prev = StoreFieldAt(s, node, StoreFieldIndex(s, node, "%prev-position"));
     const StoreFieldDecl *cells = StoreFieldAt(s, tilemap, StoreFieldIndex(s, tilemap, "cells"));
     const StoreFieldDecl *floor =
