@@ -13,21 +13,21 @@ if (Input.GetKey(KeyCode.W))
     transform.Translate(Vector3.forward * speed * Time.deltaTime, Space.Self);
 ```
 
-For an already scheduled entity here:
+Here, in a fixed update:
 
 ```c
-static void Think(EntityContext *e)
+static bool Update(void *context, double dt, const EngineInput *input)
 {
-    Mover *self = e->data; // Mover contains a raylib Transform transform and a float speed.
-    if (e->input->down[KEY_W])
-        TransformMoveLocal(&self->transform, (Vector3){0, 0, self->speed * (float)e->dt});
-    EntityThinkNext(e);
+    Mover *self = context; // Mover contains a raylib Transform transform and a float speed.
+    if (input->down[KEY_W])
+        TransformMoveLocal(&self->transform, (Vector3){0, 0, self->speed * (float)dt});
+    return true;
 }
 ```
 
 Initialize the transform with `TransformIdentity()` or explicit identity defaults before use. A zeroed
 raylib Transform has zero scale and an invalid rotation; it is not an identity. No helper hides that
-mistake by silently changing the scale. Spawn should schedule the first Think.
+mistake by silently changing the scale.
 
 Forward is **+Z**, up is +Y, right is -X, which is what a right-handed system with +Z forward
 gives you. FpsCamera's zero yaw, ActorLookAt's yaw and glTF models all face +Z as well, so camera
@@ -47,7 +47,6 @@ Transform2DMoveLocal(&ship, (Vector2){speed * dt, 0});
 2D follows raylib screen coordinates: +X right, +Y down, positive rotation clockwise. The 2D LookAt
 helper points local +X at the target. Initialize with `Transform2DIdentity()`. Angles are **radians**,
 matching raymath. Raylib's drawing calls and Camera2D use degrees; convert with RAD2DEG at that boundary.
-The sibling workspace's `../Games/authoring-demo` shows world movement, local movement and rotation with interpolated rendering.
 
 ## What each call is for
 

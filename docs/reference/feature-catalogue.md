@@ -14,7 +14,8 @@ linked guide explains authoring where one exists.
 | Files | Versioned named-field save files with migration | `core/save.h` |
 | Input | Named actions with saved, rebindable bindings | `core/input_map.h` |
 | Networking | ENet-backed client/server endpoints, peer events, reliable messages and replaceable snapshots | `core/network.h`; [networking](../user/networking.md) |
-| Networking | Declarative replicated-object schemas, stable identities, ownership checks, full snapshots, stale-snapshot rejection, and interpolation against server time | `core/net_sync.h`; [networking](../user/networking.md) |
+| Networking | The store's things shared between a host and up to 15 clients: ownership by the tree, delta state against acknowledged baselines, messages delivered with their sender's state, interpolation 100 ms behind, joining checked kind by kind | `core/store_net.h`; [networking](../user/networking.md) |
+| Networking | store_net over ENet: hosting, joining with retry, peer numbering, flushing, wire byte totals | `core/store_net_enet.h`; [networking](../user/networking.md) |
 | Networking | Fixed server tick, a separate snapshot rate, and the client clock that draws the world in the past | `core/net_clock.h`; [networking](../user/networking.md) |
 | Rendering | GLSL 120 shader tables, `#include` expansion, and frame uniforms | `core/shader.h`, `core/frame_uniforms.h` |
 | Rendering | Colour/depth render targets | `core/render_target.h` |
@@ -34,27 +35,25 @@ linked guide explains authoring where one exists.
 | Collision | Optional circles/AABBs, layer/mask filtering, overlap and sweep queries, spatial hash | `core/collision2d.h`; [2D guide](../user/2d-space.md) |
 | UI | Immediate widgets, text input, clipping, menus, panels | `core/ui.h`, `core/ui_menu.h`, `core/ui_containers.h` |
 | UI authoring | Layout/document load-save-resolve and editing helpers | `core/ui_document.h`, `core/ui_editor.h`, `core/ui_layout.h` |
-| Gameplay | Generational entity world and lifecycle | `gameplay/entity.h`; [gameplay guide](../user/gameplay.md) |
-| Gameplay | Typed entity fields and scene files | `gameplay/fields.h`, `gameplay/scene.h` |
-| Gameplay | Ordered update/draw system registry | `gameplay/systems.h` |
-| Gameplay | Entity-count diagnostic bridge | `gameplay/debug.h` |
-| Gameplay | Core application adapter | `gameplay/runtime.h` |
-| Gameplay | A* routing and movement over the isometric hex grid | `gameplay/iso_move.h` |
+| World | The store: kinds with typed fields, things in a tree with generational handles, the ordered tick, the presentation frame, the replay rules, snapshots, a world hash and saves | `core/store.h`; [store design](../developer/store.md) |
+| World | Built-in 3D kinds: nodes, models, sockets, cameras, lights, characters with collide-and-slide, solids, areas, tilemaps with paths and ray casts, sounds | `core/world3d.h`; [running a Scheme game](../user/kinds.md) |
+| Rendering | The draw path: sorted, culled, statically batched draws of a frame's models | `core/draw_path.h` |
+| Runtime | Recording and replaying a session's input, commands and packets | `core/replay.h` |
+| Scripting | Scheme on the store: `define-kind`, handlers, the rules as errors, the calls a game makes | `gameplay/script/game_s7.h`; [running a Scheme game](../user/kinds.md) |
+| Runner | `trench run <dir>`: a Scheme project windowed or headless, with co-op, recording, replay, a bot and hashes | `gameplay/game.h`; [running a Scheme game](../user/kinds.md) |
 | Objects | Types described once as properties, methods and signals; a pool of generational handles; signal connections | `core/object.h` |
 | Objects | A timer that emits timeout | `core/timer.h` |
-| Objects | A node with a local position, rotation and scale under an optional parent, whose world transform follows it | `core/node.h` |
-| Scripting | Scheme: engine objects as values, scripted entities, free-standing calls | `gameplay/script/script.h`; [scripting guide](../user/scripting.md) |
 
 ## Not provided yet
 
 Physics and collision response are not engine systems yet; games that need them currently supply
-their own. The collision package supplies query indexing, not a physics model. `core/node.h` supplies
-parent/child transforms, not physics or collision response.
+their own. The collision package supplies query indexing, not a physics model; world3d's characters
+collide and slide against boxes, which is not a physics model either.
 See [compatibility and limits](compatibility.md).
 
 ## Reference coverage
 
-The XML reference begins with the application and entity-world contracts, whose lifetime rules are the
-most consequential. Add XML files service by service as their public API is maintained; do not claim a
+The XML reference begins with the application contract, whose lifetime rules are the most
+consequential. Add XML files service by service as their public API is maintained; do not claim a
 service is fully reference-covered until all exported symbols and public types in its header are
 documented.

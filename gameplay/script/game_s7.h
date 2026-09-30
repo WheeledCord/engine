@@ -10,8 +10,8 @@
 #include <stdint.h>
 
 /* The store's Scheme frontend (docs/developer/store.md §5): things as s7 values, define-kind and its
-   handlers, the five rules as errors, and the calls a game makes. It is a second frontend beside
-   script_s7.c, with its own interpreter; there is one per process.
+   handlers, the five rules as errors, and the calls a game makes. There is one interpreter per
+   process.
 
    A translation unit that also includes s7.h includes it first: this header then uses s7's own
    declarations of s7_scheme and s7_pointer, and otherwise declares them itself. */

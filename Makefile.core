@@ -26,7 +26,7 @@ RAYLIB_REV := $(shell git -C raylib rev-parse HEAD 2>/dev/null)
 # What the SDK says it is: the revision it was built from, and whether that tree had uncommitted
 # changes, so a build can always be traced back to an engine someone can check out.
 ENGINE_REV := $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)$(shell git diff --quiet 2>/dev/null || echo -dirty)
-.PHONY: sdk install sdk-example run-authoring all run test-gameplay test-regression integration smoke full-check api-docs-update docs-check script-api clean boundary hooks FORCE
+.PHONY: sdk sdk-check install all run test-regression integration smoke full-check api-docs-update docs-check clean boundary hooks FORCE
 # A normal build produces the engine and its authoring tools. Tests are opt-in commands below.
 all: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a
 # Re-export whenever the raylib checkout moves: the stamp only changes when the revision does, and
@@ -61,14 +61,6 @@ $(BUILD)/gameplay_%.o: gameplay/%.c $(RLSRC)/.exported | boundary
 $(BUILD)/vendor/s7.o: vendor/s7/s7.c $(RLSRC)/.exported
 	@mkdir -p $(@D)
 	$(CC) -std=gnu11 -O2 -g -w -DWITH_SYSTEM_EXTRAS=0 -DWITH_C_LOADER=0 -c $< -o $@
-$(BUILD)/script-api.md: gameplay/script/script_api.def tools/write_script_api.py
-	python3 tools/write_script_api.py --input $< --format markdown --out $@
-$(BUILD)/script-api.json: gameplay/script/script_api.def tools/write_script_api.py
-	python3 tools/write_script_api.py --input $< --format json --out $@
-# The object reference comes from the type tables themselves, by running them.
-$(BUILD)/script-objects.md: $(BUILD)/describe_types
-	./$(BUILD)/describe_types $@
-script-api: $(BUILD)/script-api.md $(BUILD)/script-api.json $(BUILD)/script-objects.md
 $(BUILD)/libgameplay.a: $(GAMEPLAY_OBJ) Makefile.core
 	rm -f $@
 	$(AR) rcs $@ $(GAMEPLAY_OBJ)
@@ -87,9 +79,7 @@ $(BUILD)/$(1): $(patsubst $(2)/%.c,$(BUILD)/$(2)/%.o,$(wildcard $(2)/*.c)) $(BUI
 endef
 
 $(eval $(call core_project,core_integration,tests/integration/core))
-$(eval $(call core_project,gameplay_integration,tests/integration/gameplay))
 $(eval $(call core_project,regression_test,tests/regression))
-$(eval $(call core_project,describe_types,tools/describe_types))
 # Go/no-go condition 6: the draw path timed headless through EGL, so it links EGL as well.
 $(eval $(call core_project,draw_bench,tools/draw_bench))
 $(BUILD)/draw_bench: LDLIBS += -lEGL
@@ -108,17 +98,16 @@ SDK ?= $(BUILD)/sdk
 PREFIX ?= $(HOME)/.local
 SDK_HEADERS := $(filter-out core/ui_internal.h,$(wildcard core/*.h)) $(wildcard gameplay/*.h) \
 	$(wildcard gameplay/script/*.h)
-sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/trench script-api
+sdk: $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(BUILD)/trench
 	rm -rf $(SDK)
 	mkdir -p $(SDK)/include/core $(SDK)/include/gameplay/script $(SDK)/lib/pkgconfig $(SDK)/bin \
-		$(SDK)/share/engine/docs
+		$(SDK)/share/engine
 	cp $(filter core/%,$(SDK_HEADERS)) $(SDK)/include/core/
 	cp $(filter gameplay/%.h,$(SDK_HEADERS)) $(SDK)/include/gameplay/ 2>/dev/null || true
-	cp gameplay/script/*.h gameplay/script/script_api.def $(SDK)/include/gameplay/script/
+	cp gameplay/script/*.h $(SDK)/include/gameplay/script/
 	cp $(RLSRC)/raylib.h $(RLSRC)/raymath.h $(RLSRC)/rlgl.h $(SDK)/include/
 	cp $(BUILD)/libcore.a $(BUILD)/libgameplay.a $(BUILD)/libscript.a $(RLLIB) $(SDK)/lib/
 	cp -r core/fonts core/shaders core/scheme $(SDK)/share/engine/
-	cp $(BUILD)/script-api.md $(BUILD)/script-api.json $(BUILD)/script-objects.md $(SDK)/share/engine/docs/
 	cp tools/engine_build.py $(SDK)/bin/engine-build
 	cp tools/engine_new.py $(SDK)/bin/engine-new
 	cp $(BUILD)/trench $(SDK)/bin/trench
@@ -131,25 +120,17 @@ install: sdk
 	cp -r $(SDK)/include $(SDK)/lib $(SDK)/bin $(SDK)/share $(PREFIX)/
 	python3 tools/write_engine_pc.py --prefix "$(abspath $(PREFIX))" --revision "$(ENGINE_REV)" --out $(PREFIX)/lib/pkgconfig/engine.pc
 	@echo "Installed to $(PREFIX). PKG_CONFIG_PATH=$(PREFIX)/lib/pkgconfig"
-# A project outside this repository, built the way any of them is. The games and the editor live
-# in the workspace beside the engine, so this is where they are unless told otherwise.
-WORKSPACE ?= ..
-sdk-example: sdk
-	$(SDK)/bin/engine-build $(WORKSPACE)/Games/authoring-demo --sdk $(SDK)
-
-run-authoring: sdk
-	$(SDK)/bin/engine-build $(WORKSPACE)/Games/authoring-demo --sdk $(SDK) --run
 run: $(BUILD)/core_integration
 	./$(BUILD)/core_integration
-test-gameplay: $(BUILD)/gameplay_integration
-	./$(BUILD)/gameplay_integration
 test-regression: $(BUILD)/regression_test $(BUILD)/trench
 	./$(BUILD)/regression_test
-integration: $(BUILD)/core_integration $(BUILD)/regression_test
+integration: $(BUILD)/core_integration
 	./$(BUILD)/core_integration --smoke
-	./$(BUILD)/regression_test --runner
-smoke: test-gameplay test-regression
-	python3 tools/test_engine_build.py
+# engine-build's contracts, engine-new's Scheme project under the build tree's trench, and the SDK's
+# trench running that project from outside the engine tree.
+sdk-check: sdk
+	python3 tools/test_engine_build.py --sdk $(SDK)
+smoke: test-regression sdk-check
 	$(MAKE) -f Makefile.core docs-check
 full-check: smoke integration
 # The owner turns the commit gate on (docs/developer/hooks.md); it is not part of all.

@@ -1,5 +1,7 @@
 # Create an application and game loop
 
+This is for a game in C. A Scheme game's loop is the runner's (`trench run`, [Running a Scheme game](kinds.md)); a C game on the store ticks the store from its own `Update`, as Trenchfoot does.
+
 An application supplies an `EngineApplication` descriptor. `EngineRunApplication` owns window lifetime and invokes the callbacks you provide: `Init`, `FrameInput`, zero or more fixed `Update` calls, `Draw`, and `Shutdown`.
 
 ```c

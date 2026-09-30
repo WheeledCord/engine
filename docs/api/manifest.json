@@ -14,24 +14,6 @@
       ]
     },
     {
-      "name": "GameplayWorld",
-      "source": "gameplay/entity.h",
-      "output": "docs/api/gameplay/GameplayWorld.xml",
-      "symbols": [
-        "GameplayWorldInit",
-        "GameplayWorldFree",
-        "EntityRegister",
-        "EntitySpawnWith",
-        "EntityDestroy",
-        "EntityAlive",
-        "EntityData",
-        "EntityFirst",
-        "EntityNext",
-        "GameplayWorldStepInput",
-        "GameplayWorldDrawInterpolated"
-      ]
-    },
-    {
       "name": "CoreCamera2D",
       "source": "core/camera2d.h",
       "output": "docs/api/core/CoreCamera2D.xml",
@@ -143,38 +125,6 @@
         "CoreNetInterpolatorSnapshot",
         "CoreNetInterpolatorAdvance",
         "CoreNetInterpolatorRenderTick"
-      ]
-    },
-    {
-      "name": "CoreNetSync",
-      "source": "core/net_sync.h",
-      "output": "docs/api/core/CoreNetSync.xml",
-      "symbols": [
-        "CoreNetSyncInit",
-        "CoreNetSyncFree",
-        "CoreNetSyncRegister",
-        "CoreNetSyncSpawn",
-        "CoreNetSyncSpawnNext",
-        "CoreNetSyncDespawn",
-        "CoreNetSyncFind",
-        "CoreNetObjectCanWrite",
-        "CoreNetObjectWrite",
-        "CoreNetSyncReadObject",
-        "CoreNetSyncWrite",
-        "CoreNetSyncRead",
-        "CoreNetObjectSample",
-        "CoreNetObjectSampleAt",
-        "CoreNetSyncRemember",
-        "CoreNetSyncWriteDelta",
-        "CoreNetSyncIsMine",
-        "CoreNetSyncObserve",
-        "CoreNetSyncSerialize",
-        "CoreNetCommandWrite",
-        "CoreNetCommandRead",
-        "CoreNetCommandAccept",
-        "CoreNetSyncBindState",
-        "CoreNetSyncDirty",
-        "CoreNetSyncSetLocalActor"
       ]
     },
     {

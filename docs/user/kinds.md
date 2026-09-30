@@ -17,6 +17,11 @@ the SDK's `bin/`:
 trench run mygame [flags]
 ```
 
+`engine-new mygame --language scheme` (`tools/engine_new.py` in the engine, `engine-new` in an SDK)
+writes a starter game to begin from: a `game` with a tilemap floor and lights that spawns a walker for
+each player who joins, moved with WASD, and a HUD line. The SDK's `trench` finds the engine's prelude,
+shaders and font in the SDK's `share/engine/`; the build tree's finds them under `core/`.
+
 The runner declares the built-in 3D kinds, loads the game file, then spawns a `game` if the file did
 not spawn one itself (a file with no `game` kind is refused). A game usually spawns its players from
 `game`'s `start` handler; the local player is owner 1. Models, textures, sounds and images are named

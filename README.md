@@ -17,14 +17,16 @@ project of its own:
     trenchengine/
       engine/        this repository
       references/    other engines' source, kept to read
-      Games/         trenchfoot, isometric, skyrift, authoring-demo
+      Games/         trenchfoot
       Tools/         ui-editor, sprite-baker, texture-baker
 
 `core/` is the engine: window and main loop, input, shaders, render targets, mesh building,
-skeletons and animation, sprite sheets, isometric grids, an FPS camera, audio, networking, saving
-and an immediate-mode UI. A project declares the GPU capabilities it needs and core checks those
-and nothing else. `gameplay/` holds entities, scenes and Scheme scripting on top of core. `tests/`
-holds the engine's own checks.
+skeletons and animation, sprite sheets, isometric grids, an FPS camera, audio, saving, an
+immediate-mode UI, and the world a game lives in: the store (things of declared kinds in a tree,
+ticked in a fixed order, replayable), world3d (the built-in 3D kinds: models, cameras, lights,
+characters, tilemaps), the draw path, and networking on the store. A project declares the GPU
+capabilities it needs and core checks those and nothing else. `gameplay/` holds the runner,
+`trench`, and the Scheme frontend it runs games with. `tests/` holds the engine's own checks.
 
 ## Building
 
@@ -39,19 +41,20 @@ and cached after that. If you cloned without `--recurse-submodules`, run
 `git submodule update --init` first.
 
     make run           # optional graphical integration test
-    make smoke         # quick gameplay, regression, and documentation checks
-    make integration   # graphical rendering and runner integration checks
+    make smoke         # regression, engine-new, SDK and documentation checks
+    make integration   # graphical rendering integration checks
     make full-check    # smoke plus all integration checks
-    make sdk           # the SDK games are built against
-    make run-authoring # build and run a game from the workspace, through the SDK
+    make sdk           # the SDK games are built against, with trench, engine-new and engine-build
 
 Binaries locate the engine's own files relative to themselves, so they can be run from any working
 directory.
 
 ## Checks
 
-`make smoke` runs the fast gameplay and regression suites plus documentation checks; `make integration`
-runs the graphical/runner integration checks, and `make full-check` runs both. One of the suites,
+`make smoke` runs the regression suite, the engine-build and engine-new checks (a generated Scheme
+project run by the build tree's `trench` and by the SDK's, from outside the engine tree) and the
+documentation checks; `make integration` runs the graphical integration check, and `make full-check`
+runs both. One of the suites,
 `regression_test`, holds a check for every bug that has been found and fixed here, so they stay
 fixed. The UI editor carries its own suite, run from the editor: `ui-editor --smoke`. They check
 behaviour rather than pixels. The UI tool's suite drives itself with scripted mouse, keyboard and
@@ -66,17 +69,28 @@ Godot-style XML API references, and engine-developer standards. Run `make docs-c
 to validate the checked-in API references. [CONTRIBUTING.md](CONTRIBUTING.md) requires documentation
 to change with public behaviour and public APIs.
 
-## Writing a project
+## Writing a game
 
-`EngineApplicationDefault()` provides the application defaults; implement only the callbacks needed.
-The optional standard entry point calls a project-defined `EngineApplicationMain`. Core-only projects
-can use this directly. `GameplayApplication` additionally handles the world, class registration, scene
-loading, systems and cleanup. Entity callbacks receive their payload, input, timing and project context;
-field declarations provide keyvalue parsing before Spawn.
+A game is a directory with an `engine.project` and a game file in Scheme, and `trench` runs it:
 
-See the complete authoring example in the sibling workspace at `../Games/authoring-demo`,
-[core application/input APIs](core/README.md#application-authoring), and
-[gameplay authoring and migration](gameplay/README.md).
+    name My Game
+    game main.scm
+
+    trench run mygame                       # in a window
+    trench run mygame --headless --ticks 60 # no window
+    trench run mygame --host 7777           # co-op; others --join ADDRESS:7777
+
+The game file declares its kinds of thing with `define-kind` — fields, children, and handlers such
+as `(on (tick dt) ...)` — and the engine runs them: the store keeps the things, world3d moves,
+collides and lights them, the draw path draws them, and co-op, recording and replay come with it.
+`engine-new mygame --language scheme` writes a starter one; [Running a Scheme game](docs/user/kinds.md)
+is the guide, and `examples/` and `tests/regression/runner_game.scm` are games.
+
+A game that needs C links the engine and uses the same pieces directly — the store
+(`core/store.h`), networking on it (`core/store_net.h`, `core/store_net_enet.h`), world3d and the draw
+path — from its own `EngineApplication`, as Trenchfoot does. `EngineApplicationDefault()` provides
+the application defaults; implement only the callbacks needed, and define `EngineApplicationMain` to
+use the standard entry point. See the [core application and input APIs](core/README.md#application-authoring).
 
 ## Building a game with it
 
@@ -86,14 +100,16 @@ describing them.
     make sdk                  # build/core/sdk
     make install PREFIX=~/.local
 
-A project lives anywhere and says only what it is, in an `engine.project` manifest — no build rules,
-no path into the engine, and no list of engine parts. Every project gets the whole engine; the linker
-keeps only what the game calls, and a game that defines no `main` of its own gets the standard one:
+A C project lives anywhere and says only what it is, in an `engine.project` manifest — no build
+rules, no path into the engine, and no list of engine parts. Every project gets the whole engine; the
+linker keeps only what the game calls, and a game that defines no `main` of its own gets the
+standard one:
 
-    name authoring_demo
+    name trenchfoot
 
     source src/*.c
-    scenes scenes
+    assets assets
+    shaders shaders
 
 `engine-build` reads it, finds the SDK (named with `--sdk`, in `ENGINE_SDK`, vendored at `./sdk`, or
 installed and found through pkg-config), compiles in parallel only the sources that changed since the
@@ -111,22 +127,27 @@ another by accident:
     engine ad0546a           that revision, however it was versioned
 
 Every build writes `build/engine-build.stamp` beside the binary: the engine and revision, the SDK it
-came from, the compiler and its flags, and what went in. Installing the SDK puts `engine-build` and
-`engine-new` on your PATH, so a game is built without reaching into the engine's directory at all.
+came from, the compiler and its flags, and what went in. Installing the SDK puts `trench`,
+`engine-build` and `engine-new` on your PATH, and the SDK's `trench` finds the engine's prelude,
+shaders and font in its own `share/engine/`, so a game is made and run without reaching into the
+engine's directory at all:
 
     engine-new ~/games/mine --language scheme
-    engine-build ~/games/mine        # add --sdk <dir> when nothing is installed
-    ~/games/mine/build/mine
+    trench run ~/games/mine
 
-Everything in `Games/` and `Tools/` is a project of exactly that shape, built the way anyone else's
+    engine-new ~/games/tool --language c
+    engine-build ~/games/tool        # add --sdk <dir> when nothing is installed
+    ~/games/tool/build/tool
+
+Everything in `Games/` and `Tools/` is a project of one of those shapes, built the way anyone else's
 would be.
 
 ## Scripting
 
-Scheme, through s7. The script-facing API is described once as data in
-`gameplay/script/script_api.def`, and the Scheme frontend is a loop over that table rather than a
-set of hand-written bindings. `gameplay/script/README.md` explains the arrangement; `../Games/skyrift`
-and `../Games/isometric` are scripted games.
+Scheme, through s7, on the store: `define-kind` declares a kind's fields, children and handlers,
+and the rules that keep a game replayable and networkable are errors with sentences that say what
+to do instead. `gameplay/script/README.md` explains the frontend, and `docs/developer/store.md` §5
+specifies it.
 
 ## UI
 
