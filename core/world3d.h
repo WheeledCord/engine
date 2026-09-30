@@ -57,9 +57,9 @@ typedef struct World3D
     int position, rotation, scale, prevPosition, prevRotation; /* node */
     int charRadius, charHeight, velocity, onFloor;             /* character */
     int size;                                                  /* solid */
-    int areaRadius, inside;                                    /* area */
+    int areaRadius, areaShape, areaSize, inside;               /* area */
     int width, depth, cellSize, mapHeight, cells;              /* tilemap */
-    StoreSymbol touched, untouched;
+    StoreSymbol touched, untouched, box;
     World3DEntry *entries; /* per thing index */
     uint32_t entryCapacity;
     uint32_t frame;
@@ -189,19 +189,19 @@ bool World3DTeleport(World3D *world, StoreId node, Vector3 worldPosition);
 World3DHit World3DRaycast(World3D *world, Vector3 from, Vector3 direction, float maxDistance,
                           StoreId ignore);
 
-/** @brief World3DRaycast with several things to skip, and optionally area spheres as targets.
+/** @brief World3DRaycast with several things to skip, and optionally areas as targets.
  *
- * Areas are walked through, so World3DRaycast never hits one; with areas set, an area's sphere
- * (its radius about its world position) is hit like a box, which is what aimed-at needs to find a
- * thing that is only an area (a carried item, proposal C4). A sphere the ray starts inside is not
- * hit.
+ * Areas are walked through, so World3DRaycast never hits one; with areas set, an area's shape
+ * (a sphere of its radius, or with shape box an axis-aligned box of its size, about its world
+ * position) is hit like a solid, which is what aimed-at needs to find a thing that is only an
+ * area (a carried item, proposal C4). A shape the ray starts inside is not hit.
  * @param world World.
  * @param from Origin.
  * @param direction Direction; normalised here. Zero hits nothing.
  * @param maxDistance Longest distance to look.
  * @param ignore Things skipped with everything under them (STORE_NULL entries are no-ops).
  * @param count How many in ignore.
- * @param areas Whether area spheres are hit.
+ * @param areas Whether areas are hit.
  * @return The hit; hit is false for none, a zero direction or a stale ignore. */
 World3DHit World3DRaycastIgnoring(World3D *world, Vector3 from, Vector3 direction, float maxDistance,
                                   const StoreId *ignore, int count, bool areas);
@@ -214,7 +214,7 @@ World3DHit World3DRaycastIgnoring(World3D *world, Vector3 from, Vector3 directio
  * @return True when nothing static lies between them. */
 bool World3DLineOfSight(World3D *world, Vector3 from, Vector3 to);
 
-/** @brief Lists things of a kind whose shape meets an area's sphere, in id order.
+/** @brief Lists things of a kind whose shape meets an area's shape (sphere or box), in id order.
  *
  * Characters and solids are tested as boxes, other nodes as their world position.
  * @param world World.

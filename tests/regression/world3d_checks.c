@@ -284,6 +284,47 @@ static void AreaChecks(void)
            "a plain node inside the sphere overlaps by its position");
     Expect(World3DOverlapping(w, sc.hero, StoreKindNamed(s, "node"), ids, 4) == -1,
            "overlapping refuses a thing that is not an area");
+
+    // A box area (B6): shape box, size 3 x 2 x 0.5 about (6, 1, 3), so x 4.5..7.5, y 0..2, z
+    // 2.75..3.25. Its radius is 0.1, so each place used here is outside the sphere it would be.
+    StoreId box = StoreSpawn(s, trigger, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreValue shape;
+    memset(&shape, 0, sizeof shape);
+    shape.type = STORE_SYMBOL;
+    shape.as.sym = StoreIntern(s, "box");
+    SetVec(s, box, "position", 6, 1, 3);
+    StoreSet(s, box, StoreFieldIndex(s, trigger, "shape"), &shape);
+    SetVec(s, box, "size", 3, 2, 0.5f);
+    SetNumber(s, box, "radius", Float(0.1f));
+    StoreTick(s, 1.0f / 60);
+    areaLog[0] = 0;
+    World3DTeleport(w, sc.hero, (Vector3){7.2f, 0, 3});
+    StoreTick(s, 1.0f / 60);
+    snprintf(expect, sizeof expect, "touched:%u ", sc.hero.index);
+    Expect(!strcmp(areaLog, expect) && StoreCountOf(s, box, inside) == 1,
+           "a character entering a box area's corner sends touched");
+    Expect(World3DOverlapping(w, box, StoreKindNamed(s, "character"), ids, 4) == 1 && Same(ids[0], sc.hero),
+           "overlapping a box area lists the character in its corner");
+    StoreId inBox = Spawn(s, "node", STORE_NULL), outBox = Spawn(s, "node", STORE_NULL);
+    SetVec(s, inBox, "position", 4.8f, 1.9f, 3.1f);
+    SetVec(s, outBox, "position", 6, 1, 3.4f);
+    int n = World3DOverlapping(w, box, StoreKindNamed(s, "node"), ids, 4);
+    bool hasIn = false, hasOut = false;
+    for (int i = 0; i < n; i++)
+        hasIn = hasIn || Same(ids[i], inBox), hasOut = hasOut || Same(ids[i], outBox);
+    Expect(hasIn && !hasOut, "a node inside the box overlaps it, one just past its face does not");
+    areaLog[0] = 0;
+    World3DTeleport(w, sc.hero, (Vector3){7.2f, 0, 4.5f});
+    StoreTick(s, 1.0f / 60);
+    snprintf(expect, sizeof expect, "untouched:%u ", sc.hero.index);
+    Expect(!strcmp(areaLog, expect) && StoreCountOf(s, box, inside) == 0,
+           "a character leaving a box area sends untouched");
+    StoreId skip[1] = {sc.hero};
+    World3DHit hit = World3DRaycastIgnoring(w, (Vector3){7.3f, 1, 5.5f}, (Vector3){0, 0, -1}, 10, skip, 1, true);
+    Expect(hit.hit && Same(hit.thing, box) && Near(hit.distance, 2.25f) && NearVec(hit.normal, (Vector3){0, 0, 1}),
+           "a ray that tests areas hits a box area's face, 1.3 m off its centre");
+    hit = World3DRaycast(w, (Vector3){7.3f, 1, 5.5f}, (Vector3){0, 0, -1}, 10, sc.hero);
+    Expect(!hit.hit || !Same(hit.thing, box), "a plain ray walks through a box area");
     FreeScene(&sc);
 }
 

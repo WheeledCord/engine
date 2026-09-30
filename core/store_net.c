@@ -1729,7 +1729,7 @@ static void Apply(StoreNet *net, int from, const State *was, const State *now)
         else if (!b)
         {
             d->moved = true;
-            StoreRemove(s, id);
+            StoreRemoveReplica(s, id); // its guests' orphaned came from the machine that removed it
         }
         else
         {

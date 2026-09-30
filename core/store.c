@@ -1279,14 +1279,14 @@ bool StoreIsLocal(const Store *store, StoreId id)
     return t && (t->flags & STORE_THING_LOCAL);
 }
 
-static void MarkRemoved(Store *store, uint32_t index)
+static void MarkRemoved(Store *store, uint32_t index, unsigned flags)
 {
     StoreThing *t = &store->things[index];
-    t->flags |= STORE_THING_REMOVED;
+    t->flags |= STORE_THING_REMOVED | flags;
     store->pendingRemovals++;
     for (uint32_t c = t->firstChild; c != STORE_NO_INDEX; c = store->things[c].nextSibling)
         if (!(store->things[c].flags & (STORE_THING_GUEST | STORE_THING_REMOVED)))
-            MarkRemoved(store, c);
+            MarkRemoved(store, c, flags);
 }
 
 static void DetachIndex(Store *store, uint32_t index)
@@ -1348,11 +1348,13 @@ static void ApplyRemovals(Store *store)
                 if (store->hooks.orphan)
                     store->hooks.orphan(store->hooks.user, IdOf(store, c));
                 DetachIndex(store, c);
-                // Its orphaned runs on its new owner, the host (B1, B3.7): a timer due next
-                // tick, so it is saved, snapshotted and hashed like any other. A machine that
-                // is not the host leaves it to the host, which sees the drop in its state.
+                // Its orphaned runs on its new owner, the host (B1, B3.7), whichever machine
+                // removed the parent: a timer due next tick, so it is saved, snapshotted and
+                // hashed like any other, and delivered like any message, so on a machine that is
+                // not the host it goes out through the outgoing hook to the host (B3.4). A removal
+                // taken from another machine's state sends nothing: that machine sent it.
                 const StoreThing *g = &store->things[c];
-                if (orphaned != STORE_NO_SYMBOL && IsLocalOwner(store, g->owner) &&
+                if (orphaned != STORE_NO_SYMBOL && !(store->things[i].flags & STORE_THING_REPLICA) &&
                     StoreKindHandlesEvent(store, g->kind, orphaned))
                     StoreAfter(store, IdOf(store, c), 0.0f, orphaned, NULL, 0);
             }
@@ -1400,7 +1402,17 @@ bool StoreRemove(Store *store, StoreId id)
                          "not-owner: remove on %s #%u: it belongs to player %d, and this handler "
                          "runs for player %d",
                          KindNameOf(store, t), id.index, t->owner, store->currentOwner);
-    MarkRemoved(store, id.index);
+    MarkRemoved(store, id.index, 0);
+    if (!store->ticking && !store->framing)
+        ApplyRemovals(store);
+    return true;
+}
+
+bool StoreRemoveReplica(Store *store, StoreId id)
+{
+    if (!Thing(store, id))
+        return store ? StaleFail(store, id) : false;
+    MarkRemoved(store, id.index, STORE_THING_REPLICA);
     if (!store->ticking && !store->framing)
         ApplyRemovals(store);
     return true;

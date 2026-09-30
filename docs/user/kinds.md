@@ -110,12 +110,11 @@ handler, on the host, attaches it and answers; from then on the holder's machine
 handlers and its drop is instant. `(first-child hand)` is what a hand holds. A `socket` child
 (`(child hand (socket :bone "hand.R" :of (arms body)))`) is where a held thing hangs; phase 1 has
 no bone lookup, so it sits at its own `:at`. When a holder's player leaves, or the host removes a
-holder, the item is detached where the hand was, becomes the host's, and its `(on (orphaned))` runs
-there, so it can seat itself on the floor (a client removing its own holder drops the item where the
-hand was, but `orphaned` does not run yet). `(on (parent-changed was now))` runs on every machine
+holder, or a client removes its own, the item is detached where the hand was, becomes the host's,
+and its `(on (orphaned))` runs there, once, so it can seat itself on the floor. `(on (parent-changed was now))` runs on every machine
 (presentation; `was` is `#f` when the thing first appears) for pickup and drop sounds.
 `(aimed-at 'kind distance)` from a handler looks through the first camera under its thing and finds
-areas by their sphere, `raycast` takes `:ignore (list self item)`, and `(draw-ring x y r fill)` draws
+areas by their shape (a sphere of `:radius`, or `(is area :shape (box 0.4 0.3 0.4))` for a box), `raycast` takes `:ignore (list self item)`, and `(draw-ring x y r fill)` draws
 a hold ring. The whole case is `examples/carried-item/`; `tests/regression/net_carry/` runs it on
 three machines.
 

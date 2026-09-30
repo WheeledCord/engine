@@ -299,7 +299,9 @@ StoreId StoreSpawn(Store *store, StoreKind kind, int owner, StoreId parent, Stor
  *
  * They leave every query at once and messages queued for them are dropped. Inside StoreTick or
  * StoreFrame their storage is freed at the end of that call; otherwise at once. Guests are not
- * removed: at that point each gets the orphan hook and is detached to a root owned by the host.
+ * removed: at that point each gets the orphan hook and is detached to a root owned by the host,
+ * and one whose kind handles `orphaned` is sent it as a timer due next tick, which the outgoing
+ * hook carries to the host when this machine is not the host.
  * In a gameplay handler only the thing's owner may remove it (rule 5).
  * @param store Store.
  * @param id Thing.
