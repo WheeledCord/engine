@@ -26,7 +26,7 @@ struct World3DEntry
     bool computed, interpolated;
     Vector3 position, rotation, scale;
     StoreId parent;
-    Matrix world;
+    Matrix local, world; /* the frame's local (interpolated) and world matrices */
     uint32_t stamp, changed;
 };
 
@@ -384,7 +384,7 @@ bool World3DInit(World3D *w, Store *store)
         Field("mesh", STORE_STRING, 0, None()),    Field("animation", STORE_SYMBOL, 0, None()),
         Field("spin", STORE_FLOAT, 0, None()),     Field("tint", STORE_VEC3, 0, one),
         Field("for-owner", STORE_BOOL, 0, None()), Field("hidden-for-owner", STORE_BOOL, 0, None()),
-        Field("viewmodel", STORE_BOOL, 0, None())};
+        Field("viewmodel", STORE_BOOL, 0, None()), Field("animation-speed", STORE_FLOAT, 0, FloatValue(1))};
     StoreFieldDecl socket[] = {Field("bone", STORE_STRING, 0, None()),
                                Collection("of", STORE_LIST, STORE_SYMBOL, 4, 0, 0)};
     StoreFieldDecl camera[] = {Field("fov", STORE_FLOAT, 0, FloatValue(75)),
@@ -448,6 +448,8 @@ bool World3DInit(World3D *w, Store *store)
     w->areaSize = StoreFieldIndex(store, w->area, "size");
     w->box = StoreIntern(store, "box");
     w->inside = StoreFieldIndex(store, w->area, "%inside");
+    w->bone = StoreFieldIndex(store, w->socket, "bone");
+    w->of = StoreFieldIndex(store, w->socket, "of");
     w->width = StoreFieldIndex(store, w->tilemap, "width");
     w->depth = StoreFieldIndex(store, w->tilemap, "depth");
     w->cellSize = StoreFieldIndex(store, w->tilemap, "cell-size");
@@ -587,6 +589,103 @@ bool World3DWorldPosition(World3D *w, StoreId id, Vector3 *out)
     return true;
 }
 
+/* ---- drawing: sockets that follow bones (§3 Socket) ------------------------------------------- */
+
+void World3DSetBoneLookup(World3D *w, World3DBoneLookup lookup, void *user)
+{
+    w->boneLookup = lookup;
+    w->boneUser = user;
+}
+
+/* A node's local matrix as the last frame composed it, or from its fields before any frame has. */
+static Matrix LocalOf(World3D *w, StoreId id)
+{
+    World3DEntry *e = Find(w, id);
+    if (e && e->computed)
+        return e->local;
+    Vector3 p, r, s;
+    StoreId parent;
+    return TickLocal(w, id, &p, &r, &s, &parent) ? Local(p, Euler(r), s) : MatrixIdentity();
+}
+
+/* The model declared under `from` (itself or any declared child below it, never a guest) whose
+   child name is `name`: a socket's `:of` names children of the kind that declared it, which may
+   sit deeper than the socket (arms under an eye). */
+static StoreId ModelNamed(World3D *w, StoreId from, StoreSymbol name, int depth)
+{
+    if (depth > 16)
+        return STORE_NULL;
+    for (StoreId c = StoreFirstChild(w->store, from); !IsNull(c); c = StoreNextSibling(w->store, c))
+    {
+        if (StoreIsGuest(w->store, c))
+            continue;
+        if (StoreChildName(w->store, c) == name && Is(w, c, w->model))
+            return c;
+        StoreId below = ModelNamed(w, c, name, depth + 1);
+        if (!IsNull(below))
+            return below;
+    }
+    return STORE_NULL;
+}
+
+/* Which model a socket follows this frame and its bone's model-space matrix: the first model of
+   `of` the lookup says is drawn here, or with no `of` the socket's parent if that is a model. False
+   when it has no bone, follows nothing drawn here, or that model is not posed. */
+static bool SocketBone(World3D *w, StoreId socket, StoreId *model, Matrix *bone)
+{
+    StoreValue name;
+    if (!StoreGet(w->store, socket, w->bone, &name) || name.type != STORE_STRING || !name.as.str[0])
+        return false;
+    StoreId parent = StoreParent(w->store, socket);
+    int count = StoreCountOf(w->store, socket, w->of);
+    for (int i = 0; i < count; i++)
+    {
+        StoreValue of;
+        if (!StoreGetAt(w->store, socket, w->of, i, NULL, &of) || of.type != STORE_SYMBOL)
+            continue;
+        StoreId m = ModelNamed(w, parent, of.as.sym, 0);
+        World3DBone answer = IsNull(m) ? WORLD3D_BONE_NOT_DRAWN : w->boneLookup(w->boneUser, m, name.as.str, bone);
+        if (answer == WORLD3D_BONE_NOT_DRAWN)
+            continue;
+        *model = m;
+        return answer == WORLD3D_BONE_POSED;
+    }
+    if (count > 0 || !Is(w, parent, w->model))
+        return false;
+    *model = parent;
+    return w->boneLookup(w->boneUser, parent, name.as.str, bone) == WORLD3D_BONE_POSED;
+}
+
+/* Walks up from id to the nearest socket that follows a posed bone; below it, the frame's local
+   matrices; the socket itself is replaced by the bone times its model's own drawn matrix. */
+static Matrix DrawWorld(World3D *w, StoreId id, int depth)
+{
+    Matrix world;
+    World3DWorldMatrix(w, id, &world);
+    if (!w->boneLookup || depth > 16)
+        return world;
+    Matrix below = MatrixIdentity();
+    StoreId at = id;
+    for (int d = 0; !IsNull(at) && d < MAX_DEPTH; d++)
+    {
+        StoreId model;
+        Matrix bone;
+        if (Is(w, at, w->socket) && SocketBone(w, at, &model, &bone))
+            return MatrixMultiply(below, MatrixMultiply(bone, DrawWorld(w, model, depth + 1)));
+        below = MatrixMultiply(below, LocalOf(w, at));
+        at = TransformParent(w, at);
+    }
+    return world;
+}
+
+bool World3DDrawMatrix(World3D *w, StoreId id, Matrix *out)
+{
+    if (!Is(w, id, w->node))
+        return false;
+    *out = DrawWorld(w, id, 0);
+    return true;
+}
+
 static void Compose(World3D *w, StoreId id, float alpha, int depth)
 {
     World3DEntry *e = Entry(w, id);
@@ -630,7 +729,8 @@ static void Compose(World3D *w, StoreId id, float alpha, int depth)
     Vector3 p = moving ? Vector3Lerp(prevPosition, position, alpha) : position;
     Quaternion q =
         moving ? QuaternionSlerp(Euler(prevRotation), Euler(rotation), alpha) : Euler(rotation);
-    e->world = MatrixMultiply(Local(p, q, scale), parentWorld);
+    e->local = Local(p, q, scale);
+    e->world = MatrixMultiply(e->local, parentWorld);
     e->position = position;
     e->rotation = rotation;
     e->scale = scale;

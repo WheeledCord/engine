@@ -7,6 +7,7 @@
 // main() opens.
 #include "checks.h"
 #include "core/draw_path.h"
+#include "core/shader.h"
 #include "raymath.h"
 #include "rlgl.h"
 #include <stdio.h>
@@ -39,7 +40,7 @@ static void SortedNames(const KeyCase *cases, const int *add, int count, char *o
     for (int i = 0; i < count; i++)
     {
         const KeyCase *c = &cases[add[i]];
-        DrawItem item = {c->mesh, c->material, MatrixIdentity(), {0, 0, 0}, 1.0f, c->layer};
+        DrawItem item = {c->mesh, c->material, MatrixIdentity(), {0, 0, 0}, 1.0f, c->layer, NULL, 0};
         keys[i] = DrawPathKey(&item, c->shader, c->depth);
         order[i] = (uint32_t)add[i];
     }
@@ -76,7 +77,7 @@ static void KeyOrderChecks(void)
     SortedNames(cases, shuffled, count, names);
     Check(!strcmp(names, expected), "draw keys: the order does not depend on add order (shuffled)");
 
-    DrawItem far = {1, 1, MatrixIdentity(), {0, 0, 0}, 1.0f, 0};
+    DrawItem far = {1, 1, MatrixIdentity(), {0, 0, 0}, 1.0f, 0, NULL, 0};
     Check(DrawPathKey(&far, 0, 7.0f) == DrawPathKey(&far, 0, 1.0f) &&
               DrawPathKey(&far, 0, -3.0f) == DrawPathKey(&far, 0, 0.0f),
           "draw keys: depth outside [0, 1] is clamped");
@@ -138,7 +139,7 @@ static void SortChecks(void)
 static DrawItem ItemAt(const DrawPath *path, uint32_t mesh, uint32_t material, Vector3 at, uint8_t layer)
 {
     DrawItem item = {mesh, material, MatrixTranslate(at.x, at.y, at.z), at,
-                     path->meshes[mesh - 1].radius, layer};
+                     path->meshes[mesh - 1].radius, layer, NULL, 0};
     return item;
 }
 
@@ -292,11 +293,83 @@ static void GlChecks(void)
     UnloadRenderTexture(target);
 }
 
+static bool Red(Color c) { return c.r > 200 && c.g < 50 && c.b < 50; }
+
+/* Skinning (docs/developer/store.md §4): a mesh with bone ids and weights keeps them, a material on
+   the engine's skinning shader finds its bone-matrix array, and an item's bones move what it draws;
+   a static material, or a skinned one given no bones, uploads none. */
+static void SkinChecks(void)
+{
+    DrawPath path;
+    DrawPathInit(&path);
+    RenderTexture2D target = LoadRenderTexture(64, 64);
+    const ShaderFile files = {"core/shaders/skinning.vs", "core/shaders/textured.fs"};
+    Shader skin = {0}, plain = {rlGetShaderIdDefault(), rlGetShaderLocsDefault()};
+    Check(CoreLoadShaders(&files, 1, &skin), "draw path skinning: the engine's skinning shader builds");
+    Texture2D white = {rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+
+    Mesh cube = GenMeshCube(1, 1, 1);
+    unsigned char *ids = calloc((size_t)cube.vertexCount * 4, 1); /* every vertex on bone 0 */
+    float *weights = calloc((size_t)cube.vertexCount * 4, sizeof(float));
+    for (int v = 0; weights && v < cube.vertexCount; v++)
+        weights[v * 4] = 1.0f;
+    Mesh skinned = cube;
+    skinned.boneIds = ids;
+    skinned.boneWeights = weights;
+    uint32_t still = DrawPathMesh(&path, &cube), rigged = DrawPathMesh(&path, &skinned);
+    const DrawPathMeshData *r = rigged ? &path.meshes[rigged - 1] : NULL;
+    Check(still && r && r->boneIds && r->boneWeights && r->vbo[5] && r->vbo[6] && !path.meshes[still - 1].boneIds &&
+              !path.meshes[still - 1].vbo[5],
+          "draw path skinning: a mesh with bone ids and weights keeps and uploads them, a static one has none");
+    uint32_t skinRed = skin.id ? DrawPathMaterial(&path, skin, white, (Color){255, 0, 0, 255}, -1) : 0;
+    uint32_t plainRed = DrawPathMaterial(&path, plain, white, (Color){255, 0, 0, 255}, -1);
+    Check(skinRed && plainRed && path.materials[skinRed - 1].bonesLoc >= 0 && path.materials[plainRed - 1].bonesLoc < 0,
+          "draw path skinning: a material on a skinning shader has a bone-matrix location, a static one none");
+
+    Matrix bones[2] = {MatrixIdentity(), MatrixIdentity()};
+    DrawItem item = {rigged, skinRed, MatrixTranslate(0, 0, -3), {0, 0, -3}, 2.0f, DRAW_LAYER_OPAQUE, bones, 2};
+    DrawStats stats = Frame(&path, target, &item, 1);
+    Image image = LoadImageFromTexture(target.texture);
+    bool centred = Red(GetImageColor(image, 32, 32)) && !Red(GetImageColor(image, 54, 32));
+    UnloadImage(image);
+    Check(stats.draws == 1 && stats.boneUploads == 1 && centred,
+          "draw path skinning: at rest (identity bones) the skinned cube draws where its item is");
+    bones[0] = MatrixTranslate(1.2f, 0, 0); /* 1.2 m right at 3 m: about 54 px of 64 across */
+    stats = Frame(&path, target, &item, 1);
+    image = LoadImageFromTexture(target.texture);
+    bool moved = !Red(GetImageColor(image, 32, 32)) && Red(GetImageColor(image, 54, 32));
+    UnloadImage(image);
+    Check(stats.boneUploads == 1 && moved, "draw path skinning: the item's bone matrix moves what it draws");
+
+    /* Expected failures: bones on a static material, and a skinned material with no bones, upload none. */
+    DrawItem items[2] = {item, item};
+    items[0].mesh = still;
+    items[0].material = plainRed;
+    items[1].bones = NULL;
+    items[1].boneCount = 0;
+    stats = Frame(&path, target, items, 1);
+    image = LoadImageFromTexture(target.texture);
+    bool ignored = Red(GetImageColor(image, 32, 32)) && !Red(GetImageColor(image, 54, 32));
+    UnloadImage(image);
+    Check(stats.draws == 1 && stats.boneUploads == 0 && ignored,
+          "draw path skinning: a static material ignores an item's bones and uploads none");
+    stats = Frame(&path, target, &items[1], 1);
+    Check(stats.draws == 1 && stats.boneUploads == 0, "draw path skinning: a skinned item with no bones uploads none");
+
+    DrawPathFree(&path);
+    free(ids);
+    free(weights);
+    UnloadMesh(cube);
+    CoreUnloadShaders(&skin, 1);
+    UnloadRenderTexture(target);
+}
+
 int DrawPathChecks(void)
 {
     failures = 0;
     KeyOrderChecks();
     SortChecks();
     GlChecks();
+    SkinChecks();
     return failures;
 }

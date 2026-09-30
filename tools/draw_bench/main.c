@@ -11,6 +11,7 @@
 #define _POSIX_C_SOURCE 199309L
 
 #include "core/draw_path.h"
+#include "core/shader.h"
 #include "raymath.h"
 #include "rlgl.h"
 #define EGL_NO_X11
@@ -132,7 +133,7 @@ static void Place(const uint32_t *meshes, const uint32_t *materials, int visible
             at.z = 30.0f;
         uint32_t mesh = meshes[i % MESHES];
         items[i] = (DrawItem){mesh, materials[i % MATERIALS], MatrixTranslate(at.x, at.y, at.z), at,
-                              path.meshes[mesh - 1].radius, DRAW_LAYER_OPAQUE};
+                              path.meshes[mesh - 1].radius, DRAW_LAYER_OPAQUE, NULL, 0};
     }
 }
 
@@ -169,6 +170,64 @@ static void Run(const char *name, int visible, const uint32_t *meshes, const uin
            Percentile(sort, FRAMES, 0.99), sp50, Percentile(submit, FRAMES, 0.99),
            stats.draws ? sp50 * 1000.0 / stats.draws : 0.0);
     fflush(stdout);
+}
+
+// ---- skinned models (proposal B9.3's measurement) ----------------------------------------------
+/* 16 test rigs (3 bones) in view, each waving at its own phase, drawn through the draw path on the
+   runner's GPU path: core/shaders/skinning.vs built for 24 bones over world.fs. Each frame poses
+   every rig (UpdateModelAnimationBones, into its own bone array), then adds, sorts and submits. Run
+   with the bones uploaded and again with none (the same shader and draws), so the difference is
+   the upload's share; and static, on world.vs, for the draw without skinning. */
+enum { RIGS = 16, GPU_BONES_MAX = 24 };
+static Matrix rigBones[RIGS][GPU_BONES_MAX];
+static double lastFrame, lastSubmit; /* p50s of the last RunSkinned */
+
+static void RunSkinned(const char *name, const Model *rig, const ModelAnimation *wave, uint32_t mesh,
+                       uint32_t material, bool bones)
+{
+    static double cpu[FRAMES], pose[FRAMES], submit[FRAMES];
+    DrawStats stats = {0};
+    DrawItem rigs[RIGS];
+    const DrawPathMeshData *data = &path.meshes[mesh - 1];
+    for (int i = 0; i < RIGS; i++)
+    {
+        Vector3 at = {(float)(i % 4) * 3.0f - 4.5f, (float)(i / 4) * 3.0f - 6.0f, -20.0f};
+        Matrix world = MatrixTranslate(at.x, at.y, at.z);
+        rigs[i] = (DrawItem){mesh, material, world, Vector3Transform(data->center, world), 2 * data->radius,
+                             DRAW_LAYER_OPAQUE, bones ? rigBones[i] : NULL, bones ? rig->boneCount : 0};
+    }
+    for (int f = -WARMUP; f < FRAMES; f++)
+    {
+        double c0 = Now(CLOCK_PROCESS_CPUTIME_ID);
+        for (int i = 0; wave && i < RIGS; i++) /* each rig at its own frame, as each thing has its clock */
+        {
+            UpdateModelAnimationBones(*rig, *wave, ((f + WARMUP) * 2 + i * 7) % wave->frameCount);
+            memcpy(rigBones[i], rig->meshes[0].boneMatrices, sizeof(Matrix) * (size_t)rig->boneCount);
+        }
+        double c1 = Now(CLOCK_PROCESS_CPUTIME_ID);
+        DrawPathBegin(&path, camera, WIDTH, HEIGHT);
+        for (int i = 0; i < RIGS; i++)
+            DrawPathAdd(&path, &rigs[i]);
+        stats = DrawPathEnd(&path);
+        glFinishPtr();
+        double c2 = Now(CLOCK_PROCESS_CPUTIME_ID);
+        if (f < 0)
+            continue;
+        cpu[f] = c2 - c0;
+        pose[f] = c1 - c0;
+        submit[f] = stats.submitMicros;
+    }
+    double cp50 = Percentile(cpu, FRAMES, 0.5), cp99 = Percentile(cpu, FRAMES, 0.99);
+    double pp50 = Percentile(pose, FRAMES, 0.5), sp50 = Percentile(submit, FRAMES, 0.5);
+    printf("RESULT %s: items=%d visible=%d draws=%d bone uploads=%d\n", name, stats.items, stats.visible, stats.draws,
+           stats.boneUploads);
+    printf("  frame cpu_us p50=%.1f p99=%.1f (%.2f per draw) | pose p50=%.1f (%.2f per rig) | "
+           "submit p50=%.1f (%.2f per draw)\n",
+           cp50, cp99, stats.draws ? cp50 / stats.draws : 0.0, pp50, pp50 / RIGS, sp50,
+           stats.draws ? sp50 / stats.draws : 0.0);
+    fflush(stdout);
+    lastFrame = cp50;
+    lastSubmit = sp50;
 }
 
 int main(void)
@@ -239,6 +298,47 @@ int main(void)
 
     Run("400 items, 120 in view", 120, meshes, materials);
     Run("400 items, all in view", ITEMS, meshes, materials);
+
+    /* Skinned: the test rig, run from the repository root (it and the shaders are found from there). */
+    const char *rigPath = "tests/regression/assets/rig/test_rig.gltf";
+    Model rig = LoadModel(rigPath);
+    int clipCount = 0;
+    ModelAnimation *clips = LoadModelAnimations(rigPath, &clipCount);
+    const ModelAnimation *wave = NULL;
+    for (int i = 0; i < clipCount; i++)
+        if (!strcmp(clips[i].name, "wave"))
+            wave = &clips[i];
+    const ShaderFile skinFiles = {"core/shaders/skinning.vs", "core/shaders/world.fs"};
+    const ShaderFile staticFiles = {"core/shaders/world.vs", "core/shaders/world.fs"};
+    Shader skin = {0}, still = {0};
+    char bones[64];
+    snprintf(bones, sizeof bones, "#define SKINNING_BONES %d", GPU_BONES_MAX);
+    if (rig.meshCount != 1 || rig.boneCount < 1 || rig.boneCount > GPU_BONES_MAX || !wave ||
+        !CoreLoadShaderDefined(&skinFiles, bones, &skin) || !CoreLoadShaders(&staticFiles, 1, &still))
+    {
+        printf("skinned case: the test rig, its wave or the world shaders did not load (run from the repository root)\n");
+        return 1;
+    }
+    Texture2D white = {rlGetTextureIdDefault(), 1, 1, 1, RL_PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    uint32_t rigMesh = DrawPathMesh(&path, &rig.meshes[0]);
+    uint32_t skinned = DrawPathMaterial(&path, skin, white, WHITE, GetShaderLocation(skin, "matNormal"));
+    uint32_t plain = DrawPathMaterial(&path, still, white, WHITE, GetShaderLocation(still, "matNormal"));
+    printf("skinned case: %d rigs of %d bones, %d vertices, %d triangles each\n", RIGS, rig.boneCount,
+           rig.meshes[0].vertexCount, rig.meshes[0].triangleCount);
+    RunSkinned("16 skinned rigs, GPU path, bones uploaded", &rig, wave, rigMesh, skinned, true);
+    double withFrame = lastFrame, withSubmit = lastSubmit;
+    RunSkinned("16 skinned rigs, GPU path, no bone upload", &rig, wave, rigMesh, skinned, false);
+    double withoutFrame = lastFrame, withoutSubmit = lastSubmit;
+    RunSkinned("16 rigs unskinned (world.vs), for comparison", &rig, NULL, rigMesh, plain, false);
+    printf("RESULT bone upload: %.2f us per skinned draw (%d matrices), %.0f%% of the skinned submit, %.0f%% of the "
+           "skinned frame\n",
+           (withSubmit - withoutSubmit) / RIGS, rig.boneCount,
+           withSubmit > 0 ? 100.0 * (withSubmit - withoutSubmit) / withSubmit : 0.0,
+           withFrame > 0 ? 100.0 * (withFrame - withoutFrame) / withFrame : 0.0);
+    CoreUnloadShaders(&skin, 1);
+    CoreUnloadShaders(&still, 1);
+    UnloadModelAnimations(clips, clipCount);
+    UnloadModel(rig);
     DrawPathFree(&path);
     return 0;
 }
