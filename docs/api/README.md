@@ -20,6 +20,5 @@ Current reference-covered services:
 - [CoreTexture](core/CoreTexture.xml)
 - [CoreNetwork](core/CoreNetwork.xml)
 - [CoreNetClock](core/CoreNetClock.xml)
-- [EngineObjects](core/EngineObjects.xml)
 
 New public services must gain a manifest entry and documented public-header declarations when they become supported public API.

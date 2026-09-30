@@ -4,7 +4,6 @@
 #ifndef CORE_WAYPOINTS_H
 #define CORE_WAYPOINTS_H
 
-#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 
@@ -69,8 +68,5 @@ int CoreWaypointsNextHop(const CoreWaypoints *waypoints, int from, int to);
  * @return Points written, or 0 when unreachable or capacity is too small for the route. */
 int CoreWaypointsPath(const CoreWaypoints *waypoints, int from, int to, int *out, int capacity);
 
-/* As an engine type, "waypoints": count (read-only); add!(vector3) -> int, link!(int,int) -> bool,
-   nearest(vector3) -> int, next-hop(int,int) -> int, position(int) -> vector3. */
-extern const EngineType CoreWaypointsType;
 
 #endif

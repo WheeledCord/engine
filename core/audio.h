@@ -3,7 +3,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 #ifndef CORE_AUDIO_H
 #define CORE_AUDIO_H
-#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 #include <stddef.h>
@@ -118,12 +117,5 @@ bool CoreAudioVoiceStop(CoreAudio *audio, CoreAudioVoice voice);
 bool CoreAudioVoicePlaying(const CoreAudio *audio, CoreAudioVoice voice);
 /** Stops and releases a voice; its handle is refused afterwards. */
 bool CoreAudioVoiceFree(CoreAudio *audio, CoreAudioVoice voice);
-/* The audio service as an engine type, "audio": add-bus!, set-bus-volume!, set-bus-muted!,
-   play-sound!, play-sound-at!, stop-sound!, play-music!, stop-music! and set-listener!. Stepping it
-   keeps music streams fed and held voices placed. */
-extern const EngineType CoreAudioType;
-/* A held voice as an engine type, "voice", made with (make 'voice audio path group): play!, play-at!,
-   move!, set-gain!, set-loop! and stop!; playing? and heard-gain. */
-extern const EngineType CoreAudioVoiceType;
 
 #endif

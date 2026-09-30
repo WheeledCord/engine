@@ -32,7 +32,7 @@ complex declarations such as function-pointer parameters rather than weakening t
 
 Add one entry to [`docs/api/manifest.json`](../api/manifest.json). It names the C-facing service,
 the public header, generated XML location, and symbols that make up this reference page. Keep
-services coherent: `EngineApplication` and `EngineObjects` are examples.
+services coherent: `EngineApplication` and `CoreNetClock` are examples.
 
 Then run:
 

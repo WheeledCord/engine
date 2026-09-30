@@ -5,7 +5,6 @@
 #ifndef CORE_TEXTURE_H
 #define CORE_TEXTURE_H
 
-#include "object.h"
 #include "raylib.h"
 #include <stdbool.h>
 
@@ -36,8 +35,5 @@ bool CoreLoadTexture(Texture2D *out, const char *path, CoreTextureOptions option
  * @return Nothing. Non-owning copies must not be passed to this function. */
 void CoreUnloadTexture(Texture2D *texture);
 
-/* A loaded texture as an engine type, "texture", created from a path and optionally #t for
-   smooth filtering with mipmaps: width and height. */
-extern const EngineType CoreTextureType;
 
 #endif

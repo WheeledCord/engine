@@ -14,8 +14,8 @@
    fixed-size blocks, so a snapshot is a memory copy, a change is found by comparison and a save is
    one walk over the table. docs/developer/store.md is the contract; this header states each call.
 
-   Things are named by generational handles as EngineObjects are: a handle kept past its thing's
-   removal is refused, and never reaches a newer thing in the same slot. The store opens no window,
+   Things are named by generational handles: a handle kept past its thing's removal is refused,
+   and never reaches a newer thing in the same slot. The store opens no window,
    touches no GL and runs headless. It keeps no process-wide state: everything is in the caller's
    Store. */
 

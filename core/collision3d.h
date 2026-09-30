@@ -11,8 +11,7 @@
    modelled on Godot's PhysicsDirectSpaceState3D::intersect_ray (from, to, collision_mask ->
    position, normal, collider; servers/physics_3d/direct_states/physics_direct_space_state_3d.cpp).
    It stores each Model pointer rather than a copy, so a query always sees that model's current
-   transform and meshes -- nothing here needs telling when a model moves. Not a Scheme engine type
-   yet: scripts cannot add models to it. */
+   transform and meshes -- nothing here needs telling when a model moves. */
 #define CORE_COLLISION3D_MAX 64
 
 typedef struct CoreCollision3DEntry

@@ -4,7 +4,6 @@
 #ifndef CORE_NET_CLOCK_H
 #define CORE_NET_CLOCK_H
 
-#include "object.h"
 #include <stdbool.h>
 #include <stdint.h>
 
@@ -113,10 +112,5 @@ void CoreNetInterpolatorAdvance(CoreNetInterpolator *interp, double dt);
  * @return A fractional server tick, for CoreNetObjectSampleAt. Zero before the first snapshot. */
 double CoreNetInterpolatorRenderTick(const CoreNetInterpolator *interp);
 
-/* The two clocks as engine types. "net-clock" is created with a tick rate and a send rate:
-   advance!, ticked!, should-send? and tick. "net-interpolator" likewise: snapshot!, advance! and
-   render-tick. */
-extern const EngineType CoreNetClockType;
-extern const EngineType CoreNetInterpolatorType;
 
 #endif

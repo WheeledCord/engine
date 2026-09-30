@@ -41,8 +41,6 @@ linked guide explains authoring where one exists.
 | Runtime | Recording and replaying a session's input, commands and packets | `core/replay.h` |
 | Scripting | Scheme on the store: `define-kind`, handlers, the rules as errors, the calls a game makes | `gameplay/script/game_s7.h`; [running a Scheme game](../user/kinds.md) |
 | Runner | `trench run <dir>`: a Scheme project windowed or headless, with co-op, recording, replay, a bot and hashes | `gameplay/game.h`; [running a Scheme game](../user/kinds.md) |
-| Objects | Types described once as properties, methods and signals; a pool of generational handles; signal connections | `core/object.h` |
-| Objects | A timer that emits timeout | `core/timer.h` |
 
 ## Not provided yet
 
