@@ -697,6 +697,12 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
   µs per tick p50/p99, snapshot, hash. Condition 3.
 - `tools/draw_bench`: E6's method (EGL surfaceless, geometry clipped, `glFinish` per frame): 400
   items / 120 draws through the draw path, 600 frames, prints CPU µs per frame p50/p99. Condition 6.
+- `tools/net_bench` (`make -f Makefile.core build/core/net_bench`, not built by `all`): three stores
+  in one process over an in-memory transport (150 ms each way, no loss), a host with 30 things of a
+  10-field kind all changing every tick and two clients each moving a soldier, 3,600 ticks: prints
+  the host's µs per tick p50/p99/mean for receiving, `StoreNetBeforeTick`, `StoreNetAfterTick` and
+  their total, the bytes the host sent and the state hashes (so a cost change can be shown to leave
+  the wire alone).
 - `tools/bench_x61.sh LABEL`: builds and runs both benches pinned to the last core and writes
   `bench_LABEL.txt`, for the user's ThinkPad X61.
 
@@ -730,7 +736,9 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
   tick that peer last acknowledged (none: a full state). Per thing: absent in the baseline -> a
   *spawn* entry (header and every field); present in both -> an *update* entry listing only fields
   whose bytes differ (a field index count, then index and value per field) and the header when parent
-  or owner changed; present only in the baseline -> a *remove* entry. Which things go to peer `p`:
+  or owner changed; present only in the baseline -> a *remove* entry; still here but no longer sent
+  to `p` (it went to `p`'s ownership, or the sender let go of it) -> a *left* entry, until `p` has
+  acknowledged it. Which things go to peer `p`:
   - a client sends the things it owns;
   - the host sends every thing not owned by `p`, including other clients' things as it last had them
     (the host relays; the session is a star, as `core/net_session.c` is);
@@ -741,7 +749,12 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
 - **Receiving** follows Quake 3 [N16]: the receiver keeps a ring of 32 reconstructed states per
   sender keyed by the sender's tick. A delta is applied to a copy of the named baseline to make the
   new state; a delta whose baseline is gone is dropped (the ack will fall back to a full state).
-  States older than the newest applied are stored but not applied.
+  States older than the newest applied are stored but not applied. A *left* entry keeps the thing in
+  the rebuilt state marked as no longer the sender's word: nothing reads it (applying, taking what
+  becomes ours, interpolating, the host's relay), and a thing that comes back is sent whole. So a
+  sender's rebuilt states never hold, as its word, a thing it no longer sends: a client that dropped
+  a thing and later is given it again is not read as handing it straight back. A *left* entry is not
+  a removal: the thing stays; a later *remove* entry for it still removes it.
 - **Applying a state** (B2.2 step 1, at the start of the next `StoreTick`): for each thing in it, in
   network id order, the receiver accepts it only if the thing is new, or its current owner in the
   receiver's store is **not** a local owner (a client), or **is** the sending peer (the host).
@@ -763,7 +776,10 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
 - **Releasing ownership.** A machine that stops owning a thing by its own write (a detach, or an
   attach under another owner's thing) at its tick D ignores the header of that thing in states
   whose sender has not yet acknowledged a capture of this machine at or after D, so a grab and a
-  drop inside one round trip cannot re-attach it.
+  drop inside one round trip cannot re-attach it. Giving a thing away (the host attaching it under a
+  client's soldier) is such a write, so the same rule keeps the receiver of a grant from reading the
+  new owner's states made before it knew of the grant; the host's relay of a client's things obeys
+  it too.
 - **Large states.** A state packet over 1,200 bytes goes reliable on channel 0 (B3.2).
 
 ### 9.3 Messages, commands, effects (B2.4, B3.4)
@@ -918,7 +934,9 @@ How it is built:
   sending tick; a shell kind (`alive` BOOL, `age` FLOAT registered) whose owner clears `alive` in the
   tick `age` reaches 1 is never seen spent without `age >= 1` on a receiver; a thing the host
   attaches under a client's soldier is the client's in the tick the granting state arrives, and
-  dropped within a tick it ends the host's with no parent everywhere; a join to 300 things with 50%
+  dropped within a tick it ends the host's with no parent everywhere; a thing granted to a client,
+  dropped, and granted again three times ends each grant the client's under its soldier and each
+  drop the host's with no parent; a join to 300 things with 50%
   of each 1,200-byte fragment on channel 1 lost converges within 120 ticks; a dedicated host is
   player 0 and its two clients converge with players {2, 3} everywhere. `store_checks.c` checks
   `StoreFieldOffset` against `StoreSharedBlock` and `StoreOwnedHere` against local owners and attach.

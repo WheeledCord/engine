@@ -94,6 +94,7 @@ $(eval $(call core_project,describe_types,tools/describe_types))
 $(eval $(call core_project,draw_bench,tools/draw_bench))
 $(BUILD)/draw_bench: LDLIBS += -lEGL
 $(eval $(call core_project,store_bench,tools/store_bench))
+$(eval $(call core_project,net_bench,tools/net_bench))
 # The project runner (gameplay/game.c). The runner in libgameplay calls into libscript, which the
 # default link order has already passed, so the libraries are listed once more after it.
 $(eval $(call core_project,trench,tools/trench))
