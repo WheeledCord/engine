@@ -44,11 +44,17 @@ typedef struct DrawItem
     Vector3 center; /* world-space bounding sphere */
     float radius;
     uint8_t layer; /* 0 opaque, 1 alpha-tested, 2 translucent, 3 viewmodel */
+    /* A skinned item's bone matrices (bind space to model space, as raylib's Mesh.boneMatrices),
+       read when DrawPathEnd submits the item: they must stay put until then. Uploaded only when the
+       material's shader has a bone-matrix uniform; NULL and 0 for everything static. */
+    const Matrix *bones;
+    int boneCount;
 } DrawItem;
 
 typedef struct DrawStats
 {
     int items, visible, draws, shaderSwitches, textureSwitches;
+    int boneUploads; /* draws whose bone matrices were uploaded (skinned material and bones given) */
     double cullMicros, sortMicros, submitMicros;
 } DrawStats;
 
@@ -56,7 +62,8 @@ typedef struct DrawStats
 typedef struct DrawPathMeshData
 {
     unsigned int vao;     /* 0 where vertex array objects are unsupported */
-    unsigned int vbo[5];  /* positions, texcoords, normals, colours (0 when absent), indices */
+    unsigned int vbo[7];  /* positions, texcoords, normals, colours (0 when absent), indices,
+                             bone ids and bone weights (0 when the mesh is not skinned) */
     int vertexCount;
     int triangleCount;
     float *positions;      /* vertexCount * 3 */
@@ -64,6 +71,8 @@ typedef struct DrawPathMeshData
     float *normals;        /* vertexCount * 3, or NULL */
     unsigned char *colors; /* vertexCount * 4, or NULL */
     unsigned short *indices; /* triangleCount * 3; generated 0..n-1 for an unindexed mesh */
+    unsigned char *boneIds; /* vertexCount * 4, or NULL: kept only when the source has weights too */
+    float *boneWeights;     /* vertexCount * 4, or NULL */
     Vector3 center;        /* bounding sphere of the positions, in mesh space */
     float radius;
 } DrawPathMeshData;
@@ -76,7 +85,8 @@ typedef struct DrawPathMaterialData
     unsigned int textureId; /* raylib's default white texture when the material has none */
     float tint[4];
     int mvpLoc, modelLoc, viewLoc, projectionLoc, normalLoc, colorLoc, samplerLoc;
-    int positionAttrib, texcoordAttrib, normalAttrib, colorAttrib;
+    int bonesLoc; /* the shader's bone-matrix array ("boneMatrices"), -1 for a static shader */
+    int positionAttrib, texcoordAttrib, normalAttrib, colorAttrib, boneIdsAttrib, boneWeightsAttrib;
 } DrawPathMaterialData;
 
 /* A draw path, embedded by its caller. Zero it with DrawPathInit; release it with DrawPathFree. */
@@ -113,7 +123,8 @@ void DrawPathFree(DrawPath *path);
 /** @brief Copies a mesh's CPU arrays and uploads the copy as vertex buffers, as UploadMesh does.
  *
  * Positions are required; texcoords, normals, colours and indices are optional (an unindexed mesh
- * gets indices 0..n-1). The source mesh is only read and may be unloaded afterwards. The path keeps
+ * gets indices 0..n-1). Bone ids and weights are copied and uploaded (at raylib's attribute
+ * locations for vertexBoneIds and vertexBoneWeights) when the mesh has both, for skinning. The source mesh is only read and may be unloaded afterwards. The path keeps
  * the vertex and triangle counts and a bounding sphere computed from the positions.
  * @param path Path that will own the upload.
  * @param mesh Mesh to copy; its GPU buffers are not used.
@@ -132,13 +143,27 @@ uint32_t DrawPathMesh(DrawPath *path, const Mesh *mesh);
  * @return id on success, or 0 when the id is unknown or the new contents are refused. */
 uint32_t DrawPathMeshUpdate(DrawPath *path, uint32_t id, const Mesh *mesh);
 
+/** @brief Rewrites an uploaded mesh's positions, and its normals when it has them, in place: CPU
+ * skinning's per-frame upload, with no reallocation.
+ *
+ * The vertex count, indices, texcoords and bounding sphere are unchanged (a posed mesh may reach
+ * past its rest bounds; the caller allows for that in the item's radius).
+ * @param path Path that owns the mesh.
+ * @param id Id from DrawPathMesh.
+ * @param positions The mesh's vertex count * 3 floats.
+ * @param normals As many normals, or NULL to keep the uploaded ones.
+ * @return True when uploaded; false for an unknown id or no positions. */
+bool DrawPathMeshPositions(DrawPath *path, uint32_t id, const float *positions, const float *normals);
+
 /** @brief Records a material: a shader, a texture, a tint and where the shader takes its matrices.
  *
  * The shader and texture are borrowed and must outlive the path. The MVP, model, view, projection,
- * colDiffuse and texture0 locations are taken from shader.locs when set there and otherwise looked
- * up once by raylib's names ("mvp", "matModel", "matView", "matProjection", "colDiffuse",
- * "texture0"); vertex attributes likewise ("vertexPosition", "vertexTexCoord", "vertexNormal",
- * "vertexColor"). A texture id of 0 draws with raylib's default white texture.
+ * colDiffuse, texture0 and bone-matrix locations are taken from shader.locs when set there and
+ * otherwise looked up once by raylib's names ("mvp", "matModel", "matView", "matProjection",
+ * "colDiffuse", "texture0", "boneMatrices"); vertex attributes likewise ("vertexPosition",
+ * "vertexTexCoord", "vertexNormal", "vertexColor", "vertexBoneIds", "vertexBoneWeights"). A shader
+ * with a bone-matrix uniform makes a skinned material: its items upload their DrawItem.bones before
+ * they draw. A texture id of 0 draws with raylib's default white texture.
  * @param path Path that will hold the material.
  * @param shader Shader to draw with; id 0 is refused.
  * @param texture Diffuse texture, bound to slot 0.
@@ -188,6 +213,8 @@ void DrawPathAdd(DrawPath *path, const DrawItem *item);
 
 /** @brief Culls, keys, sorts and submits this frame's items.
  *
+ * An item of a skinned material that carries bones has them uploaded (rlSetUniformMatrices, at most
+ * the shader array's size) right before its draw; every other item uploads none.
  * Draws to whatever framebuffer is bound, after flushing rlgl's batch; call it inside BeginMode3D
  * (or with depth testing enabled). It leaves no shader, texture or vertex array bound. Layer 3
  * (viewmodel) is drawn last with depth testing disabled, then re-enabled -- phase 1's

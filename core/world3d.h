@@ -44,6 +44,17 @@ typedef struct World3DHit
     StoreId thing; /* the solid, character or tilemap hit */
 } World3DHit;
 
+/* What a bone lookup answers for one model (World3DSetBoneLookup). */
+typedef enum World3DBone
+{
+    WORLD3D_BONE_NOT_DRAWN, /* the model is not drawn on this machine: a socket tries its next `of` */
+    WORLD3D_BONE_NONE,      /* drawn, but not posed (no animation) or no bone of that name */
+    WORLD3D_BONE_POSED      /* drawn and posed: *out holds the bone's model-space matrix */
+} World3DBone;
+
+/* The runner's answer, for drawing only, to where a model's named bone is this frame. */
+typedef World3DBone (*World3DBoneLookup)(void *user, StoreId model, const char *bone, Matrix *out);
+
 /* Private to world3d.c; declared here only so a World3D can be embedded by value. */
 typedef struct World3DEntry World3DEntry;
 typedef struct World3DTilemapCache World3DTilemapCache;
@@ -59,6 +70,7 @@ typedef struct World3D
     int size;                                                  /* solid */
     int areaRadius, areaShape, areaSize, inside;               /* area */
     int width, depth, cellSize, mapHeight, cells;              /* tilemap */
+    int bone, of;                                              /* socket */
     StoreSymbol touched, untouched, box;
     World3DEntry *entries; /* per thing index */
     uint32_t entryCapacity;
@@ -69,6 +81,8 @@ typedef struct World3D
     int pathCount, pathCapacity;
     uint64_t pathTick;
     StoreHooks chained; /* the caller's hooks, run after world3d's own */
+    World3DBoneLookup boneLookup; /* for drawing only; NULL until World3DSetBoneLookup */
+    void *boneUser;
 } World3D;
 
 /** @brief Declares the built-in 3D kinds in a store and registers the area system.
@@ -122,6 +136,36 @@ void World3DHooks(World3D *world, StoreHooks *hooks);
  * @param out Receives the matrix.
  * @return True when answered; false for a stale id or a thing that is not a node. */
 bool World3DWorldMatrix(World3D *world, StoreId id, Matrix *out);
+
+/** @brief Answers a thing's world matrix for drawing: World3DWorldMatrix, except under a socket
+ * that follows a bone.
+ *
+ * A socket (and so everything under it) follows the bone named by its `bone` field in the model it
+ * follows: the first model named in its `of` list (children of the kind that declared the socket)
+ * that the bone lookup says is drawn on this machine, or with no `of` its parent if that is a
+ * model. When that model is posed, the socket's matrix is the bone's model-space matrix times the
+ * model's own drawn matrix (itself found this way, so a socket in a carried thing follows too), and
+ * the things under it keep their local transforms relative to it. With no lookup, no bone, nothing
+ * drawn to follow or no pose, this is exactly World3DWorldMatrix.
+ *
+ * Only drawing sees bones (rule 1): World3DWorldMatrix and World3DWorldPosition, which gameplay
+ * reads, keep every socket at its own local transform, the rest pose.
+ * @param world World.
+ * @param id A node or derived thing.
+ * @param out Receives the matrix.
+ * @return True when answered; false for a stale id or a thing that is not a node. */
+bool World3DDrawMatrix(World3D *world, StoreId id, Matrix *out);
+
+/** @brief Installs the runner's bone lookup, which World3DDrawMatrix asks about sockets' models.
+ *
+ * The lookup answers, for a model thing and a bone name, whether the model is drawn on this machine
+ * and, when it is posed and has that bone, the bone's current model-space matrix (the pose, not the
+ * skinning matrix). It is asked only by World3DDrawMatrix, never by anything gameplay reads.
+ * @param world World.
+ * @param lookup The runner's function, or NULL to follow no bones.
+ * @param user Passed to lookup.
+ * @return No value. */
+void World3DSetBoneLookup(World3D *world, World3DBoneLookup lookup, void *user);
 
 /** @brief Answers where a thing is in the world now, from its current fields and its ancestors'.
  *

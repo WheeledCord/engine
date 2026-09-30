@@ -45,6 +45,16 @@
 #define MAX_HUD 4096
 #define MAX_PROFILE 256
 #define NAME 64
+#define MAX_CLIP_WARNINGS 64
+/* Skinned models (docs/developer/store.md §3 Animation, proposal B9.3): up to GPU_SKIN_BONES bones
+   are skinned on the GPU by core/shaders/skinning.vs built with that many (with mvp, matModel and
+   matNormal they fit GLSL 120's 512 vertex uniform components); more, on the CPU by raylib's
+   UpdateModelAnimation. */
+#define GPU_SKIN_BONES 24
+/* raylib bakes a glTF clip into frames 17 ms apart (rmodels.c, GLTF_ANIMDELAY); a model thing's
+   clock picks the frame. */
+#define CLIP_FRAME_SECONDS 0.017
+#define MAX_ANIMATION_STEP 0.1f /* a hitch longer than this advances a clock by only this much */
 
 typedef struct ChunkEntry
 {
@@ -59,7 +69,32 @@ typedef struct ModelEntry
     Model model;
     uint32_t *meshes; /* draw path ids, per model mesh */
     bool placeholder; /* the file is missing: a magenta cube stands in */
+    ModelAnimation *clips; /* the file's clips that fit its skeleton; NULL for none */
+    int clipCount;
+    bool cpu; /* skinned on the CPU: more than GPU_SKIN_BONES bones, or no skinning shader */
 } ModelEntry;
+
+/* A drawn model thing with clips, presentation only: its own clock and pose (§3 Animation). */
+typedef struct Pose
+{
+    StoreId thing;
+    const ModelEntry *model; /* what the pose was made for; another model starts afresh */
+    StoreSymbol animation;   /* as last seen, to restart the clock when it changes */
+    double clock;
+    int clip, frame; /* clip -1: the rest pose */
+    Matrix *bones;     /* GPU skinning: the thing's bone matrices, which its draw items point at */
+    uint32_t *meshes;  /* CPU skinning: the thing's own draw path meshes, per model mesh */
+    int meshCount;
+} Pose;
+
+/* The world pass's shader and its lighting uniforms: 0 is core/shaders/world.vs, 1 the skinning
+   vertex shader for GPU_SKIN_BONES bones, both over world.fs. */
+typedef struct WorldPass
+{
+    Shader shader;
+    bool loaded;
+    int normalLoc, lightDirLoc, lightColorLoc, ambientLoc, fogColorLoc, fogDensityLoc, viewPosLoc;
+} WorldPass;
 
 typedef struct TextureEntry
 {
@@ -78,6 +113,7 @@ typedef struct MaterialEntry
 {
     unsigned int texture;
     Color tint;
+    bool skinned;
     uint32_t id;
 } MaterialEntry;
 
@@ -113,7 +149,8 @@ typedef struct Samples
 typedef struct Runner
 {
     // Options.
-    char dir[512], gameFile[1024], title[128], prelude[1024], worldVs[1024], worldFs[1024], fontPath[1024];
+    char dir[512], gameFile[1024], title[128], prelude[1024], worldVs[1024], worldFs[1024], fontPath[1024],
+        skinVs[1024];
     const char *recordPath, *replayPath, *savePath, *loadPath, *shotDir;
     bool headless, bot, bench, present;
     uint64_t maxTicks, seed, hashEvery, shotEvery, lastShot;
@@ -133,10 +170,15 @@ typedef struct Runner
     uint64_t updates, frameCount;
     DrawStats lastStats;
     // Presentation (windowed only).
-    bool gl, audioReady, replGreeted, shaderLoaded, fontLoaded;
+    bool gl, audioReady, replGreeted, fontLoaded;
     DrawPath path;
-    Shader shader;
-    int normalLoc, lightDirLoc, lightColorLoc, ambientLoc, fogColorLoc, fogDensityLoc, viewPosLoc;
+    WorldPass passes[2];
+    Pose *poses; /* per thing index */
+    uint32_t poseCapacity;
+    char clipWarnings[MAX_CLIP_WARNINGS][NAME * 2]; /* "model clip" pairs already warned about */
+    int clipWarningCount;
+    bool skinCpuForced; /* --skin-on-cpu: every skinned model on the CPU path (a check's switch) */
+    const char *printDrawKind; /* --print-draw-position KIND */
     Texture2D white, grey;
     Font font;
     CoreAudio audio;
@@ -879,20 +921,68 @@ static Texture2D TextureNamed(const char *name)
     return texture;
 }
 
-static uint32_t MaterialFor(Texture2D texture, Color tint)
+static uint32_t MaterialFor(Texture2D texture, Color tint, bool skinned)
 {
     if (!texture.id)
         texture = run.grey;
     for (int i = 0; i < run.materialCount; i++)
     {
         MaterialEntry *m = &run.materials[i];
-        if (m->texture == texture.id && !memcmp(&m->tint, &tint, sizeof tint))
+        if (m->texture == texture.id && !memcmp(&m->tint, &tint, sizeof tint) && m->skinned == skinned)
             return m->id;
     }
-    uint32_t id = DrawPathMaterial(&run.path, run.shader, texture, tint, run.normalLoc);
+    const WorldPass *pass = &run.passes[skinned ? 1 : 0];
+    uint32_t id = DrawPathMaterial(&run.path, pass->shader, texture, tint, pass->normalLoc);
     if (id && run.materialCount < MAX_MATERIALS)
-        run.materials[run.materialCount++] = (MaterialEntry){texture.id, tint, id};
+        run.materials[run.materialCount++] = (MaterialEntry){texture.id, tint, skinned, id};
     return id;
+}
+
+/* Whether every mesh of a model carries what raylib's skinning reads (UpdateModelAnimation reads
+   every mesh's weights, and a mesh without them would crash it). */
+static bool FullySkinned(const Model *model)
+{
+    for (int m = 0; m < model->meshCount; m++)
+    {
+        const Mesh *mesh = &model->meshes[m];
+        if (!mesh->boneIds || !mesh->boneWeights || !mesh->boneMatrices || !mesh->animVertices ||
+            mesh->boneCount != model->boneCount)
+            return false;
+    }
+    return model->meshCount > 0;
+}
+
+/* A model file's clips that fit its skeleton; the model draws at rest with none. */
+static void LoadClips(ModelEntry *e, const char *path)
+{
+    int count = 0;
+    ModelAnimation *clips = LoadModelAnimations(path, &count);
+    int kept = 0;
+    for (int i = 0; clips && i < count; i++)
+    {
+        if (clips[i].frameCount > 0 && IsModelAnimationValid(e->model, clips[i]))
+            clips[kept++] = clips[i];
+        else
+        {
+            TraceLog(LOG_WARNING, "RUN: %s: clip %s does not fit the model's skeleton; it is not played", e->name,
+                     clips[i].name);
+            UnloadModelAnimation(clips[i]);
+        }
+    }
+    if (kept && !FullySkinned(&e->model))
+    {
+        TraceLog(LOG_WARNING, "RUN: %s: a mesh has no bone weights; its clips are not played", e->name);
+        UnloadModelAnimations(clips, kept);
+        return;
+    }
+    if (!kept)
+    {
+        MemFree(clips);
+        return;
+    }
+    e->clips = clips;
+    e->clipCount = kept;
+    e->cpu = run.skinCpuForced || e->model.boneCount > GPU_SKIN_BONES || !run.passes[1].loaded;
 }
 
 static ModelEntry *ModelNamed(const char *name)
@@ -922,6 +1012,8 @@ static ModelEntry *ModelNamed(const char *name)
     e->meshes = calloc((size_t)(e->model.meshCount > 0 ? e->model.meshCount : 1), sizeof *e->meshes);
     for (int i = 0; e->meshes && i < e->model.meshCount; i++)
         e->meshes[i] = DrawPathMesh(&run.path, &e->model.meshes[i]);
+    if (path && !e->placeholder && e->model.boneCount > 0)
+        LoadClips(e, path);
     return e;
 }
 
@@ -1007,7 +1099,7 @@ static void AddTilemaps(void)
             materials[p] = MaterialFor(Field(maps[m], textureFields[p], &v) && v.type == STORE_STRING
                                            ? TextureNamed(v.as.str)
                                            : (Texture2D){0},
-                                       tints[p]);
+                                       tints[p], false);
         }
         for (int c = 0; c < n; c++)
         {
@@ -1025,13 +1117,193 @@ static void AddTilemaps(void)
                     UploadPart(&entry->mesh[p], parts[p]);
                 if (!entry->mesh[p] || !materials[p])
                     continue;
-                DrawItem item = {entry->mesh[p], materials[p], world, center, radius, DRAW_LAYER_OPAQUE};
+                DrawItem item = {entry->mesh[p], materials[p], world, center, radius, DRAW_LAYER_OPAQUE, NULL, 0};
                 DrawPathAdd(&run.path, &item);
             }
         }
         free(chunks);
     }
     free(maps);
+}
+
+/* Whether a model thing is drawn on this machine: visible, and for-owner / hidden-for-owner agree. */
+static bool DrawnHere(StoreId id)
+{
+    bool mine = StoreOwner(&run.store, id) == LocalPlayer();
+    return FieldTrue(id, "visible") && !(FieldTrue(id, "for-owner") && !mine) &&
+           !(FieldTrue(id, "hidden-for-owner") && mine);
+}
+
+static ModelEntry *ModelOf(StoreId id)
+{
+    StoreValue mesh;
+    return ModelNamed(Field(id, "mesh", &mesh) && mesh.type == STORE_STRING ? mesh.as.str : "");
+}
+
+/* A CPU pose's own draw path meshes, one per model mesh, made (or rewritten in place) from the
+   model's rest vertices without their bone arrays: these copies are drawn unskinned. */
+static bool PoseMeshes(Pose *p, const ModelEntry *e)
+{
+    int need = e->model.meshCount;
+    if (need > p->meshCount)
+    {
+        uint32_t *grown = realloc(p->meshes, sizeof *grown * (size_t)need);
+        if (!grown)
+            return false;
+        memset(grown + p->meshCount, 0, sizeof *grown * (size_t)(need - p->meshCount));
+        p->meshes = grown;
+        p->meshCount = need;
+    }
+    for (int m = 0; m < need; m++)
+    {
+        Mesh view = e->model.meshes[m];
+        view.boneIds = NULL;
+        view.boneWeights = NULL;
+        p->meshes[m] = p->meshes[m] ? DrawPathMeshUpdate(&run.path, p->meshes[m], &view) : DrawPathMesh(&run.path, &view);
+    }
+    return true;
+}
+
+/* The pose slot of a thing, fresh for a new thing in the slot or a thing whose model changed. */
+static Pose *PoseSlot(StoreId id, const ModelEntry *e)
+{
+    if (id.index >= run.poseCapacity)
+    {
+        uint32_t capacity = run.poseCapacity ? run.poseCapacity : 64;
+        while (capacity <= id.index)
+            capacity *= 2;
+        Pose *grown = realloc(run.poses, sizeof *grown * capacity);
+        if (!grown)
+            return NULL;
+        memset(grown + run.poseCapacity, 0, sizeof *grown * (capacity - run.poseCapacity));
+        run.poses = grown;
+        run.poseCapacity = capacity;
+    }
+    Pose *p = &run.poses[id.index];
+    if (p->thing.index == id.index && p->thing.generation == id.generation && p->model == e)
+        return p;
+    free(p->bones);
+    p->bones = NULL;
+    p->thing = id;
+    p->model = e;
+    p->animation = STORE_NO_SYMBOL - 1; /* never a symbol, so the first look restarts the clock */
+    p->clock = 0;
+    p->clip = -1;
+    p->frame = 0;
+    if (e->cpu)
+        return PoseMeshes(p, e) ? p : NULL; /* the slot's old meshes are rewritten, not leaked */
+    p->bones = malloc(sizeof *p->bones * (size_t)e->model.boneCount);
+    return p->bones ? p : NULL;
+}
+
+/* Once per name and model: a clip the game asked for that the file does not have. */
+static void WarnClip(const ModelEntry *e, const char *clip)
+{
+    char key[NAME * 2];
+    snprintf(key, sizeof key, "%s %s", e->name, clip);
+    for (int i = 0; i < run.clipWarningCount; i++)
+        if (!strcmp(run.clipWarnings[i], key))
+            return;
+    if (run.clipWarningCount < MAX_CLIP_WARNINGS)
+        snprintf(run.clipWarnings[run.clipWarningCount++], sizeof run.clipWarnings[0], "%s", key);
+    TraceLog(LOG_WARNING, "RUN: %s has no clip %s; it holds the rest pose", e->name, clip);
+}
+
+/* Each drawn model thing with clips: its clock restarts when `animation` changes and otherwise runs
+   at `animation-speed`; the clip's frame at that time is posed into its bone matrices (GPU) or its
+   own meshes (CPU). A name the file lacks, or no animation, holds the rest pose. Runs before any
+   item is built, so a socket's lookup finds every pose of this frame. */
+static void UpdatePoses(float dt)
+{
+    if (!(dt > 0))
+        dt = 0;
+    if (dt > MAX_ANIMATION_STEP)
+        dt = MAX_ANIMATION_STEP;
+    int count;
+    StoreId *ids = ThingsOf(run.world.model, &count);
+    for (int i = 0; ids && i < count; i++)
+    {
+        if (!DrawnHere(ids[i]))
+            continue;
+        ModelEntry *e = ModelOf(ids[i]);
+        Pose *p = e && e->clipCount ? PoseSlot(ids[i], e) : NULL;
+        if (!p)
+            continue;
+        StoreValue v;
+        StoreSymbol animation = Field(ids[i], "animation", &v) && v.type == STORE_SYMBOL ? v.as.sym : STORE_NO_SYMBOL;
+        if (animation != p->animation)
+        {
+            p->animation = animation;
+            p->clock = 0;
+            p->clip = -1;
+            const char *name = StoreSymbolName(&run.store, animation);
+            for (int c = 0; name && c < e->clipCount && p->clip < 0; c++)
+                if (!strcmp(e->clips[c].name, name))
+                    p->clip = c;
+            if (name && p->clip < 0)
+                WarnClip(e, name);
+        }
+        else
+            p->clock += (double)dt * FieldFloat(ids[i], "animation-speed", 1);
+        Model model = e->model;
+        if (p->clip >= 0)
+        {
+            const ModelAnimation *clip = &e->clips[p->clip];
+            long frame = (long)floor(p->clock / CLIP_FRAME_SECONDS) % clip->frameCount;
+            p->frame = (int)(frame < 0 ? frame + clip->frameCount : frame);
+            if (e->cpu)
+                UpdateModelAnimation(model, *clip, p->frame);
+            else
+            {
+                UpdateModelAnimationBones(model, *clip, p->frame);
+                memcpy(p->bones, model.meshes[0].boneMatrices, sizeof *p->bones * (size_t)model.boneCount);
+            }
+        }
+        else if (!e->cpu)
+            for (int b = 0; b < model.boneCount; b++)
+                p->bones[b] = MatrixIdentity();
+        for (int m = 0; e->cpu && m < model.meshCount; m++)
+        {
+            const Mesh *mesh = &model.meshes[m];
+            DrawPathMeshPositions(&run.path, p->meshes[m], p->clip >= 0 ? mesh->animVertices : mesh->vertices,
+                                  p->clip >= 0 ? mesh->animNormals : mesh->normals);
+        }
+    }
+    free(ids);
+}
+
+/* A pose of this frame for a model thing drawn with e, or NULL. */
+static const Pose *PoseOf(StoreId id, const ModelEntry *e)
+{
+    if (!e || !e->clipCount || id.index >= run.poseCapacity)
+        return NULL;
+    const Pose *p = &run.poses[id.index];
+    return p->thing.index == id.index && p->thing.generation == id.generation && p->model == e ? p : NULL;
+}
+
+/* The runner's bone lookup (World3DSetBoneLookup), for drawing only: a posed model's bone as it is
+   drawn this frame, in the model's own space (its file's root transform and its spin included). */
+static World3DBone BoneOf(void *user, StoreId model, const char *bone, Matrix *out)
+{
+    (void)user;
+    if (!DrawnHere(model))
+        return WORLD3D_BONE_NOT_DRAWN;
+    ModelEntry *e = ModelOf(model);
+    const Pose *p = PoseOf(model, e);
+    if (!p || p->clip < 0)
+        return WORLD3D_BONE_NONE;
+    for (int b = 0; b < e->model.boneCount; b++)
+        if (!strcmp(e->model.bones[b].name, bone))
+        {
+            Transform t = e->clips[p->clip].framePoses[p->frame][b];
+            Matrix pose = MatrixMultiply(MatrixMultiply(MatrixScale(t.scale.x, t.scale.y, t.scale.z),
+                                                        QuaternionToMatrix(t.rotation)),
+                                         MatrixTranslate(t.translation.x, t.translation.y, t.translation.z));
+            *out = MatrixMultiply(MatrixMultiply(pose, e->model.transform),
+                                  MatrixRotateY(FieldFloat(model, "spin", 0) * StoreTickTime(&run.store)));
+            return WORLD3D_BONE_POSED;
+        }
+    return WORLD3D_BONE_NONE;
 }
 
 static void AddModels(Camera3D camera)
@@ -1042,12 +1314,10 @@ static void AddModels(Camera3D camera)
     for (int i = 0; ids && i < count; i++)
     {
         StoreId id = ids[i];
-        bool mine = StoreOwner(&run.store, id) == LocalPlayer();
-        if (!FieldTrue(id, "visible") || (FieldTrue(id, "for-owner") && !mine) ||
-            (FieldTrue(id, "hidden-for-owner") && mine))
+        if (!DrawnHere(id))
             continue;
         Matrix world;
-        if (!World3DWorldMatrix(&run.world, id, &world))
+        if (!World3DDrawMatrix(&run.world, id, &world)) /* under a socket: on its bone, this frame */
             continue;
         float cull = FieldFloat(id, "cull-distance", 0);
         Vector3 at = {world.m12, world.m13, world.m14};
@@ -1056,8 +1326,7 @@ static void AddModels(Camera3D camera)
         float spin = FieldFloat(id, "spin", 0);
         if (spin != 0)
             world = MatrixMultiply(MatrixRotateY(spin * now), world);
-        StoreValue mesh;
-        ModelEntry *e = ModelNamed(Field(id, "mesh", &mesh) && mesh.type == STORE_STRING ? mesh.as.str : "");
+        ModelEntry *e = ModelOf(id);
         if (!e || !e->meshes)
             continue;
         Color tint = e->placeholder ? (Color){255, 0, 255, 255} : TintOf(id);
@@ -1070,20 +1339,25 @@ static void AddModels(Camera3D camera)
             Vector3 size = character ? (Vector3){0.5f, 1.6f, 0.5f} : (Vector3){0.25f, 0.25f, 0.25f};
             local = MatrixMultiply(MatrixScale(size.x, size.y, size.z), MatrixTranslate(0, size.y / 2, 0));
         }
+        const Pose *pose = PoseOf(id, e);
         uint8_t layer = FieldTrue(id, "viewmodel") ? DRAW_LAYER_VIEWMODEL : DRAW_LAYER_OPAQUE;
         for (int m = 0; m < e->model.meshCount; m++)
         {
-            if (!e->meshes[m])
+            bool cpu = pose && e->cpu && m < pose->meshCount && pose->meshes[m];
+            bool gpu = pose && !e->cpu && e->model.meshes[m].boneIds;
+            uint32_t mesh = cpu ? pose->meshes[m] : e->meshes[m];
+            if (!mesh)
                 continue;
             int which = e->model.meshMaterial ? e->model.meshMaterial[m] : 0;
             Texture2D texture = which >= 0 && which < e->model.materialCount && e->model.materials[which].maps
                                     ? e->model.materials[which].maps[MATERIAL_MAP_DIFFUSE].texture
                                     : (Texture2D){0};
-            DrawItem item = {e->meshes[m], MaterialFor(texture, tint), MatrixMultiply(local, world),
-                             {0, 0, 0}, 0, layer};
-            const DrawPathMeshData *data = &run.path.meshes[e->meshes[m] - 1];
+            DrawItem item = {mesh, MaterialFor(texture, tint, gpu), MatrixMultiply(local, world), {0, 0, 0}, 0,
+                             layer, gpu ? pose->bones : NULL, gpu ? e->model.boneCount : 0};
+            const DrawPathMeshData *data = &run.path.meshes[mesh - 1];
             item.center = Vector3Transform(data->center, item.world);
-            item.radius = data->radius * MaxScale(item.world);
+            /* A posed mesh reaches past its rest bounds (a raised arm), so it is culled generously. */
+            item.radius = data->radius * MaxScale(item.world) * (pose ? 2.0f : 1.0f);
             if (item.material)
                 DrawPathAdd(&run.path, &item);
         }
@@ -1214,12 +1488,18 @@ static void SetLights(Camera3D camera)
     Color clear = {30, 32, 36, 255};
     Vector3 fog = {clear.r / 255.0f, clear.g / 255.0f, clear.b / 255.0f};
     float density = 0.02f;
-    SetShaderValue(run.shader, run.lightDirLoc, &dir, SHADER_UNIFORM_VEC3);
-    SetShaderValue(run.shader, run.lightColorLoc, &color, SHADER_UNIFORM_VEC3);
-    SetShaderValue(run.shader, run.ambientLoc, &ambient, SHADER_UNIFORM_VEC3);
-    SetShaderValue(run.shader, run.fogColorLoc, &fog, SHADER_UNIFORM_VEC3);
-    SetShaderValue(run.shader, run.fogDensityLoc, &density, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(run.shader, run.viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
+    for (int i = 0; i < 2; i++) /* static and skinned models are lit and fogged alike */
+    {
+        const WorldPass *pass = &run.passes[i];
+        if (!pass->loaded)
+            continue;
+        SetShaderValue(pass->shader, pass->lightDirLoc, &dir, SHADER_UNIFORM_VEC3);
+        SetShaderValue(pass->shader, pass->lightColorLoc, &color, SHADER_UNIFORM_VEC3);
+        SetShaderValue(pass->shader, pass->ambientLoc, &ambient, SHADER_UNIFORM_VEC3);
+        SetShaderValue(pass->shader, pass->fogColorLoc, &fog, SHADER_UNIFORM_VEC3);
+        SetShaderValue(pass->shader, pass->fogDensityLoc, &density, SHADER_UNIFORM_FLOAT);
+        SetShaderValue(pass->shader, pass->viewPosLoc, &camera.position, SHADER_UNIFORM_VEC3);
+    }
 }
 
 // Handler errors, kept by the sink with their tick, shown for five seconds along the bottom.
@@ -1293,6 +1573,15 @@ static void TakeShot(void)
         printf("shot %" PRIu64 " %s\n", tick, path);
     else
         TraceLog(LOG_WARNING, "RUN: could not write %s", path);
+    // --print-draw-position KIND: where the first thing of KIND was drawn in the frame just shot.
+    StoreKind kind = run.printDrawKind ? StoreKindNamed(&run.store, run.printDrawKind) : -1;
+    StoreId first[1];
+    Matrix drawn;
+    if (kind >= 0 && StoreThings(&run.store, kind, first, 1) == 1 && World3DDrawMatrix(&run.world, first[0], &drawn))
+        printf("draw-position %s %" PRIu64 " %.4f %.4f %.4f\n", run.printDrawKind, tick, (double)drawn.m12,
+               (double)drawn.m13, (double)drawn.m14);
+    else if (run.printDrawKind)
+        printf("draw-position %s %" PRIu64 " none\n", run.printDrawKind, tick);
     fflush(stdout);
 }
 
@@ -1341,6 +1630,7 @@ static void Draw(void *context, float alpha)
     DrawPathBegin(&run.path, camera, GetScreenWidth(), GetScreenHeight());
     BeginMode3D(camera);
     AddTilemaps();
+    UpdatePoses(dt);
     AddModels(camera);
     run.lastStats = DrawPathEnd(&run.path);
     CoreParticlesDraw(&run.particles, camera, NULL, NULL);
@@ -2162,17 +2452,28 @@ static bool InitPresentation(void)
     run.gl = true;
     FitWindow();
     DrawPathInit(&run.path);
-    ShaderFile files = {run.worldVs, run.worldFs};
-    if (!CoreLoadShaders(&files, 1, &run.shader))
+    ShaderFile files = {run.worldVs, run.worldFs}, skinned = {run.skinVs, run.worldFs};
+    char bones[64];
+    snprintf(bones, sizeof bones, "#define SKINNING_BONES %d", GPU_SKIN_BONES);
+    if (!CoreLoadShaders(&files, 1, &run.passes[0].shader))
         return Fail("could not build the world shader %s", run.worldFs);
-    run.shaderLoaded = true;
-    run.normalLoc = GetShaderLocation(run.shader, "matNormal");
-    run.lightDirLoc = GetShaderLocation(run.shader, "lightDir");
-    run.lightColorLoc = GetShaderLocation(run.shader, "lightColor");
-    run.ambientLoc = GetShaderLocation(run.shader, "ambient");
-    run.fogColorLoc = GetShaderLocation(run.shader, "fogColor");
-    run.fogDensityLoc = GetShaderLocation(run.shader, "fogDensity");
-    run.viewPosLoc = GetShaderLocation(run.shader, "viewPos");
+    run.passes[0].loaded = true;
+    run.passes[1].loaded = CoreLoadShaderDefined(&skinned, bones, &run.passes[1].shader);
+    if (!run.passes[1].loaded)
+        TraceLog(LOG_WARNING, "RUN: could not build the skinning shader %s; skinned models are posed on the CPU",
+                 run.skinVs);
+    for (int i = 0; i < 2; i++)
+    {
+        WorldPass *pass = &run.passes[i];
+        pass->normalLoc = GetShaderLocation(pass->shader, "matNormal");
+        pass->lightDirLoc = GetShaderLocation(pass->shader, "lightDir");
+        pass->lightColorLoc = GetShaderLocation(pass->shader, "lightColor");
+        pass->ambientLoc = GetShaderLocation(pass->shader, "ambient");
+        pass->fogColorLoc = GetShaderLocation(pass->shader, "fogColor");
+        pass->fogDensityLoc = GetShaderLocation(pass->shader, "fogDensity");
+        pass->viewPosLoc = GetShaderLocation(pass->shader, "viewPos");
+    }
+    World3DSetBoneLookup(&run.world, BoneOf, NULL);
     if (!LoadHudFont())
         return Fail("could not load the HUD font %s", run.fontPath);
     run.white = (Texture2D){rlGetTextureIdDefault(), 1, 1, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
@@ -2188,8 +2489,18 @@ static bool InitPresentation(void)
 
 static void FreePresentation(void)
 {
+    World3DSetBoneLookup(&run.world, NULL, NULL);
+    for (uint32_t i = 0; i < run.poseCapacity; i++)
+    {
+        free(run.poses[i].bones);
+        free(run.poses[i].meshes);
+    }
+    free(run.poses);
+    run.poses = NULL;
+    run.poseCapacity = 0;
     for (int i = 0; i < run.modelCount; i++)
     {
+        UnloadModelAnimations(run.models[i].clips, run.models[i].clipCount);
         UnloadModel(run.models[i].model);
         free(run.models[i].meshes);
     }
@@ -2200,8 +2511,10 @@ static void FreePresentation(void)
         UnloadTexture(run.grey);
     if (run.fontLoaded)
         UnloadFont(run.font);
-    if (run.shaderLoaded)
-        CoreUnloadShaders(&run.shader, 1);
+    for (int i = 0; i < 2; i++)
+        if (run.passes[i].loaded)
+            CoreUnloadShaders(&run.passes[i].shader, 1);
+    memset(run.passes, 0, sizeof run.passes);
     CoreAudioFree(&run.audio);
     CoreDebugFree(&run.debug);
     CoreMouseCaptureRelease(&run.capture);
@@ -2221,10 +2534,10 @@ static bool Init(void *context)
         return Fail("no Scheme prelude core/scheme/kinds.scm beside the engine%s", "");
     snprintf(run.prelude, sizeof run.prelude, "%s", prelude);
     // The world shader and the HUD font are the engine's too, found the same way.
-    static const char *const engineFiles[3] = {"core/shaders/world.vs", "core/shaders/world.fs",
-                                               "core/fonts/unifont-17.0.04.bdf"};
-    char *targets[3] = {run.worldVs, run.worldFs, run.fontPath};
-    for (int i = 0; i < 3; i++)
+    static const char *const engineFiles[4] = {"core/shaders/world.vs", "core/shaders/world.fs",
+                                               "core/fonts/unifont-17.0.04.bdf", "core/shaders/skinning.vs"};
+    char *targets[4] = {run.worldVs, run.worldFs, run.fontPath, run.skinVs};
+    for (int i = 0; i < 4; i++)
     {
         const char *path = CoreResolvePath(engineFiles[i], buf, sizeof buf);
         if (!run.headless && (!path || !Readable(path)))
@@ -2437,7 +2750,8 @@ static int Usage(const char *problem)
     fprintf(stderr, "usage: trench run <dir> [--headless] [--ticks N] [--seed S] [--record FILE] "
                     "[--replay FILE] [--hash-every N] [--bot] [--bench] [--save FILE] [--load FILE] "
                     "[--present] [--shot-every N] [--shot-dir DIR] [--no-time-limit] [--host PORT] "
-                    "[--join ADDRESS:PORT] [--bot-until N] [--print-field KIND FIELD] [--print-count KIND]\n");
+                    "[--join ADDRESS:PORT] [--bot-until N] [--print-field KIND FIELD] [--print-count KIND] "
+                    "[--print-draw-position KIND] [--skin-on-cpu]\n");
     return 2;
 }
 
@@ -2516,14 +2830,19 @@ int GameRun(int argc, char **argv)
             run.present = true, takes = false;
         else if (!strcmp(flag, "--no-time-limit"))
             handlerLimit = 0, takes = false;
+        else if (!strcmp(flag, "--skin-on-cpu"))
+            run.skinCpuForced = true, takes = false;
         else if (strcmp(flag, "--ticks") && strcmp(flag, "--seed") && strcmp(flag, "--hash-every") &&
                  strcmp(flag, "--record") && strcmp(flag, "--replay") && strcmp(flag, "--save") &&
                  strcmp(flag, "--load") && strcmp(flag, "--shot-every") && strcmp(flag, "--shot-dir") &&
                  strcmp(flag, "--host") && strcmp(flag, "--join") && strcmp(flag, "--bot-until") &&
-                 strcmp(flag, "--print-field") && strcmp(flag, "--print-count"))
+                 strcmp(flag, "--print-field") && strcmp(flag, "--print-count") &&
+                 strcmp(flag, "--print-draw-position"))
             return Usage("unknown flag");
         else if (!value)
             return Usage("a flag is missing its value");
+        else if (!strcmp(flag, "--print-draw-position"))
+            run.printDrawKind = value;
         else if (!strcmp(flag, "--host"))
         {
             uint64_t port;
@@ -2593,6 +2912,10 @@ int GameRun(int argc, char **argv)
         return Usage("--present is for --headless runs; a window presents anyway");
     if ((run.shotEvery || run.shotDir) && run.headless)
         return Usage("--shot-every and --shot-dir need a window");
+    if ((run.printDrawKind || run.skinCpuForced) && run.headless)
+        return Usage("--print-draw-position and --skin-on-cpu need a window (headless draws nothing)");
+    if (run.printDrawKind && !run.shotEvery)
+        return Usage("--print-draw-position prints with each screenshot: give --shot-every too");
     if (run.shotEvery && !run.shotDir)
         run.shotDir = ".";
     if (run.hostPort && run.joinPort)

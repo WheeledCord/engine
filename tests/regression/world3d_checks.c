@@ -683,6 +683,130 @@ static void TransformChecks(void)
     StoreFree(s);
 }
 
+// ---- sockets that follow bones in drawing only (§3 Socket) --------------------------------------
+/* A fake bone lookup: `arms` answers as armsAnswer says, `body` has hand.R posed at (-1, 1, 0) in
+   model space (the test rig's wave at its top) unless bodyDrawn is false; every call is counted. */
+static World3DBone armsAnswer;
+static bool bodyDrawn;
+static int lookups;
+static StoreId armsThing, bodyThing;
+
+static World3DBone FakeBones(void *user, StoreId model, const char *bone, Matrix *out)
+{
+    (void)user;
+    lookups++;
+    if (Same(model, armsThing))
+    {
+        if (armsAnswer == WORLD3D_BONE_POSED)
+            *out = MatrixTranslate(0, 5, 0);
+        return armsAnswer;
+    }
+    if (!Same(model, bodyThing) || !bodyDrawn)
+        return WORLD3D_BONE_NOT_DRAWN;
+    if (strcmp(bone, "hand.R"))
+        return WORLD3D_BONE_NONE;
+    *out = MatrixTranslate(-1, 1, 0);
+    return WORLD3D_BONE_POSED;
+}
+
+static Vector3 Drawn(World3D *w, StoreId id)
+{
+    Matrix m;
+    return World3DDrawMatrix(w, id, &m) ? (Vector3){m.m12, m.m13, m.m14} : (Vector3){-999, -999, -999};
+}
+
+static void SocketChecks(void)
+{
+    Store store;
+    World3D world;
+    Store *s = &store;
+    World3D *w = &world;
+    StoreInit(s, 3);
+    World3DInit(w, s);
+    StoreKind node = StoreKindNamed(s, "node"), model = StoreKindNamed(s, "model"), socketKind = StoreKindNamed(s, "socket");
+    /* A soldier at (5, 0, 0): eye > arms, body, and a hand socket at (0.3, 1, 0) following
+       (arms body) with a box guest 0.1 in front of it. */
+    StoreId soldier = StoreSpawn(s, node, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreId eye = StoreSpawn(s, node, 0, soldier, StoreIntern(s, "eye"));
+    armsThing = StoreSpawn(s, model, 0, eye, StoreIntern(s, "arms"));
+    bodyThing = StoreSpawn(s, model, 0, soldier, StoreIntern(s, "body"));
+    StoreId hand = StoreSpawn(s, socketKind, 0, soldier, StoreIntern(s, "hand"));
+    StoreId box = Spawn(s, "model", STORE_NULL);
+    SetVec(s, soldier, "position", 5, 0, 0);
+    SetVec(s, eye, "position", 0, 1.6f, 0);
+    SetVec(s, hand, "position", 0.3f, 1, 0);
+    SetVec(s, box, "position", 0, 0, 0.1f);
+    StoreValue bone;
+    memset(&bone, 0, sizeof bone);
+    bone.type = STORE_STRING;
+    snprintf(bone.as.str, sizeof bone.as.str, "hand.R");
+    StoreSet(s, hand, StoreFieldIndex(s, socketKind, "bone"), &bone);
+    StoreValue of[2];
+    memset(of, 0, sizeof of);
+    of[0].type = of[1].type = STORE_SYMBOL;
+    of[0].as.sym = StoreIntern(s, "arms");
+    of[1].as.sym = StoreIntern(s, "body");
+    Expect(StoreSetList(s, hand, StoreFieldIndex(s, socketKind, "of"), of, 2) && StoreAttach(s, box, hand),
+           "sockets: a hand following (arms body) holds a box");
+    World3DBeginTick(w);
+    World3DUpdateTransforms(w, 1);
+    const Vector3 rest = {5.3f, 1, 0.1f}, onBone = {4, 1, 0.1f};
+    Vector3 gameplay;
+
+    /* With no lookup, drawing and gameplay agree on the rest pose. */
+    Expect(NearVec(Drawn(w, box), rest) && NearVec(At(w, box), rest) && World3DWorldPosition(w, box, &gameplay) &&
+               NearVec(gameplay, rest),
+           "sockets: with no bone lookup the guest draws at the socket's rest pose, as gameplay reads it");
+
+    /* The arms are not drawn here, the body is and is posed: the box draws on the body's hand. */
+    World3DSetBoneLookup(w, FakeBones, NULL);
+    armsAnswer = WORLD3D_BONE_NOT_DRAWN;
+    bodyDrawn = true;
+    Vector3 drawn = Drawn(w, box), socketDrawn = Drawn(w, hand);
+    printf("world3d sockets: box drawn at (%.2f %.2f %.2f), gameplay world position (%.2f %.2f %.2f)\n", drawn.x,
+           drawn.y, drawn.z, gameplay.x, gameplay.y, gameplay.z);
+    Expect(NearVec(drawn, onBone) && NearVec(socketDrawn, (Vector3){4, 1, 0}),
+           "sockets: a guest under a socket draws at the bone of the first drawn model of its :of");
+    Expect(World3DWorldPosition(w, box, &gameplay) && NearVec(gameplay, rest) && NearVec(At(w, box), rest),
+           "sockets: gameplay's world position and world matrix stay the rest pose while drawing follows the bone");
+    Expect(NearVec(Drawn(w, bodyThing), (Vector3){5, 0, 0}) && NearVec(Drawn(w, eye), (Vector3){5, 1.6f, 0}),
+           "sockets: things not under a socket draw at their world matrix");
+    armsAnswer = WORLD3D_BONE_POSED;
+    Expect(NearVec(Drawn(w, box), (Vector3){5, 6.6f, 0.1f}),
+           "sockets: the first listed model drawn here wins (the arms' bone, times the arms' matrix)");
+    armsAnswer = WORLD3D_BONE_NONE;
+    Expect(NearVec(Drawn(w, box), rest), "sockets: the first drawn model unposed leaves the socket at rest");
+
+    /* No :of: a socket straight under a model follows it. */
+    StoreId grip = StoreSpawn(s, socketKind, 0, bodyThing, StoreIntern(s, "grip"));
+    StoreSet(s, grip, StoreFieldIndex(s, socketKind, "bone"), &bone);
+    StoreId held = Spawn(s, "node", grip);
+    World3DBeginTick(w);
+    World3DUpdateTransforms(w, 1);
+    Expect(NearVec(Drawn(w, held), (Vector3){4, 1, 0}), "sockets: with no :of, a socket follows its parent model");
+
+    /* Expected failures. */
+    bodyDrawn = false;
+    armsAnswer = WORLD3D_BONE_NOT_DRAWN;
+    Expect(NearVec(Drawn(w, box), rest) && NearVec(Drawn(w, held), (Vector3){5, 0, 0}),
+           "sockets: a model not drawn here leaves its socket at rest");
+    bodyDrawn = true;
+    snprintf(bone.as.str, sizeof bone.as.str, "hand.L");
+    StoreSet(s, hand, StoreFieldIndex(s, socketKind, "bone"), &bone);
+    Expect(NearVec(Drawn(w, box), rest), "sockets: a bone the model does not have leaves the socket at rest");
+    bone.as.str[0] = 0;
+    StoreSet(s, hand, StoreFieldIndex(s, socketKind, "bone"), &bone);
+    lookups = 0;
+    Expect(NearVec(Drawn(w, box), rest) && lookups == 0, "sockets: a socket with no bone asks nothing and stays at rest");
+    StoreId bag = StoreSpawn(s, StoreDeclareKind(s, "bagged", -1, NULL, 0, NULL), 0, STORE_NULL, STORE_NO_SYMBOL);
+    Matrix m;
+    StoreRemove(s, box);
+    Expect(!World3DDrawMatrix(w, box, &m) && !World3DDrawMatrix(w, bag, &m),
+           "sockets: the draw matrix refuses a removed thing and a thing that is not a node");
+    World3DFree(w);
+    StoreFree(s);
+}
+
 // ---- nearest -----------------------------------------------------------------------------------
 static bool NotSecond(StoreId id, void *user) { return !Same(id, *(StoreId *)user); }
 
@@ -772,6 +896,7 @@ int World3DChecks(void)
     PathChecks();
     ChunkChecks();
     TransformChecks();
+    SocketChecks();
     NearestChecks();
     DeterminismChecks();
     return failures;

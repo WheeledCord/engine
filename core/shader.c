@@ -95,7 +95,9 @@ static char *Expand(const char *path, int depth)
     return out;
 }
 
-static char *Source(const char *path)
+/* The file with its includes expanded and, after #version, CORE_BONE_CAPACITY and then `defines`
+   (NULL for none). */
+static char *Source(const char *path, const char *defines)
 {
     char *s = Expand(path, 0);
     if (!s)
@@ -107,8 +109,14 @@ static char *Source(const char *path)
         free(s);
         return NULL;
     }
-    char define[96];
-    snprintf(define, sizeof define, "#define CORE_BONE_CAPACITY %d\n#line 2\n", CORE_BONE_CAPACITY);
+    char define[512];
+    if ((size_t)snprintf(define, sizeof define, "#define CORE_BONE_CAPACITY %d\n%s%s#line 2\n", CORE_BONE_CAPACITY,
+                         defines ? defines : "", defines && *defines ? "\n" : "") >= sizeof define)
+    {
+        TraceLog(LOG_ERROR, "Shader defines too long for %s", path);
+        free(s);
+        return NULL;
+    }
     size_t head = (size_t)(nl + 1 - s), n = strlen(s) + strlen(define) + 1;
     char *out = malloc(n);
     if (out)
@@ -131,15 +139,15 @@ void CoreUnloadShaders(Shader *shaders, int count)
         shaders[i] = (Shader){0};
     }
 }
-bool CoreLoadShaders(const ShaderFile *files, int count, Shader *out)
+static bool Load(const ShaderFile *files, int count, const char *defines, Shader *out)
 {
     if (!files || !out || count < 0)
         return false;
     memset(out, 0, sizeof(*out) * (size_t)count);
     for (int i = 0; i < count; i++)
     {
-        char *vs = files[i].vertex ? Source(files[i].vertex) : NULL;
-        char *fs = files[i].fragment ? Source(files[i].fragment) : NULL;
+        char *vs = files[i].vertex ? Source(files[i].vertex, defines) : NULL;
+        char *fs = files[i].fragment ? Source(files[i].fragment, defines) : NULL;
         if ((files[i].vertex && !vs) || !fs)
         {
             free(vs);
@@ -159,4 +167,9 @@ bool CoreLoadShaders(const ShaderFile *files, int count, Shader *out)
         }
     }
     return true;
+}
+bool CoreLoadShaders(const ShaderFile *files, int count, Shader *out) { return Load(files, count, NULL, out); }
+bool CoreLoadShaderDefined(const ShaderFile *file, const char *defines, Shader *out)
+{
+    return Load(file, file ? 1 : 0, defines, out);
 }

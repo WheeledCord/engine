@@ -18,4 +18,8 @@ typedef struct ShaderFile
    carries no `#version` of its own. */
 bool CoreLoadShaders(const ShaderFile *files, int count, Shader *out);
 void CoreUnloadShaders(Shader *shaders, int count);
+/* CoreLoadShaders for one pair, with `defines` (lines such as "#define SKINNING_BONES 24", joined
+   by newlines; NULL for none) placed after CORE_BONE_CAPACITY in both stages: one source file built
+   more than one way, as the runner's world pass builds core/shaders/skinning.vs for 24 bones. */
+bool CoreLoadShaderDefined(const ShaderFile *file, const char *defines, Shader *out);
 #endif

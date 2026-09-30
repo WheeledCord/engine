@@ -15,6 +15,7 @@
 #include "core/world3d.h"
 #include "gameplay/game.h"
 #include "raylib.h"
+#include "raymath.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -534,6 +535,102 @@ static void WindowedChecks(void)
     UnloadImage(image);
 }
 
+/* ---- animation and sockets in drawing (docs/developer/store.md §3) ----------------------------- */
+
+/* Which pixels of a shot are grey: the test rigs are drawn untextured and white-tinted, so lit they
+   are grey, while the clear colour is darker and the box in the hand magenta. */
+static unsigned char *GreyMask(const char *path, long *size, long *grey)
+{
+    Image image = LoadImage(path);
+    Color *pixels = image.data ? LoadImageColors(image) : NULL;
+    *size = pixels ? (long)image.width * image.height : 0;
+    *grey = 0;
+    unsigned char *mask = *size ? calloc((size_t)*size, 1) : NULL;
+    for (long i = 0; mask && i < *size; i++)
+    {
+        Color c = pixels[i];
+        mask[i] = c.r > 60 && abs(c.r - c.g) < 25 && abs(c.g - c.b) < 25;
+        *grey += mask[i];
+    }
+    UnloadImageColors(pixels);
+    UnloadImage(image);
+    return mask;
+}
+
+/* tests/regression/anim in a window, 70 ticks: the rig waves, so the box in the socket on its hand.R
+   is drawn somewhere else at tick 60 than at tick 30, and the rig's arm is drawn over other pixels; gameplay's
+   (world-position box) is the socket's rest pose both times. Once on the GPU path and once with
+   --skin-on-cpu. */
+static void AnimChecks(void)
+{
+    char *headless[] = {"trench", "run", "tests/regression/anim", "--headless", "--print-draw-position", "box", NULL};
+    Expect(Run(headless) == 2, "--print-draw-position is refused headless, where nothing is drawn");
+    if (!getenv("DISPLAY"))
+    {
+        printf("note: runner: no DISPLAY; the animation and socket drawing checks are skipped\n");
+        return;
+    }
+    static const char *const modes[2][3] = {{"gpu", "", "build/core/anim_gpu"}, {"cpu", "--skin-on-cpu", "build/core/anim_cpu"}};
+    for (int k = 0; k < 2; k++)
+    {
+        char command[512], log[128], shot30[128], shot60[128], line[256];
+        snprintf(log, sizeof log, "%s.log", modes[k][2]);
+        snprintf(shot30, sizeof shot30, "%s/shot_30.png", modes[k][2]);
+        snprintf(shot60, sizeof shot60, "%s/shot_60.png", modes[k][2]);
+        remove(shot30);
+        remove(shot60);
+        snprintf(command, sizeof command,
+                 "./build/core/trench run tests/regression/anim --ticks 70 --shot-every 30 --shot-dir %s "
+                 "--print-draw-position box %s > %s 2>&1",
+                 modes[k][2], modes[k][1], log);
+        int status = system(command);
+        Vector3 drawn[2] = {{0}}, gameplay[2] = {{0}};
+        int seenDrawn = 0, seenGameplay = 0, clipWarnings = 0;
+        FILE *file = fopen(log, "r");
+        while (file && fgets(line, sizeof line, file))
+        {
+            int tick;
+            Vector3 v;
+            if (sscanf(line, "draw-position box %d %f %f %f", &tick, &v.x, &v.y, &v.z) == 4 && (tick == 30 || tick == 60))
+                drawn[tick / 60] = v, seenDrawn++;
+            else if (sscanf(line, "gameplay-position box %d %f %f %f", &tick, &v.x, &v.y, &v.z) == 4 &&
+                     (tick == 30 || tick == 60))
+                gameplay[tick / 60] = v, seenGameplay++;
+            clipWarnings += strstr(line, "has no clip dance") != NULL;
+        }
+        if (file)
+            fclose(file);
+        long size30, size60, grey30, grey60, moved = 0;
+        unsigned char *mask30 = GreyMask(shot30, &size30, &grey30), *mask60 = GreyMask(shot60, &size60, &grey60);
+        for (long i = 0; mask30 && mask60 && size30 == size60 && i < size30; i++)
+            moved += mask30[i] != mask60[i];
+        free(mask30);
+        free(mask60);
+        printf("runner anim (%s): box drawn at tick 30 (%.3f %.3f %.3f), tick 60 (%.3f %.3f %.3f), %.3f m apart; "
+               "gameplay (%.3f %.3f %.3f) and (%.3f %.3f %.3f); rig pixels %ld then %ld, %ld changed\n",
+               modes[k][0], drawn[0].x, drawn[0].y, drawn[0].z, drawn[1].x, drawn[1].y, drawn[1].z,
+               (double)Vector3Distance(drawn[0], drawn[1]), gameplay[0].x, gameplay[0].y, gameplay[0].z, gameplay[1].x,
+               gameplay[1].y, gameplay[1].z, grey30, grey60, moved);
+        char what[160];
+        snprintf(what, sizeof what, "anim (%s): the run exits cleanly with no ERROR and both positions printed twice",
+                 modes[k][0]);
+        Expect(status == 0 && !FileHasLine(log, "ERROR", true) && seenDrawn == 2 && seenGameplay == 2, what);
+        snprintf(what, sizeof what, "anim (%s): the box in the hand socket is drawn over 0.2 m apart at ticks 30 and 60",
+                 modes[k][0]);
+        Expect(Vector3Distance(drawn[0], drawn[1]) > 0.2f, what);
+        snprintf(what, sizeof what, "anim (%s): gameplay's world-position of the box is the rest pose at both ticks",
+                 modes[k][0]);
+        Expect(!memcmp(&gameplay[0], &gameplay[1], sizeof gameplay[0]) &&
+                   Vector3Distance(gameplay[0], (Vector3){0, 2, -2}) < 1e-4f,
+               what);
+        snprintf(what, sizeof what, "anim (%s): the skinned rig is drawn over other pixels at tick 60 than at 30",
+                 modes[k][0]);
+        Expect(grey30 > 100 && grey60 > 100 && moved > 100, what);
+        snprintf(what, sizeof what, "anim (%s): a missing clip name is warned about once in 70 ticks", modes[k][0]);
+        Expect(clipWarnings == 1, what);
+    }
+}
+
 /* ---- networking (docs/developer/store.md §9.6) ------------------------------------------------ */
 
 // Things store_net creates on a client reach world3d's spawned hook (and the runner's behind it),
@@ -1048,6 +1145,7 @@ int GameRunnerChecks(void)
     RebindChecks();
     NoDisplayChecks();
     WindowedChecks();
+    AnimChecks();
     NetHookChecks();
     RuntimeHostChecks();
     NetRunChecks();

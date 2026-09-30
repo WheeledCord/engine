@@ -3848,6 +3848,7 @@ int main(int argc, char **argv)
     RigFileChecks();
     failures += HeadlessChecks();
     failures += DrawPathChecks();
+    failures += AnimationAssetChecks();
     UnloadRenderTexture(scratch);
     UiFree(&ui);
     CloseWindow();

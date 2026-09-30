@@ -335,7 +335,7 @@ registers one system (areas). It holds no GL objects: geometry is CPU arrays; §
 | Kind | Base | Fields (type, flags) |
 |---|---|---|
 | `node` | - | `position` VEC3, `rotation` VEC3 (Euler radians X Y Z), `scale` VEC3 (1 1 1), `visible` BOOL #t, `static` BOOL, `cull-distance` FLOAT 0; `%prev-position` VEC3 LOCAL HIDDEN ENGINE, `%prev-rotation` VEC3 LOCAL HIDDEN ENGINE |
-| `model` | node | `mesh` STRING, `animation` SYMBOL, `spin` FLOAT (radians/s about Y, presentation only: the drawn rotation adds `spin * time`), `tint` VEC3 (1 1 1), `for-owner` BOOL, `hidden-for-owner` BOOL, `viewmodel` BOOL |
+| `model` | node | `mesh` STRING, `animation` SYMBOL, `animation-speed` FLOAT 1, `spin` FLOAT (radians/s about Y, presentation only: the drawn rotation adds `spin * time`), `tint` VEC3 (1 1 1), `for-owner` BOOL, `hidden-for-owner` BOOL, `viewmodel` BOOL |
 | `socket` | node | `bone` STRING, `of` LIST of SYMBOL max 4 |
 | `camera` | node | `fov` FLOAT 75, `for-owner` BOOL |
 | `light` | node | `type` SYMBOL (`ambient` `directional` `point`), `energy` FLOAT 1, `color` VEC3 (1 1 1), `range` FLOAT 10 |
@@ -357,6 +357,10 @@ Functions (all deterministic; no GL; every one refuses a stale id):
 ```c
 bool World3DWorldMatrix(World3D *, StoreId, Matrix *out);       /* cached, tree order (B9.1) */
 bool World3DWorldPosition(World3D *, StoreId, Vector3 *out);
+bool World3DDrawMatrix(World3D *, StoreId, Matrix *out);        /* drawing: sockets follow bones */
+typedef enum World3DBone { WORLD3D_BONE_NOT_DRAWN, WORLD3D_BONE_NONE, WORLD3D_BONE_POSED } World3DBone;
+void World3DSetBoneLookup(World3D *, World3DBone (*fn)(void *user, StoreId model, const char *bone,
+                                                       Matrix *out), void *user);
 void World3DUpdateTransforms(World3D *, float alpha);   /* once per frame: interpolate %prev->now by
                                                            alpha (a parent change is a jump, B3.5),
                                                            recompose dirty subtrees parent first */
@@ -428,13 +432,16 @@ typedef struct DrawItem {
     Matrix world;
     Vector3 center; float radius;   /* world-space bounding sphere */
     uint8_t layer;        /* 0 opaque, 1 alpha-tested, 2 translucent, 3 viewmodel */
+    const Matrix *bones; int boneCount;   /* skinned: read at submit; NULL/0 for static meshes */
 } DrawItem;
-typedef struct DrawStats { int items, visible, draws, shaderSwitches, textureSwitches;
+typedef struct DrawStats { int items, visible, draws, shaderSwitches, textureSwitches, boneUploads;
                            double cullMicros, sortMicros, submitMicros; } DrawStats;
 bool DrawPathInit(DrawPath *);
 void DrawPathFree(DrawPath *);
 uint32_t DrawPathMesh(DrawPath *, const Mesh *);        /* uploads a copy; 0 on failure */
 uint32_t DrawPathMeshUpdate(DrawPath *, uint32_t id, const Mesh *);   /* re-upload (chunks) */
+bool DrawPathMeshPositions(DrawPath *, uint32_t id, const float *positions, const float *normals);
+                                                        /* in place, for CPU skinning */
 uint32_t DrawPathMaterial(DrawPath *, Shader, Texture2D, Color tint, int normalMatrixLoc);
 uint32_t DrawPathStaticBatch(DrawPath *, const DrawItem *items, int count);   /* one merged mesh
                                                                                  per material, world
@@ -460,6 +467,12 @@ depth buffer cleared and its own projection; phase 1 draws it like layer 0 and n
 Static batching (B9.3): items with the same material are merged into one world-space mesh (apply
 each `world` to positions and normals); the result is a mesh id the caller adds as one item with the
 identity matrix and the merged bounding sphere.
+
+Skinning: a mesh with bone ids and weights keeps them and uploads them at raylib's attribute
+locations for `vertexBoneIds`/`vertexBoneWeights`; a material whose shader has `boneMatrices` has a
+bone-matrix location, and the submit uploads an item's `bones` (`rlSetUniformMatrices`) only for such
+a material and only when the item has them (`boneUploads` counts them). Skinned items are never
+batched. `DrawPathMeshPositions` rewrites a mesh's positions and normals in place for the CPU path.
 
 ## 5. The Scheme layer (`gameplay/script/game_s7.c`, `core/scheme/kinds.scm`)
 
@@ -658,8 +671,17 @@ queued by `draw-hud` are drawn in order; REPL poll. Headless skips the frame ent
 Models: `mesh` names resolve through the project's data root; `.glb`, `.obj` and `.iqm` load
 through raylib once per name; a missing file gets a 0.5 m cube and one warning naming the file, so a
 game runs before its art exists. `animation` selects a clip by name from the file's animations
-(`UpdateModelAnimation`, CPU skinning; B9.3 notes the bone limit); no clip of that name holds the
-rest pose. Sounds: `play-sound` loads a `.wav`/`.ogg` once per name; missing is one warning.
+(§3 Animation): each drawn model thing with clips has a clock that restarts when `animation`
+changes and runs at `animation-speed`, choosing one of raylib's 17 ms glTF frames; the pose comes
+from raylib's `UpdateModelAnimationBones` (one evaluator for the GPU path, the CPU path's
+`UpdateModelAnimation` and the socket lookup, for any bone count), not the engine's `Actor`, whose
+interpolation, aim and blending nothing here asks for and which stops at `CORE_BONE_CAPACITY`. Up
+to 24 bones: GPU skinning, `core/shaders/skinning.vs` built with `SKINNING_BONES 24` over `world.fs`
+(`CoreLoadShaderDefined`), lit and fogged like everything else; more: CPU skinning into per-thing
+draw path meshes. A clip name the file lacks holds the rest pose with one warning per model and
+name; a hitch advances a clock by at most 0.1 s. Every model is drawn at `World3DDrawMatrix`, and
+the runner's bone lookup answers for drawn, posed models, so sockets follow bones in drawing only.
+Headless does none of this. Sounds: `play-sound` loads a `.wav`/`.ogg` once per name; missing is one warning.
 `burst` presets: `muzzle-flash`, `blood`, `dust`, `sparks`, as `CoreParticles` emits with fixed
 parameters. Lighting: one GLSL 120 pair `core/shaders/world.vs` / `world.fs`: ambient plus one
 directional light from the first `light` of type `directional` (default from above), distance fog,
@@ -715,16 +737,27 @@ fresh process with the same build, seed and file reaches the same `StoreHash` at
 - `tests/regression/world3d_checks.c`: collide-and-slide into a wall and onto a floor; area
   touched/untouched, for a sphere and a box (with overlapping and a ray that tests areas); raycast against a cell and a character; line of sight; path-next around a
   wall; chunk rebuild on a cell change; transform caching (a child under a moved parent moves, a
-  child under an unmoved parent's matrix is bit-identical to last frame's).
+  child under an unmoved parent's matrix is bit-identical to last frame's); sockets with a fake bone
+  lookup (a guest draws on the bone of the first drawn model of `:of`, or of its parent model, while
+  gameplay's world position stays the rest pose; with no lookup, no bone, an undrawn or unposed
+  model, both are the rest pose).
+- `tests/regression/anim_checks.c`: the test rig (`tools/make_test_rig.py`) loads with its bones by
+  name and its clips `idle` and `wave`; GPU and CPU skinning of one pose cover the same pixels.
+  `runner_checks.c` runs `tests/regression/anim/` in a window (with and without `--skin-on-cpu`):
+  the box in the rig's hand socket is drawn over 0.2 m apart at ticks 30 and 60 while
+  `(world-position box)` is the rest pose at both, and the arm's pixels move.
 - `tests/regression/draw_path_checks.c`: key order for opaque and translucent items; radix sort
-  equals qsort order; cull counts; static batch vertex count. GL-dependent parts run under the
-  hidden window the suite already opens.
+  equals qsort order; cull counts; static batch vertex count; skinning (bones move the drawn mesh,
+  uploads only for skinned materials with bones). GL-dependent parts run under the hidden window the
+  suite already opens.
 - `tests/regression/game_checks.c`: `define-kind` walk (from `kinds_walk.scm`); the five rule
   errors; a headless bot session of 600 ticks recorded then replayed to the same hash.
 - `tools/store_bench`: 1,000 things of a 12-field kind all changing every tick, 3,600 ticks: prints
   µs per tick p50/p99, snapshot, hash. Condition 3.
 - `tools/draw_bench`: E6's method (EGL surfaceless, geometry clipped, `glFinish` per frame): 400
   items / 120 draws through the draw path, 600 frames, prints CPU µs per frame p50/p99. Condition 6.
+  Then 16 skinned test rigs on the GPU path, with and without the bone upload, and unskinned: CPU µs
+  per frame and per skinned draw, and the upload's share (B9.3's measurement).
 - `tools/net_bench` (`make -f Makefile.core build/core/net_bench`, not built by `all`): three stores
   in one process over an in-memory transport (150 ms each way, no loss), a host with 30 things of a
   10-field kind all changing every tick and two clients each moving a soldier, 3,600 ticks: prints

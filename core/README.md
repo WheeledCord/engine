@@ -75,8 +75,10 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   and a submit that switches shader and texture only when they change and uploads one MVP per item.
   It owns copies of the meshes it uploads, and merges items of one material into world-space meshes
   for static batching. The viewmodel layer is drawn last without depth testing, phase 1's stand-in
-  for its own depth clear and projection. Nothing in the engine draws through it yet; see
+  for its own depth clear and projection. The project runner draws its world through it; see
   `docs/developer/store.md` section 4.
+  Skinning: items carry bone matrices (`DrawItem.bones`), uploaded only for materials whose shader
+  has `boneMatrices` (`core/shaders/skinning.vs`); `DrawPathMeshPositions` rewrites a mesh for CPU skinning.
 - `mesh_builder`: explicit position/normal/UV emission, quad helpers and directional mapping math.
 - `skeleton`: hierarchy, local/global pose conversion, posed-pivot rotations, chain collapse and raymath skin matrices.
 - `animation`: per-instance playback, explicit FPS, frame sampling, quaternion pose blending, aim and GPU pose upload.

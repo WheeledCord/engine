@@ -15,6 +15,14 @@
 #include <time.h>
 
 #define MAX_VERTICES 65536 /* indices are unsigned short, as raylib's Mesh has them */
+/* Where rlgl binds vertexBoneIds and vertexBoneWeights in every shader it links (raylib's config.h;
+   rlgl.h declares them only under RL_SUPPORT_MESH_GPU_SKINNING, which the library's own build sets). */
+#ifndef RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEIDS
+#define RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEIDS 7
+#endif
+#ifndef RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS
+#define RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS 8
+#endif
 
 static double NowMicros(void)
 {
@@ -148,7 +156,7 @@ static void MeshRelease(DrawPathMeshData *m)
 {
     if (m->vao)
         rlUnloadVertexArray(m->vao);
-    for (int i = 0; i < 5; i++)
+    for (int i = 0; i < 7; i++)
         if (m->vbo[i])
             rlUnloadVertexBuffer(m->vbo[i]);
     free(m->positions);
@@ -156,6 +164,8 @@ static void MeshRelease(DrawPathMeshData *m)
     free(m->normals);
     free(m->colors);
     free(m->indices);
+    free(m->boneIds);
+    free(m->boneWeights);
     memset(m, 0, sizeof *m);
 }
 
@@ -229,12 +239,21 @@ static bool MeshUpload(DrawPathMeshData *m)
     }
     else
         rlDisableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR);
+    if (m->boneIds && m->boneWeights) /* as UploadMesh does under SUPPORT_GPU_SKINNING */
+    {
+        m->vbo[5] = rlLoadVertexBuffer(m->boneIds, n * 4, false);
+        rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEIDS, 4, RL_UNSIGNED_BYTE, 0, 0, 0);
+        rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEIDS);
+        m->vbo[6] = rlLoadVertexBuffer(m->boneWeights, n * 4 * (int)sizeof(float), false);
+        rlSetVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS, 4, RL_FLOAT, 0, 0, 0);
+        rlEnableVertexAttribute(RL_DEFAULT_SHADER_ATTRIB_LOCATION_BONEWEIGHTS);
+    }
     m->vbo[4] = rlLoadVertexBufferElement(m->indices,
                                           m->triangleCount * 3 * (int)sizeof(unsigned short), false);
     rlDisableVertexArray();
     rlDisableVertexBuffer();
     rlDisableVertexBufferElement();
-    return m->vbo[0] && m->vbo[1] && m->vbo[4];
+    return m->vbo[0] && m->vbo[1] && m->vbo[4] && (!m->boneIds || (m->vbo[5] && m->vbo[6]));
 }
 
 /* Fills out with an owned copy of mesh's arrays; false (with nothing allocated) when refused. */
@@ -260,8 +279,14 @@ static bool MeshCopy(DrawPathMeshData *out, const Mesh *mesh)
         out->normals = malloc((size_t)n * 3 * sizeof(float));
     if (mesh->colors)
         out->colors = malloc((size_t)n * 4);
+    bool skinned = mesh->boneIds && mesh->boneWeights;
+    if (skinned)
+    {
+        out->boneIds = malloc((size_t)n * 4);
+        out->boneWeights = malloc((size_t)n * 4 * sizeof(float));
+    }
     if (!out->positions || !out->texcoords || !out->indices || (mesh->normals && !out->normals) ||
-        (mesh->colors && !out->colors))
+        (mesh->colors && !out->colors) || (skinned && (!out->boneIds || !out->boneWeights)))
     {
         MeshRelease(out);
         return false;
@@ -273,6 +298,11 @@ static bool MeshCopy(DrawPathMeshData *out, const Mesh *mesh)
         memcpy(out->normals, mesh->normals, (size_t)n * 3 * sizeof(float));
     if (mesh->colors)
         memcpy(out->colors, mesh->colors, (size_t)n * 4);
+    if (skinned)
+    {
+        memcpy(out->boneIds, mesh->boneIds, (size_t)n * 4);
+        memcpy(out->boneWeights, mesh->boneWeights, (size_t)n * 4 * sizeof(float));
+    }
     if (mesh->indices)
         memcpy(out->indices, mesh->indices, (size_t)tris * 3 * sizeof(unsigned short));
     else
@@ -334,6 +364,22 @@ uint32_t DrawPathMeshUpdate(DrawPath *path, uint32_t id, const Mesh *mesh)
     return id;
 }
 
+bool DrawPathMeshPositions(DrawPath *path, uint32_t id, const float *positions, const float *normals)
+{
+    if (!path || id < 1 || id > (uint32_t)path->meshCount || !positions)
+        return false;
+    DrawPathMeshData *m = &path->meshes[id - 1];
+    size_t bytes = (size_t)m->vertexCount * 3 * sizeof(float);
+    memcpy(m->positions, positions, bytes);
+    rlUpdateVertexBuffer(m->vbo[0], m->positions, (int)bytes, 0);
+    if (normals && m->normals)
+    {
+        memcpy(m->normals, normals, bytes);
+        rlUpdateVertexBuffer(m->vbo[2], m->normals, (int)bytes, 0);
+    }
+    return true;
+}
+
 // ---- materials --------------------------------------------------------------------------------
 static int Location(Shader shader, int slot, const char *name, bool attribute)
 {
@@ -377,11 +423,14 @@ uint32_t DrawPathMaterial(DrawPath *path, Shader shader, Texture2D texture, Colo
     m->projectionLoc = Location(shader, SHADER_LOC_MATRIX_PROJECTION, "matProjection", false);
     m->colorLoc = Location(shader, SHADER_LOC_COLOR_DIFFUSE, "colDiffuse", false);
     m->samplerLoc = Location(shader, SHADER_LOC_MAP_DIFFUSE, "texture0", false);
+    m->bonesLoc = Location(shader, SHADER_LOC_BONE_MATRICES, "boneMatrices", false);
     m->normalLoc = normalMatrixLoc;
     m->positionAttrib = Location(shader, SHADER_LOC_VERTEX_POSITION, "vertexPosition", true);
     m->texcoordAttrib = Location(shader, SHADER_LOC_VERTEX_TEXCOORD01, "vertexTexCoord", true);
     m->normalAttrib = Location(shader, SHADER_LOC_VERTEX_NORMAL, "vertexNormal", true);
     m->colorAttrib = Location(shader, SHADER_LOC_VERTEX_COLOR, "vertexColor", true);
+    m->boneIdsAttrib = Location(shader, SHADER_LOC_VERTEX_BONEIDS, "vertexBoneIds", true);
+    m->boneWeightsAttrib = Location(shader, SHADER_LOC_VERTEX_BONEWEIGHTS, "vertexBoneWeights", true);
     return (uint32_t)++path->materialCount;
 }
 
@@ -495,7 +544,7 @@ int DrawPathStaticBatch(DrawPath *path, const DrawItem *items, int count, DrawIt
             break;
         const DrawPathMeshData *merged = &path->meshes[mesh - 1];
         out[written++] = (DrawItem){mesh, items[i].material, MatrixIdentity(), merged->center,
-                                    merged->radius, items[i].layer};
+                                    merged->radius, items[i].layer, NULL, 0};
     }
     free(used);
     free(members);
@@ -649,6 +698,15 @@ static void BindMesh(const DrawPathMeshData *mesh, const DrawPathMaterialData *m
             rlDisableVertexAttribute((unsigned int)m->colorAttrib);
         }
     }
+    if (m->boneIdsAttrib >= 0 && m->boneWeightsAttrib >= 0 && mesh->vbo[5])
+    {
+        rlEnableVertexBuffer(mesh->vbo[5]);
+        rlSetVertexAttribute((unsigned int)m->boneIdsAttrib, 4, RL_UNSIGNED_BYTE, 0, 0, 0);
+        rlEnableVertexAttribute((unsigned int)m->boneIdsAttrib);
+        rlEnableVertexBuffer(mesh->vbo[6]);
+        rlSetVertexAttribute((unsigned int)m->boneWeightsAttrib, 4, RL_FLOAT, 0, 0, 0);
+        rlEnableVertexAttribute((unsigned int)m->boneWeightsAttrib);
+    }
     rlEnableVertexBufferElement(mesh->vbo[4]);
 }
 
@@ -711,6 +769,11 @@ static void Submit(DrawPath *path, int visible, DrawStats *stats)
             rlSetUniformMatrix(m->modelLoc, item->world);
         if (m->normalLoc >= 0)
             rlSetUniformMatrix(m->normalLoc, MatrixTranspose(MatrixInvert(item->world)));
+        if (m->bonesLoc >= 0 && item->bones && item->boneCount > 0) /* only skinned materials */
+        {
+            rlSetUniformMatrices(m->bonesLoc, item->bones, item->boneCount);
+            stats->boneUploads++;
+        }
         rlDrawVertexArrayElements(0, e->triangleCount * 3, 0);
         stats->draws++;
     }

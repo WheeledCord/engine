@@ -13,6 +13,10 @@ int HeadlessChecks(void);
 /* The draw path: keys, sort, cull, static batching, and a submit under the hidden window. */
 int DrawPathChecks(void);
 
+/* The skinned test rig (tests/regression/assets/rig/test_rig.gltf) as raylib loads it: bones by
+   name and both clips. Needs the hidden window. */
+int AnimationAssetChecks(void);
+
 /* The store: kinds, fields, the tree, the tick order, rules, snapshot, hash, save and load. */
 int StoreChecks(void);
 

@@ -58,6 +58,8 @@ screen for five seconds, prefixed `game:`, besides being printed.
 | `--join ADDRESS:PORT` | join one, such as `--join 192.168.1.20:7777` |
 | `--print-field KIND FIELD` | at the end print `field KIND FIELD VALUE` for the first thing of KIND |
 | `--print-count KIND` | at the end print `count KIND N`, derived kinds included |
+| `--print-draw-position KIND` | in a window, with each `--shot-every` screenshot print `draw-position KIND TICK X Y Z`: where the first thing of KIND was drawn (a socket's bone included) |
+| `--skin-on-cpu` | in a window: skin every animated model on the CPU, as models of more than 24 bones always are (for comparing the two paths) |
 
 With no display (over ssh, say) a windowed run exits at once with `Engine: no display; run with
 --headless or under a display`.
@@ -68,6 +70,13 @@ A recording replayed in a fresh process with the same build reaches the same has
 trench run mygame --headless --bot --ticks 600 --seed 7 --record run.replay
 trench run mygame --headless --replay run.replay
 ```
+
+## Models, animation and sockets
+
+| Kind | Fields | What it does |
+|---|---|---|
+| `model` | `mesh` (file), `animation` (symbol), `animation-speed` (1), `spin`, `tint`, `for-owner`, `hidden-for-owner`, `viewmodel` | Draws each mesh of its file. With `:animation 'wave` a skinned glTF plays its clip `wave`, looping; setting `animation` to another name starts that clip from its beginning, and `animation-speed` scales the clock (2 is twice as fast, 0 holds the frame). No `animation`, or a name the file lacks (one warning per name), holds the rest pose. Models of up to 24 bones are skinned on the GPU, larger ones on the CPU. Animation is presentation only: it runs where things are drawn, never headless, and nothing in gameplay can read it. |
+| `socket` | `bone` (name), `of` (child names, up to 4) | A node that follows a bone in drawing: `(child hand (socket :bone "hand.R" :of (arms body) :at (vec3 0.3 1 -0.4)))`. It follows the first model of `:of` drawn on this machine (so the first-person arms for their owner, the body for everyone else), or with no `:of` its parent model, and everything under it is drawn with it. Gameplay reads the socket at its own `:at`, the rest pose: `(world-position item)` of a held item does not wave with the hand, so a game plays the same on every machine and in a replay. With no bone, no animation or nothing drawn to follow, it is drawn at its `:at` too. |
 
 ## Co-op
 
@@ -108,8 +117,8 @@ something up is `(attach! item (child soldier 'hand) :at (vec3 0 0 0))` and putt
 the host's, so a player asks for it with a message (`(send item 'grab self)`), and the item's `grab`
 handler, on the host, attaches it and answers; from then on the holder's machine runs the item's
 handlers and its drop is instant. `(first-child hand)` is what a hand holds. A `socket` child
-(`(child hand (socket :bone "hand.R" :of (arms body)))`) is where a held thing hangs; phase 1 has
-no bone lookup, so it sits at its own `:at`. When a holder's player leaves, or the host removes a
+(`(child hand (socket :bone "hand.R" :of (arms body)))`) is where a held thing hangs; it is drawn
+on the hand bone while the model animates, and gameplay reads it at its own `:at`. When a holder's player leaves, or the host removes a
 holder, or a client removes its own, the item is detached where the hand was, becomes the host's,
 and its `(on (orphaned))` runs there, once, so it can seat itself on the floor. `(on (parent-changed was now))` runs on every machine
 (presentation; `was` is `#f` when the thing first appears) for pickup and drop sounds.
