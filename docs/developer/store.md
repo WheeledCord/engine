@@ -612,6 +612,30 @@ fields waits for phase 2), and re-resolves cached closures. The stdin REPL evalu
 environment between frames, as `script_s7.c`'s does, and records each line as a developer command
 in the recording (§6.3).
 
+### 3.1 What the first version draws (B6, B9)
+
+- **Static batching (B9.3).** At the first frame after a `:static #t` thing (and every model under
+  it) exists, the runner merges static models by material into world-space meshes with
+  `DrawPathStaticBatch`, one batch per material per 8x8-cell region of the tilemap they stand on
+  (or per material when there is no tilemap), and draws the batches instead of the things. A
+  static thing whose position, rotation or scale is written after it was batched is an error
+  naming the flag (`position on lamp #12 changed, but lamp is :static; remove :static if it moves`);
+  a removed static thing rebuilds its region's batch at the next frame.
+- **Lights (B6).** The world shader takes the ambient light, one directional light, and up to four
+  point lights (`type 'point`, `color`, `energy`, `range`): the four nearest the camera among the
+  visible ones, lit per pixel with a fixed loop of four (unused slots have zero energy), attenuation
+  `energy * max(0, 1 - d / range)^2`. Four is the budget question 10 names ("a few dynamic lights");
+  more would cost fill on the X61's GMA 965, where pixels, not calls, are the limit (B9.6).
+- **Viewmodel (B6, B9.2 layer 3).** Models with `viewmodel #t` draw after the world, for their
+  owner only, through `DrawViewmodel` (`core/viewmodel.h`, the same pass Trenchfoot uses): the
+  local camera's position and orientation, the camera's `viewmodel-fov` field (new on `camera`,
+  default 60 degrees) and a depth range of 0.01-10 m, with the depth buffer cleared first, so a gun
+  never clips into a wall. Other machines draw them like any model (or not at all with
+  `hidden-for-owner` on the third-person copy).
+- **Sound (B6).** A `sound` thing with `playing #t` loops its `stream` through `core/audio.h` as a
+  positional emitter: volume from `volume` and distance to the local camera (linear falloff to
+  silence at 30 m), pan from the camera's right vector. Headless plays nothing.
+
 ## 6. The runner (`gameplay/game.c`)
 
 ### 6.1 Projects and entry points
