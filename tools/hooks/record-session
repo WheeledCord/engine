@@ -1,0 +1,45 @@
+#!/bin/sh
+# Record a headless bot session of a game into sessions/<game>/<name>.replay and write its
+# <name>.hashes (see docs/developer/hooks.md).
+#   tools/hooks/record-session <game dir> <name> [trench flags]
+# The defaults are --headless --bot --ticks 36000 --seed 1; flags you give come after them and win.
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+if [ $# -lt 2 ]; then
+    echo "usage: tools/hooks/record-session <game dir> <name> [trench flags]" >&2
+    exit 2
+fi
+cd "$(git rev-parse --show-toplevel)" || exit 1
+game=${1%/}
+name=$2
+shift 2
+trench=build/core/trench
+[ -x "$trench" ] || { echo "record-session: $trench is not built (make all && make -f Makefile.core build/core/trench)" >&2; exit 1; }
+[ -d "$game" ] || { echo "record-session: $game is not a directory" >&2; exit 1; }
+
+dir=sessions/$(basename "$game")
+work=$(mktemp -d) || exit 1
+trap 'rm -rf "$work"' EXIT
+
+"$trench" run "$game" --headless --bot --ticks 36000 --seed 1 "$@" --record "$work/$name.replay" >"$work/record.out" 2>&1 ||
+    { cat "$work/record.out" >&2; echo "record-session: the recording run failed" >&2; exit 1; }
+# A fresh process for each replay: the first writes the hashes, the second must reproduce them.
+"$trench" run "$game" --headless --replay "$work/$name.replay" --hash-every 60 >"$work/$name.hashes" 2>/dev/null ||
+    { echo "record-session: the first replay failed" >&2; exit 1; }
+"$trench" run "$game" --headless --replay "$work/$name.replay" --hash-every 60 >"$work/second.hashes" 2>/dev/null ||
+    { echo "record-session: the second replay failed" >&2; exit 1; }
+if ! cmp -s "$work/$name.hashes" "$work/second.hashes"; then
+    echo "record-session: the two replays disagree; nothing written:" >&2
+    diff "$work/$name.hashes" "$work/second.hashes" | head -n 6 >&2
+    exit 1
+fi
+
+mkdir -p "$dir"
+cp "$work/$name.replay" "$dir/$name.replay"
+cp "$work/$name.hashes" "$dir/$name.hashes"
+if ! grep -q "^$(basename "$game")[[:space:]]" sessions/index.txt 2>/dev/null; then
+    echo "$(basename "$game") $game" >>sessions/index.txt
+fi
+echo "recorded $dir/$name.replay ($(wc -l <"$dir/$name.hashes") hash lines); stage it and get it approved with tools/hooks/approve"

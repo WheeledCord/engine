@@ -1,0 +1,8 @@
+tools/hooks/*
+sessions/*
+core/store.c
+core/store.h
+core/store_internal.h
+core/store_save.c
+core/store_net.c
+core/store_net.h
