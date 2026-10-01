@@ -46421,11 +46421,11 @@ static hash_entry_t *hash_equal_syntax(s7_scheme *sc, s7_pointer table, s7_point
 }
 
 /* ---------------- hash symbols ---------------- */
-static s7_uint hash_map_symbol(s7_scheme *unused_sc, s7_pointer unused_table, s7_pointer key)  {return(pointer_map(key));}
+static s7_uint hash_map_symbol(s7_scheme *unused_sc, s7_pointer unused_table, s7_pointer key)  {return(raw_string_hash((const uint8_t *)symbol_name(key), symbol_name_length(key)));} /* E5 patch: by name, not address */
 
 static hash_entry_t *hash_symbol(s7_scheme *sc, s7_pointer table, s7_pointer key)
 {
-  const s7_uint loc = pointer_map(key) % hash_table_mask(table);
+  const s7_uint loc = (is_symbol(key) ? hash_map_symbol(sc, table, key) : pointer_map(key)) % hash_table_mask(table); /* E5 patch; other keys still reach here */
   for (hash_entry_t *entry = hash_table_element(table, loc); entry; entry = hash_entry_next(entry))
     if (key == hash_entry_key(entry))
       return(entry);

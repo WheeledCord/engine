@@ -2967,6 +2967,29 @@ static s7_pointer SchemeRule3(s7_scheme *sc, s7_pointer args)
                 name);
 }
 
+// Hash tables in the game environment (proposal B5.1, B5.4). A default table iterates in the same
+// order in every process (vendor/s7/PATCHES.md); an eq? table hashes its keys by address, so it
+// iterates in memory order. It is refused where it is made, the one place every later use (for-each,
+// map, iterators, copy, printing, the prelude's own helpers) passes through.
+static s7_pointer SchemeGameMakeHashTable(s7_scheme *sc, s7_pointer args)
+{
+    s7_pointer original = s7_let_ref(sc, s7_rootlet(sc), s7_make_symbol(sc, "make-hash-table"));
+    if (s7_is_pair(args) && s7_is_pair(s7_cdr(args)) &&
+        s7_cadr(args) == s7_let_ref(sc, s7_rootlet(sc), s7_make_symbol(sc, "eq?")))
+        return Fail(sc, "hash tables made with eq? iterate in memory order, which differs between runs and "
+                        "machines; make it with (make-hash-table) instead");
+    return s7_apply_function(sc, original, args);
+}
+
+// E5 T4: a weak table loses entries whenever the collector runs.
+static s7_pointer SchemeGameMakeWeakHashTable(s7_scheme *sc, s7_pointer args)
+{
+    (void)args;
+    return Fail(sc, "make-weak-hash-table is not available to games: a weak table drops entries when the "
+                    "garbage collector runs, which differs between runs and machines. Use (make-hash-table), "
+                    "or a field on a thing.");
+}
+
 // ---- registration -----------------------------------------------------------------------------
 typedef struct Call
 {
@@ -3178,7 +3201,8 @@ bool GameS7Open(Store *store, const char *preludePath)
     return true;
 }
 
-// Rule 3's names, shadowed in each game environment (§5.7).
+// Rule 3's names, shadowed in each game environment (§5.7), and the two hash table makers that
+// would let a game's order or contents differ between runs (B5.1, B5.4).
 static void Guard(s7_scheme *sc, s7_pointer env)
 {
     static const char *const names[] = {"real-time",        "current-time", "open-input-file",
@@ -3191,6 +3215,12 @@ static void Guard(s7_scheme *sc, s7_pointer env)
             original = s7_f(sc);
         s7_define(sc, env, symbol, s7_call(sc, game.guard, s7_list(sc, 3, symbol, original, env)));
     }
+    s7_define(sc, env, s7_make_symbol(sc, "make-hash-table"),
+              s7_make_function(sc, "make-hash-table", SchemeGameMakeHashTable, 0, 0, true,
+                               "(make-hash-table (size 8) eq-func typer); eq? is refused in games"));
+    s7_define(sc, env, s7_make_symbol(sc, "make-weak-hash-table"),
+              s7_make_function(sc, "make-weak-hash-table", SchemeGameMakeWeakHashTable, 0, 0, true,
+                               "not available to games"));
 }
 
 static bool LoadInto(const char *path)
