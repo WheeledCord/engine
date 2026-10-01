@@ -1795,6 +1795,13 @@ int main(int argc, char **argv)
         return PresentationChecks() ? 1 : 0;
     if (argc > 1 && !strcmp(argv[1], "--net-interrupt")) /* only the Ctrl+C-on-a-client check, also in the full run */
         return NetInterruptChecks() ? 1 : 0;
+    /* raylib 5.5 carries on after GLFW fails and crashes in rlglInit, so say why before that happens */
+    if (!getenv("DISPLAY") || !*getenv("DISPLAY"))
+    {
+        fprintf(stderr, "regression_test needs an X display for its hidden window; run it under Xvfb "
+                        "(Xvfb :99 & DISPLAY=:99 make smoke)\n");
+        return 1;
+    }
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(320, 240, "regression");
     if (!UiInit(&ui, UiThemeDefault()))
