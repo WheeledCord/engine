@@ -576,6 +576,15 @@ Each is an s7 error whose message is the sentence in proposal A4's table, with n
    so it can't write it. Send a message instead: (send other 'collect 'medkit), with a matching
    (on (collect what) ...) in soldier.`
 
+Two hash table makers are refused everywhere in the game environment (load, handlers, the REPL),
+because what they make would differ between runs (proposal B5.1, B5.4):
+`(make-hash-table n eq?)` -> `hash tables made with eq? iterate in memory order, which differs
+between runs and machines; make it with (make-hash-table) instead`, and `make-weak-hash-table` ->
+`make-weak-hash-table is not available to games: a weak table drops entries when the garbage
+collector runs, ...`. Default, `eqv?`, `equal?` and `(cons eq? hash-fn)` tables are allowed; with
+the vendored s7 patch (`vendor/s7/PATCHES.md`) a default table iterates in the same order in
+every process.
+
 The regression check loads a script per rule headless and asserts the error text's first sentence.
 
 ### 5.6 The rest of the surface

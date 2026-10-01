@@ -285,6 +285,12 @@ static void RuleChecks(void)
         {"tests/regression/rules/rule5.scm",
          "soldier #0 tick: health on soldier #1 belongs to player 2, and this handler runs for "
          "player 1, so it can't write it."},
+        {"tests/regression/rules/eq_table.scm",
+         "soldier #0 tick: hash tables made with eq? iterate in memory order, which differs between "
+         "runs and machines; make it with (make-hash-table) instead"},
+        {"tests/regression/rules/weak_table.scm",
+         "soldier #0 tick: make-weak-hash-table is not available to games: a weak table drops entries "
+         "when the garbage collector runs"},
     };
     for (size_t i = 0; i < sizeof rules / sizeof rules[0]; i++)
     {
@@ -469,6 +475,102 @@ static void ReloadChecks(void)
     remove(path);
 }
 
+// ---- hash tables iterate the same way in every process (B5.4, vendor/s7/PATCHES.md) ------------------
+
+// The numbers after "order:" in a run's log, or "" when it printed none.
+static void OrderLine(const char *log, char *out, size_t size)
+{
+    FILE *file = fopen(log, "r");
+    char line[2048];
+    out[0] = 0;
+    while (file && fgets(line, sizeof line, file))
+        if (!strncmp(line, "order:", 6))
+        {
+            snprintf(out, size, "%s", line + 6);
+            break;
+        }
+    if (file)
+        fclose(file);
+}
+
+/* A default table of 50 symbols and 20 things, iterated in three fresh processes, comes out in one
+   order. Symbols hashed by address gave a different order in most runs (4 orders in 5 before the
+   s7 patch), since each process puts them at different addresses. */
+static void HashOrderChecks(void)
+{
+    char dir[] = "build/core/hash_order_XXXXXX";
+    if (!mkdtemp(dir))
+    {
+        Expect(false, "a temporary project directory can be made under build/core");
+        return;
+    }
+    char path[300], orders[3][2048];
+    snprintf(path, sizeof path, "%s/engine.project", dir);
+    bool written = WriteText(path, "name hash-order-check\ngame game.scm\n");
+    snprintf(path, sizeof path, "%s/game.scm", dir);
+    written = written && WriteText(path, "(define-kind crate (field n 0))\n"
+                                         "(define-kind game\n"
+                                         "  (on (start)\n"
+                                         "    (let ((h (make-hash-table)))\n"
+                                         "      (do ((i 0 (+ i 1))) ((= i 50))\n"
+                                         "        (hash-table-set! h (string->symbol (format #f \"key~D\" i)) i))\n"
+                                         "      (do ((i 0 (+ i 1))) ((= i 20))\n"
+                                         "        (hash-table-set! h (spawn 'crate) (+ 100 i)))\n"
+                                         "      (display \"order:\")\n"
+                                         "      (for-each (lambda (p) (display \" \") (display (cdr p))) h)\n"
+                                         "      (newline))))\n");
+    Expect(written, "the hash order project is written");
+    for (int i = 0; written && i < 3; i++)
+    {
+        char command[700], log[320];
+        snprintf(log, sizeof log, "%s/run%d.log", dir, i);
+        snprintf(command, sizeof command, "./build/core/trench run %s --headless --ticks 1 --seed 1 > %s 2>&1", dir, log);
+        if (system(command) == -1)
+            log[0] = 0;
+        OrderLine(log, orders[i], sizeof orders[i]);
+        remove(log);
+    }
+    remove(path);
+    snprintf(path, sizeof path, "%s/engine.project", dir);
+    remove(path);
+    remove(dir);
+    int entries = 0;
+    for (const char *p = orders[0]; written && *p; p++)
+        entries += *p == ' ';
+    printf("game hash order: %d entries;%s", entries, written ? orders[0] : " not run\n");
+    Expect(written && entries == 70, "the run prints all 70 entries of its table");
+    Expect(written && !strcmp(orders[0], orders[1]) && !strcmp(orders[0], orders[2]),
+           "three fresh processes iterate a table of symbols and things in the same order");
+}
+
+/* Refused where the table is made, so at the REPL and at load as in a handler (RuleChecks has the
+   handler's sentence); the tables games can make still work. */
+static void TableChecks(void)
+{
+    Store store;
+    bool loaded = StoreInit(&store, 7) && GameS7Open(&store, "core/scheme/kinds.scm") &&
+                  GameS7LoadGame("tests/regression/rules/eq_table.scm");
+    Expect(loaded, "the eq table game loads (its table is made in a handler)");
+    Expect(loaded && Refused("(make-hash-table 8 eq?)", "hash tables made with eq? iterate in memory order, which "
+                                                        "differs between runs and machines; make it with "
+                                                        "(make-hash-table) instead"),
+           "an eq? table is refused at the REPL too, with the advice");
+    Expect(loaded && Refused("(make-weak-hash-table 8)", "make-weak-hash-table is not available to games: a weak "
+                                                         "table drops entries when the garbage collector runs"),
+           "a weak table is refused at the REPL, saying why");
+    Expect(loaded && Answer("(let ((h (make-hash-table))) (set! (h 'a) 1) (h 'a))", "1") &&
+               Answer("(let ((h (make-hash-table 8 eqv?))) (set! (h 'b) 2) (h 'b))", "2") &&
+               Answer("(let ((h (make-hash-table 8 equal?))) (set! (h '(c)) 3) (h '(c)))", "3") &&
+               Answer("(let ((h (hash-table 'd 4))) (h 'd))", "4"),
+           "default, eqv?, equal? and (hash-table ...) tables still work in the game environment");
+    Expect(loaded && Answer("(let ((h (make-hash-table))) (set! (h 'a) 1) (set! (h (spawn 'soldier)) 2) "
+                            "(set! (h \"s\") 3) (hash-table-entries h))",
+                            "3"),
+           "a default table holding a symbol takes a thing and a string after it");
+    GameS7Close();
+    StoreFree(&store);
+}
+
 int GameChecks(void)
 {
     failures = 0;
@@ -477,6 +579,8 @@ int GameChecks(void)
     RuleChecks();
     LimitChecks();
     ReloadChecks();
+    TableChecks();
+    HashOrderChecks();
     GameS7SetErrorSink(NULL);
     Store store;
     Expect(StoreInit(&store, 1) && !GameS7Open(&store, "core/scheme/no-such-prelude.scm"),
