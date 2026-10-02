@@ -627,11 +627,11 @@ static void NetInterpolate(void)
     if (run.netLive)
     {
         StoreNetLinkInterpolate(&run.link, run.world.node, "position");
-        StoreNetLinkInterpolate(&run.link, run.world.node, "rotation");
+        StoreNetLinkInterpolateAngle(&run.link, run.world.node, "rotation");
         return;
     }
     StoreNetInterpolate(&run.link.net, run.world.node, "position");
-    StoreNetInterpolate(&run.link.net, run.world.node, "rotation");
+    StoreNetInterpolateAngle(&run.link.net, run.world.node, "rotation");
 }
 
 static void Note(int peer, int channel, const void *data, size_t size);

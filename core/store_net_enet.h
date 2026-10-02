@@ -45,6 +45,7 @@ typedef struct StoreNetLink
     {
         StoreKind kind;
         int field;
+        bool angle;
     } lerps[STORE_NET_LINK_LERPS];
     int lerpCount;
 } StoreNetLink;
@@ -77,6 +78,14 @@ bool StoreNetLinkJoin(StoreNetLink *link, Store *store, const StoreNetConfig *co
  * @param field Name of a shared FLOAT or VEC3 field of kind.
  * @return True when registered; false for an unknown kind or field, another type, or too many. */
 bool StoreNetLinkInterpolate(StoreNetLink *link, StoreKind kind, const char *field);
+
+/** @brief Registers an angle field for shortest-arc interpolation (StoreNetInterpolateAngle), also for a
+ * session not yet joined.
+ * @param link Link, after StoreNetLinkHost or StoreNetLinkJoin.
+ * @param kind Kind.
+ * @param field Name of a shared FLOAT or VEC3 field of kind, in radians.
+ * @return True when registered; false for an unknown kind or field, another type, or too many. */
+bool StoreNetLinkInterpolateAngle(StoreNetLink *link, StoreKind kind, const char *field);
 
 /** @brief Hands every ENet event since the last poll to store_net (and to the tap).
  * @param link Link.

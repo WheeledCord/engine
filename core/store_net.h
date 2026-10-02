@@ -151,6 +151,17 @@ bool StoreNetEffect(StoreNet *net, const char *name, const char *what, Vector3 a
  * @return True when registered; false for an unknown kind or field, a local field, or another type. */
 bool StoreNetInterpolate(StoreNet *net, StoreKind kind, const char *field);
 
+/** @brief Blends an angle field of other machines' things between states by the shortest arc (B3.5).
+ *
+ * Like StoreNetInterpolate, but the values are radians and each component moves the short way round:
+ * 3.1 to -3.1 passes through pi, not through 0 (Quake 3's LerpAngle rule). The result is not wrapped
+ * again, so it may leave -pi..pi between states.
+ * @param net Net, after StoreNetHost or StoreNetJoin.
+ * @param kind Kind.
+ * @param field Name of a shared FLOAT or VEC3 field of kind, in radians.
+ * @return True when registered; false for an unknown kind or field, a local field, or another type. */
+bool StoreNetInterpolateAngle(StoreNet *net, StoreKind kind, const char *field);
+
 /** @brief Returns this machine's player id.
  * @param net Net.
  * @return 1 on the host, 0 on a dedicated host, the welcome's id on a client, 0 before it. */

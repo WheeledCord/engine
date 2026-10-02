@@ -57,9 +57,10 @@ static uint32_t watchTick;
 static int64_t watchArrived = -1; /* ... arrived at this `now` */
 
 // Field and kind indices, the same in every store because every store declares them in one order.
-static StoreKind gameKind, unitKind, partKind, shellKind;
+static StoreKind gameKind, unitKind, partKind, shellKind, compassKind;
 enum { POSITION, N, MOOD, SEEN, SCORE, TARGET };
 enum { ALIVE, AGE };
+enum { YAW, FACING };
 static int joinedField, leftField;
 static StoreSymbol pokeEvent, lookEvent, orphanedEvent, joinedEvent, leftEvent, tickEvent;
 static int orphanedRuns[MACHINES]; /* orphaned handlers run on each machine since the last reset */
@@ -277,6 +278,7 @@ static void Declare(Store *s, bool differ)
                              Field("extra", STORE_INT)};
     StoreFieldDecl part[] = {Field("level", STORE_INT)};
     StoreFieldDecl shell[] = {Field("alive", STORE_BOOL), Field("age", STORE_FLOAT)};
+    StoreFieldDecl compass[] = {Field("yaw", STORE_FLOAT), Field("facing", STORE_VEC3)};
     shell[ALIVE].init.type = STORE_BOOL;
     shell[ALIVE].init.as.b = true;
     shell[AGE].init.type = STORE_FLOAT;
@@ -284,6 +286,7 @@ static void Declare(Store *s, bool differ)
     unitKind = StoreDeclareKind(s, "unit", -1, unit, differ ? 7 : 6, NULL);
     partKind = StoreDeclareKind(s, "part", -1, part, 1, NULL);
     shellKind = StoreDeclareKind(s, "shell", -1, shell, 2, NULL);
+    compassKind = StoreDeclareKind(s, "compass", -1, compass, 2, NULL);
     if (differ)
         StoreDeclareKind(s, "medkit", -1, NULL, 0, NULL);
     joinedField = StoreFieldIndex(s, gameKind, "joined");
@@ -583,6 +586,15 @@ int NetChecks(void)
         registered = StoreNetInterpolate(&machines[i].net, unitKind, "position") &&
                      StoreNetInterpolate(&machines[i].net, shellKind, "age") && registered;
     Expect(registered, "a VEC3 and a FLOAT field register for interpolation");
+    registered = true;
+    for (int i = 0; i < 3; i++)
+        registered = StoreNetInterpolateAngle(&machines[i].net, compassKind, "yaw") &&
+                     StoreNetInterpolateAngle(&machines[i].net, compassKind, "facing") && registered;
+    Expect(registered, "a FLOAT and a VEC3 field register for angle interpolation");
+    Expect(!StoreNetInterpolateAngle(&machines[0].net, unitKind, "n") &&
+               !StoreNetInterpolateAngle(&machines[0].net, unitKind, "mood") &&
+               !StoreNetInterpolateAngle(&machines[0].net, unitKind, "nothing"),
+           "an INT or SYMBOL field, or no field, does not register for angle interpolation");
     Expect(!StoreNetInterpolate(&machines[0].net, unitKind, "n") &&
                !StoreNetInterpolate(&machines[0].net, unitKind, "mood") &&
                !StoreNetInterpolate(&machines[0].net, shellKind, "alive") &&
@@ -805,6 +817,48 @@ int NetChecks(void)
            "a remote shell is never spent without its fuse at 1, nor its fuse at 1 while live");
     for (int i = 0; i < 9; i++)
         StoreRemove(i < 8 ? host : a, shells[i]);
+    Step(40);
+
+    // Angles blend by the shortest arc: a yaw of 3.0 turned to -3.0 passes through pi (0.28 radians),
+    // not through 0 (6.0 radians the long way). Every reading of the receivers between the two states
+    // must stay near +-pi; a straight blend crosses 0 at the halfway render tick.
+    StoreId needle = StoreSpawn(host, compassKind, 0, STORE_NULL, STORE_NO_SYMBOL);
+    StoreValue yaw = {STORE_FLOAT, {.f = 3.0f}}, facing = Vec(3.0f, 0.0f, -3.0f);
+    StoreSet(host, needle, YAW, &yaw);
+    StoreSet(host, needle, FACING, &facing);
+    Step(60);
+    yaw.as.f = -3.0f;
+    facing = Vec(-3.0f, 0.0f, 3.0f);
+    StoreSet(host, needle, YAW, &yaw);
+    StoreSet(host, needle, FACING, &facing);
+    float leastYaw = 99.0f, leastX = 99.0f, leastZ = 99.0f, mostY = 0.0f;
+    int between = 0;
+    for (int t = 0; t < 60; t++)
+    {
+        Step(1);
+        for (int i = 1; i <= 2; i++)
+        {
+            StoreId seen[2];
+            StoreValue y, f;
+            if (StoreThings(&machines[i].store, compassKind, seen, 2) != 1 ||
+                !StoreGet(&machines[i].store, seen[0], YAW, &y) ||
+                !StoreGet(&machines[i].store, seen[0], FACING, &f))
+                continue;
+            between += y.as.f != 3.0f && y.as.f != -3.0f;
+            leastYaw = fminf(leastYaw, fabsf(y.as.f));
+            leastX = fminf(leastX, fabsf(f.as.v.x));
+            leastZ = fminf(leastZ, fabsf(f.as.v.z));
+            mostY = fmaxf(mostY, fabsf(f.as.v.y));
+        }
+    }
+    printf("net: angles: smallest |yaw| %.3f, |facing.x| %.3f, |facing.z| %.3f over %d blended readings "
+           "(must stay above 2.9)\n",
+           (double)leastYaw, (double)leastX, (double)leastZ, between);
+    Expect(between >= 2, "the turn from 3.0 to -3.0 is seen blended on the receivers");
+    Expect(leastYaw > 2.9f, "a FLOAT angle turns through pi, not through 0");
+    Expect(leastX > 2.9f && leastZ > 2.9f && mostY == 0.0f,
+           "each component of a VEC3 angle turns through pi, and a component at rest stays put");
+    StoreRemove(host, needle);
     Step(40);
 
     // A client removes its own soldier while it holds a thing (B1, B3.7): the thing is detached to
