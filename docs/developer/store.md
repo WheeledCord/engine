@@ -347,6 +347,12 @@ registers one system (areas). It holds no GL objects: geometry is CPU arrays; §
 | `tilemap` | node | `width` INT 16, `depth` INT 16, `cell-size` FLOAT 2, `height` FLOAT 3, `cells` GRID of INT (width x depth, 0 open, 1 solid; declared with max = width, height = depth at the kind level, so the grid is 64 x 64 at most and the tilemap's `width`/`depth` say how much is used), `floor-texture` STRING, `wall-texture` STRING, `ceiling-texture` STRING |
 | `sound` | node | `stream` STRING, `volume` FLOAT 1, `playing` BOOL |
 
+Over the network (§9.2) the runner registers a node's `position` with `StoreNetInterpolate` and its
+`rotation` with `StoreNetInterpolateAngle`, so another machine's thing turns by the shortest arc: a yaw
+going from 3.1 to -3.1 passes through pi, not through 0. Between ticks `World3DUpdateTransforms` blends
+`%prev-rotation` toward `rotation` as quaternions (a slerp, which also takes the short way), so drawing needs
+no such rule.
+
 Kind settings in a `(child eye (camera :at v :fov 75 :for-owner #t))` form are just field writes
 after spawn (`:at` is `position`); the Scheme layer does that (§5.3). Settings on `(is character
 :radius 0.35)` are default overrides for the derived kind (`StoreKindSetDefault`). An area's
@@ -934,7 +940,8 @@ ENet in the runner and over an in-memory queue in the checks. It may include `st
   tick, per sender, `renderTick = newest sender tick received + ticks since it arrived - 6` (100 ms);
   every remote thing from that sender is written (with `StoreSetEngine`) as it stood at `renderTick`:
   fields registered with `StoreNetInterpolate(net, kind, field)` (any FLOAT or VEC3, not only
-  transforms) are blended between the two received states either side of `renderTick` (equal values
+  transforms) are blended between the two received states either side of `renderTick` (angles registered with
+  `StoreNetInterpolateAngle` by the shortest arc; equal values
   are copied, so a -0.0 at rest stays -0.0 and a still game hashes the same everywhere); every other
   field, the header (parent, owner) and spawns and removes come from the earlier of the two. A parent
   change between the two states is a jump (the later value). So a remote thing never shows two
@@ -1005,6 +1012,7 @@ void StoreNetBeforeTick(StoreNet *);   /* applies received states and messages; 
 void StoreNetAfterTick(StoreNet *);    /* captures and sends every 3rd tick */
 bool StoreNetEffect(StoreNet *, const char *name, const char *what, Vector3 at);
 bool StoreNetInterpolate(StoreNet *, StoreKind kind, const char *field);
+bool StoreNetInterpolateAngle(StoreNet *, StoreKind kind, const char *field);   /* same, radians, shortest arc */
 int  StoreNetPlayer(const StoreNet *);                             /* this machine's player id */
 int  StoreNetPlayers(const StoreNet *, int *out, int max);
 uint64_t StoreNetStateHash(const StoreNet *);   /* shared fields of replicated things, by network id,
@@ -1012,6 +1020,10 @@ uint64_t StoreNetStateHash(const StoreNet *);   /* shared fields of replicated t
                                                    every machine once the game has been still */
 void StoreNetFree(StoreNet *);
 ```
+
+`StoreNetInterpolateAngle` registers a FLOAT or VEC3 field in radians that is blended between states by the
+shortest arc, `a + remainderf(b - a, 2 pi) * t` per component (Quake 3's LerpAngle rule, in radians), so 3.1
+to -3.1 turns through pi, not through 0; the result is not wrapped again.
 
 And in the store (`core/store.h`), for native code (B7): `bool StoreOwnedHere(const Store *, StoreId)`
 (its root owner is one of this machine's local owners) and `int StoreFieldOffset(const Store *,
@@ -1027,12 +1039,16 @@ typedef struct StoreNetLink { StoreNet net; uint64_t wireSent, wireReceived; /* 
 bool StoreNetLinkHost(StoreNetLink *, Store *, const StoreNetConfig *, uint16_t port);
 bool StoreNetLinkJoin(StoreNetLink *, Store *, const StoreNetConfig *, const char *address, uint16_t port);
 bool StoreNetLinkInterpolate(StoreNetLink *, StoreKind, const char *field);
+bool StoreNetLinkInterpolateAngle(StoreNetLink *, StoreKind, const char *field);
 void StoreNetLinkPoll(StoreNetLink *, uint32_t timeoutMs);
 void StoreNetLinkFlush(StoreNetLink *);
 const char *StoreNetLinkEnded(const StoreNetLink *);   /* NULL while live or joining, else why */
 void StoreNetLinkSetTap(StoreNetLink *, StoreNetLinkTap, void *user);   /* sees every received packet */
 void StoreNetLinkClose(StoreNetLink *, double lingerSeconds);
 ```
+
+`StoreNetLinkInterpolateAngle` is `StoreNetInterpolateAngle` for a link, replayed when a session opens like
+`StoreNetLinkInterpolate`.
 
 The link supplies `config.send`, maps transport peers as §9.5 says, retries a join for 5 s, and
 counts ENet's own wire totals (headers and acknowledgements included), which is what a byte gate

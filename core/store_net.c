@@ -5,6 +5,7 @@
 
 #include "store_internal.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -105,6 +106,7 @@ typedef struct Lerp
 {
     StoreKind kind;
     int field;
+    bool angle; /* radians: blended by the shortest arc */
 } Lerp;
 
 /* A thing this machine stopped owning by its own write, with the first capture that shows it. */
@@ -1745,6 +1747,17 @@ static void Apply(StoreNet *net, int from, const State *was, const State *now)
 // so a still game hashes the same everywhere.
 static float Blend(float a, float b, float t) { return a == b ? b : a + (b - a) * t; }
 
+// An angle in radians blends by the shortest arc: 3.1 to -3.1 sweeps 0.083 through pi, not 6.2 through 0.
+// The same rule as Quake 3's LerpAngle (code/qcommon/q_math.c), which cgame applies to entity angles in
+// CG_InterpolateEntityPosition (code/cgame/cg_ents.c), in radians. The result is not wrapped again.
+static float BlendAngle(float a, float b, float t)
+{
+    if (a == b)
+        return b;
+    float d = remainderf(b - a, 2.0f * PI);
+    return a + d * t;
+}
+
 /* A peer's things' registered fields at renderTick, between the state written (a) and the first
    received after renderTick (b; none: hold a, no extrapolation). Across a parent change there is no
    blend: a's value, until renderTick reaches b and it jumps to b's. */
@@ -1776,11 +1789,12 @@ static void Interpolate(StoreNet *net, int from, const State *a, const State *b,
             StoreValue va, vb;
             ValueOf(k->fields[f].type, pa, &va);
             ValueOf(k->fields[f].type, eb ? b->bytes + eb->block + k->offsets[f] : pa, &vb);
+            float (*blend)(float, float, float) = d->lerps[l].angle ? BlendAngle : Blend;
             if (k->fields[f].type == STORE_FLOAT)
-                va.as.f = Blend(va.as.f, vb.as.f, t);
+                va.as.f = blend(va.as.f, vb.as.f, t);
             else
-                va.as.v = (Vector3){Blend(va.as.v.x, vb.as.v.x, t), Blend(va.as.v.y, vb.as.v.y, t),
-                                    Blend(va.as.v.z, vb.as.v.z, t)};
+                va.as.v = (Vector3){blend(va.as.v.x, vb.as.v.x, t), blend(va.as.v.y, vb.as.v.y, t),
+                                    blend(va.as.v.z, vb.as.v.z, t)};
             StoreSetEngine(s, id, f, &va);
         }
     }
@@ -2362,7 +2376,7 @@ bool StoreNetEffect(StoreNet *net, const char *name, const char *what, Vector3 a
     return !b->failed;
 }
 
-bool StoreNetInterpolate(StoreNet *net, StoreKind kind, const char *field)
+static bool AddLerp(StoreNet *net, StoreKind kind, const char *field, bool angle)
 {
     if (!net || !net->data)
         return false;
@@ -2375,8 +2389,18 @@ bool StoreNetInterpolate(StoreNet *net, StoreKind kind, const char *field)
     if (!lerps)
         return false;
     d->lerps = lerps;
-    lerps[d->lerpCount++] = (Lerp){kind, f};
+    lerps[d->lerpCount++] = (Lerp){kind, f, angle};
     return true;
+}
+
+bool StoreNetInterpolate(StoreNet *net, StoreKind kind, const char *field)
+{
+    return AddLerp(net, kind, field, false);
+}
+
+bool StoreNetInterpolateAngle(StoreNet *net, StoreKind kind, const char *field)
+{
+    return AddLerp(net, kind, field, true);
 }
 
 int StoreNetPlayer(const StoreNet *net) { return net ? net->player : 0; }

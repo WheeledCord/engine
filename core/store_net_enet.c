@@ -149,7 +149,7 @@ bool StoreNetLinkJoin(StoreNetLink *link, Store *store, const StoreNetConfig *co
     return true;
 }
 
-bool StoreNetLinkInterpolate(StoreNetLink *link, StoreKind kind, const char *field)
+static bool AddLerp(StoreNetLink *link, StoreKind kind, const char *field, bool angle)
 {
     if (!link || !link->open || link->lerpCount == STORE_NET_LINK_LERPS)
         return false;
@@ -157,11 +157,23 @@ bool StoreNetLinkInterpolate(StoreNetLink *link, StoreKind kind, const char *fie
     const StoreFieldDecl *d = StoreFieldAt(link->store, kind, f);
     if (!d || (d->flags & STORE_LOCAL) || (d->type != STORE_FLOAT && d->type != STORE_VEC3))
         return false;
-    if (link->net.data && !StoreNetInterpolate(&link->net, kind, field))
+    if (link->net.data && !(angle ? StoreNetInterpolateAngle(&link->net, kind, field)
+                                  : StoreNetInterpolate(&link->net, kind, field)))
         return false;
     link->lerps[link->lerpCount].kind = kind;
-    link->lerps[link->lerpCount++].field = f;
+    link->lerps[link->lerpCount].field = f;
+    link->lerps[link->lerpCount++].angle = angle;
     return true;
+}
+
+bool StoreNetLinkInterpolate(StoreNetLink *link, StoreKind kind, const char *field)
+{
+    return AddLerp(link, kind, field, false);
+}
+
+bool StoreNetLinkInterpolateAngle(StoreNetLink *link, StoreKind kind, const char *field)
+{
+    return AddLerp(link, kind, field, true);
 }
 
 // ---- polling --------------------------------------------------------------------------------------
@@ -176,8 +188,13 @@ static void Connected(StoreNetLink *link)
         return;
     }
     for (int i = 0; i < link->lerpCount; i++)
-        StoreNetInterpolate(&link->net, link->lerps[i].kind,
-                            StoreFieldAt(link->store, link->lerps[i].kind, link->lerps[i].field)->name);
+    {
+        const char *name = StoreFieldAt(link->store, link->lerps[i].kind, link->lerps[i].field)->name;
+        if (link->lerps[i].angle)
+            StoreNetInterpolateAngle(&link->net, link->lerps[i].kind, name);
+        else
+            StoreNetInterpolate(&link->net, link->lerps[i].kind, name);
+    }
 }
 
 static void HostEvent(StoreNetLink *link, const CoreNetEvent *e)
