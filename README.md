@@ -1,4 +1,5 @@
-<img width="758" height="166" alt="logo" src="https://github.com/user-attachments/assets/19a28a5b-7b5e-472b-88a8-4936c977a2cb" />
+<img width="1516" height="332" alt="logo" src="https://github.com/user-attachments/assets/88411dfc-dbc6-4271-8780-d1e7bc8d4829" />
+
 
 A C engine built on raylib, targeting OpenGL 2.1.
 
