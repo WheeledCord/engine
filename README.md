@@ -1,4 +1,4 @@
-# engine
+<img width="758" height="166" alt="logo" src="https://github.com/user-attachments/assets/19a28a5b-7b5e-472b-88a8-4936c977a2cb" />
 
 A C engine built on raylib, targeting OpenGL 2.1.
 
