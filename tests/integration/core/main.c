@@ -29,6 +29,7 @@ enum
     TOONLIT,
     NORMALENC,
     LITPROP,
+    HEIGHTENC,
     SHADER_COUNT
 };
 typedef struct Project
@@ -419,7 +420,8 @@ static bool Init(void *context)
                                   {NULL, "tests/integration/core/shaders/depth_preview.fs"},
                                   {"core/shaders/skinning.vs", "core/shaders/toonlit.fs"},
                                   {"core/shaders/skinning.vs", "core/shaders/normal_encode.fs"},
-                                  {"core/shaders/lit.vs", "core/shaders/toonlit.fs"}};
+                                  {"core/shaders/lit.vs", "core/shaders/toonlit.fs"},
+                                  {"core/shaders/skinning.vs", "core/shaders/height_encode.fs"}};
     if (!CoreLoadShaders(shaders, SHADER_COUNT, p->shaders))
         return false;
     if (p->shaders[SKIN].locs[SHADER_LOC_BONE_MATRICES] < 0 ||
@@ -438,6 +440,8 @@ static bool Init(void *context)
           p->shaders[NORMALENC].locs[SHADER_LOC_VERTEX_NORMAL] >= 0 &&
               p->shaders[NORMALENC].locs[SHADER_LOC_MATRIX_NORMAL] >= 0,
           "normal-encode shader carries skinned world-space normals");
+    Check(p, p->shaders[HEIGHTENC].locs[SHADER_LOC_MATRIX_MODEL] >= 0,
+          "height-encode shader reads the model matrix for world height");
     /* The same surface without skinning, for props. A static mesh has no bone weights, so skinning
        one would gather every vertex onto the origin; this path must ask for none. */
     Check(p,
@@ -876,7 +880,8 @@ int main(int argc, char **argv)
                            .targetFps = 60,
                            .fixed_dt = fixed,
                            .max_frame_dt = 0.25,
-                           .windowFlags = FLAG_WINDOW_RESIZABLE,
+                           /* A smoke run checks itself; nobody needs to see it. */
+                           .windowFlags = FLAG_WINDOW_RESIZABLE | (project.smoke ? FLAG_WINDOW_HIDDEN : 0),
                            /* A skinned character drawn into a target whose depth it samples back. */
                            .requirements = {.gpuSkinning = true, .sampleableDepth = true}};
     EngineProject hooks = {Init, FrameInput, Update, Draw, Shutdown};

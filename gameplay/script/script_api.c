@@ -416,8 +416,8 @@ SCRIPT_BODY(draw_sprite)
     const SpriteSheet *sheet = ScriptHostSheet(host, a[0].as.string);
     if (!sheet)
         return ScriptBool(false);
-    DrawTexturePro(sheet->atlas, SpriteSheetFrameRect(sheet, SpriteSheetFrameAt(sheet, a[2].as.number)),
-                   SpriteSheetGroundRect(sheet, a[1].as.vector2), (Vector2){0, 0}, 0, WHITE);
+    SpriteSheetDraw(sheet, SpriteSheetFrameAt(sheet, a[2].as.number),
+                    (SpritePresentation){.ground = a[1].as.vector2, .scale = 1, .tint = WHITE});
     return ScriptBool(true);
 }
 

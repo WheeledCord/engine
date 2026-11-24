@@ -58,7 +58,9 @@ typedef struct IsoMover
 
 bool IsoMoverInit(IsoMover *mover, IsoHex start, int pathCapacity);
 void IsoMoverFree(IsoMover *mover);
-/* Plans a walk to the target and starts it. The whole route is walked unless the caller cuts it. */
+/* Plans a walk to the target and starts it. The whole route is walked unless the caller cuts it.
+   Called part-way through a step, the walk goes on from the hex being entered, keeping the step under
+   way, so the mover never jumps; false then still leaves that one step to finish. */
 bool IsoMoverGoTo(IsoMover *mover, IsoPathfinder *finder, IsoHex target, IsoBlockedFn blocked,
                   void *user);
 /* Cuts the planned walk to at most this many hexes, for a game that rations movement. Called after

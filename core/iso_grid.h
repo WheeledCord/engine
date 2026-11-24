@@ -82,8 +82,9 @@ typedef struct IsoDrawItem
 {
     IsoHex hex;
     void *user; /* whatever the project needs in order to draw it */
+    int order;  /* among items on the same hex, lower draws first: a stack of blocks, a rider */
 } IsoDrawItem;
 /* Orders items far to near, so painting them in order lays nearer things over further ones. Items
-   sharing a hex share a depth, and keep no guaranteed order between themselves. */
+   sharing a hex share a depth and are drawn by `order`; equal orders keep no guaranteed order. */
 void IsoDepthSort(IsoDrawItem *items, int count);
 #endif

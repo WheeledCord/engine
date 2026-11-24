@@ -1,4 +1,4 @@
-# Trench Engine
+<img width="1516" height="332" alt="logo" src="https://github.com/user-attachments/assets/88411dfc-dbc6-4271-8780-d1e7bc8d4829" />
 
 Trench Engine is a general-purpose engine for 2D and 3D games, written in C on top of raylib and
 targeting modest hardware (OpenGL 2.1, GLSL 120). The engine does the heavy lifting in C —

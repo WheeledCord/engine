@@ -1004,6 +1004,41 @@ void UiLabelAligned(UiContext *ui, UiRect rect, const char *text, UiTextAlignmen
     UiRestoreClip(ui, previous);
 }
 
+int UiLabelWrapped(UiContext *ui, UiRect rect, const char *text)
+{
+    if (!ui || !ui->state || !text)
+        return 0;
+    int pitch = ui->theme.itemHeight, lines = 0;
+    char line[256];
+    while (*text && (lines + 1) * pitch <= rect.height)
+    {
+        // The longest prefix that fits, remembering the last end that falls before a space or break.
+        int length = 0, fit = 0;
+        while (text[length] && text[length] != '\n' && length < (int)sizeof line - 1)
+        {
+            memcpy(line, text, (size_t)length + 1);
+            line[length + 1] = 0;
+            if (UiTextWidth(ui, line) > rect.width)
+                break;
+            length++;
+            if (text[length] == ' ' || text[length] == '\n' || !text[length])
+                fit = length;
+        }
+        if (!fit && *text != '\n')
+            fit = length ? length : 1;
+        memcpy(line, text, (size_t)fit);
+        line[fit] = 0;
+        UiLabel(ui, (UiRect){rect.x, rect.y + lines * pitch, rect.width, pitch}, line);
+        lines++;
+        text += fit;
+        while (*text == ' ')
+            text++;
+        if (*text == '\n')
+            text++;
+    }
+    return lines;
+}
+
 void UiIndent(UiContext *ui, UiRect rect, UiContentFn draw, void *user)
 {
     if (!ui || !ui->state)

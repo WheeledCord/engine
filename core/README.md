@@ -45,7 +45,9 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
 - `sprite_sheet`: a grid atlas played frame by frame, its plain-text sidecar, and the ground anchor
   saying where in a cell its subject's feet are, so a drawer never has to guess at the offset. Any
   producer will do: baked out of 3D, hand-drawn, whatever fills the grid. `SpriteAnim` keeps the
-  clock, as Actor does for skeletons.
+  clock, as Actor does for skeletons. Loading finds each frame's opaque rectangle, and draws cover
+  only that where the result is pixel-identical (`SpriteSheetCanTrim`: zoom 1 or 2, unrotated), so a
+  cell's transparent margin costs no fill.
 - `particles`: a fixed-capacity pool of physically simulated billboards -- age, gravity, drag,
   curl-noise turbulence, an optional pull toward an anchor and a rotation spin-up -- with a `step`
   hook run after each particle moves and a `look` hook that can replace a particle's drawn size,
@@ -58,6 +60,37 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   leans rather than mirroring. Screen conversion both ways, hex neighbours, distance and facing,
   the cell outlines that tile exactly, and the far-to-near order an isometric scene must be painted
   in. No camera and no map size: those belong to a project.
+- `iso_map`: a map on those two grids, as Fallout's mapper and RPG Maker lay one out: a floor
+  tile per tile, path tiles per hex over it (their outline worked out per pixel from the hexes
+  around, a smooth wandering edge rather than a hexagonal one), solid blocks stacked on tiles,
+  connected walls one per tile (cardinal neighbours as in OpenRA's wall connector; adjustable
+  thickness and placement, with filled regions). Walls reuse the top and side surfaces of an
+  ordinary block sheet as clipped textured polygons; no complete-mask sprite sets are needed.
+  Styles referring to an existing block share its atlas. Legacy 16-frame wall sheets still work
+  when width is zero. Wall topology is cached and navigation conservatively intersects whole
+  hex cells with the wall footprint. Roofs sit over tiles (a building's roof found by flood fill,
+  as Fallout hides one; a pitched roof autotiles its slopes and ridge), props have hex footprints,
+  and objects are left for a game to spawn. A tileset names the kinds; maps store them by name. The ground is
+  composited once into point-filtered chunk textures (512 texels, 256 where the device's texture
+  limit is under 1024) and refreshed only where edited; `IsoFog` is the map's edge fog, built the same
+  way from the bounds alone (clear a given number of tiles in, dithered by `SpriteDitherDensity`) and
+  drawn around its exactly computed clear middle; blocks come as
+  two slices (as do walls) sorted on their own hexes so characters beside them sort correctly. `Tools/map-editor`
+  edits these.
+- `sprite_bake`: the pixel-art bake -- a toon pass and a world-normal pass through the same camera,
+  Floyd-Steinberg over the bands between light and shadow, more toward a wall's foot when ground
+  shade is on (a height pass says how high each pixel is) -- plus planar cast shadows and a live draw
+  with the same shaders, texture clean-up (median denoise, blur, flatten, brightness, median-cut
+  colours) and median-cut palette reduction. `Tools/sprite-baker` and `Tools/sprite-maker`
+  both use it, so everything baked shares one look.
+- `model_import`: any model in metres, Y up: FBX and OBJ through ufbx (vendor/ufbx), which converts
+  units and axes in the geometry and the animation curves alike -- the centimetre armature of a
+  Mixamo download included -- and glTF, IQM, M3D and VOX through raylib. Skeletons come out with
+  parents first and unweighted end bones dropped to fit the bone budget; clips can be held in place
+  and added from other files by bone name, their root motion carried relative to the source's rest.
+- `file_dialog`: the system's Open, Save and Choose Folder dialogs for tools, through
+  tinyfiledialogs (vendor/tinyfiledialogs): native on Windows and macOS, zenity or kdialog on Linux.
+  Blocking, as those dialogs are; a queued answer lets scripted checks go through it with no window.
 - `fps_camera`: movement smoothing, accepted-distance gait, footfall events, breath/bob and viewmodel sway. Input mappings and collision/terrain policy belong to callers.
 - `viewmodel`: one scoped projection/depth function and camera-space transform helper.
 - `transform`: local/world movement, rotation, conversion and bounded turning. Forward is +Z, up
@@ -90,7 +123,20 @@ Modules are ordinary C translation units, built into `build/core/libcore.a`. Pub
   are the caller's policy.
 - `ui_menu`: right-click menus with screen-clamped cascading submenus and visible chain movement when
   space is made at a screen edge.
-- `ui_containers`: retained draggable panels and fixed square tiles placed in dock columns.
+- `ui_browser`: a folder as a grid to pick from, images as thumbnails loaded a few a frame, with a
+  name filter, Up, and Folder for the system dialog -- Hammer's texture browser, for any tool.
+- `ui_containers`: retained draggable panels, fixed dock columns, and `UiDockBoard` floating apps.
+  Body click activates on release; body drag detaches one app; grip drag moves its attached bar.
+  Apps snap to neighbours and viewport edges, retain edge pins across resizes, and capture the
+  entire pointer gesture including release outside. Rectangles/groups are caller-owned data;
+  the engine supplies interaction, not application icons, game rules or a persistence format.
+  Optional `groupHandle` makes an app a clickable root that drags the entire group. `edgeOnly`
+  uses caller-owned `dragBackup` storage to restore all apps after an invalid drop; `verticalStack`
+  keeps the root first and docks to left/right sides and corners. Removing a child preserves the
+  root position. Existing unconstrained floating boards retain their behavior.
+- `pixel_draw`: integer-world-pixel lines and paths. Pixels are 1×1 world quads, so a camera's
+  zoom scales their stair steps and width exactly like point-filtered sprite texels. Closed paths
+  blend each shared corner once. This is opt-in; ordinary smooth line rendering is unchanged.
 
 Panels and menus both use `UiDrawWindow`, so the 2px frame, title bar, clipping and content origin
 cannot drift. Menu roots use an explicit menu title or the clicked context name. Submenus use the
@@ -135,6 +181,22 @@ clamp. These are explicit defaults: overriding fixed_dt with zero still means va
 zero means uncapped, and max_frame_dt zero means no clamp. No camera, UI or GPU feature is assumed.
 All EngineProject callbacks are now optional; absent Update keeps running, absent Draw leaves the
 application clear colour. Invalid configuration logs a reason before returning failure.
+
+`idleFps` and `backgroundFps` optionally lower the frame limit (zero disables each policy). Background
+means unfocused or minimized. Idle means no keyboard, mouse, text or resize activity for 250 ms and
+an application `NeedsContinuousFrames` callback returning false. Input restores the normal limit;
+fixed updates still consume elapsed time. Animation, exports and tests can keep continuous frames.
+The lower limits never raise an already lower `targetFps`.
+Tools can also opt into `waitWhenIdle`: EndDrawing waits for window/input events instead of polling
+when the application reports no continuous work. Mouse/key/window events wake it immediately. The
+callback must keep returning true for animation, text cursor blinking, pending work or deadlines;
+external jobs must likewise keep frames running until completed. This option defaults to false.
+
+`IsoMapQueryCache` caches collision grids and roof regions using keys from their source contents.
+Zero-initialise it, call `IsoMapCachedBlocking`/`IsoMapCachedRoofRegion`, and release it with
+`IsoMapQueryCacheFree`. Returned buffers are borrowed. Resizes, undo, direct map-array edits and
+changed tileset blocking/footprints automatically invalidate the relevant result. Allocation failure
+returns NULL. This avoids rebuilding collision or flood-filling a stationary actor's roof each frame.
 
 `EngineApplicationDefault()` combines config, callbacks, context and clear colour. Run it with
 `EngineRunApplication` from your own `main`, or define only `EngineApplicationMain(argc, argv)`: the
@@ -207,3 +269,27 @@ between building and rendering a deferred frame. Clip rectangles are stored per 
 indents retain the existing intersection semantics. No offscreen texture, shader or new GPU requirement
 is introduced. For custom images/rendered views, use UiDrawCustom with a draw-only callback and data
 that survives until rendering; direct raylib drawing inside BuildUi would execute too early.
+
+## Model import texture overrides
+
+`ModelImport` loads FBX/OBJ material images through ufbx and GLB/glTF images through raylib.
+FBX texture nodes are resolved to their first usable file image (not a layered-shader evaluator);
+embedded PNG/JPEG signatures and relocated Windows filenames are handled. Import reports include
+the number of textured materials, including zero when the source has no images.
+
+`ModelImportSetAlbedo(imported, path)` replaces all base-colour maps with an importer-owned
+image, keeps UVs/geometry/animation intact and uses a white material tint. NULL/empty restores
+the exact imported maps and tints. A failed load leaves the active appearance unchanged.
+`ModelImportFree` also frees any active override; callers must not unload these textures directly.
+Other material channels are not overridden. References: Godot `modules/fbx/fbx_document.cpp:126-136,
+1053-1075`; raylib `src/rmodels.c:1193-1210` documents model/texture lifetime separation.
+
+Sprite baking uses geometric normals, the imported base colour, the existing lighting bands and
+Floyd–Steinberg dither. Imported normal/AO maps do not override that style, and baking does not
+silently change a model's texture sampler. Texture cleanup and source-colour palette reduction
+remain separate, explicit import operations.
+
+An authored scene plate can set `backdrop 1` in its `.prop` sidecar. Collected map pieces carry
+that role so frontends draw them after terrain and before standing objects. Collision remains
+independent (`blocking`, footprint and map collision paths). Ordinary props default to standing
+pieces; backdrops do not need a second copy of their texture for each placed object.

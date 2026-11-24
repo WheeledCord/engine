@@ -170,6 +170,8 @@ static int DepthOrder(const void *lhs, const void *rhs)
         return a->hex.x < b->hex.x ? -1 : 1;
     if (a->hex.y != b->hex.y)
         return a->hex.y < b->hex.y ? -1 : 1;
+    if (a->order != b->order)
+        return a->order < b->order ? -1 : 1;
     return 0;
 }
 void IsoDepthSort(IsoDrawItem *items, int count)

@@ -4,7 +4,9 @@
 
 #include "sprite_sheet.h"
 #include "file.h"
+#include <limits.h>
 #include "texture.h"
+#include "rlgl.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,6 +106,39 @@ static bool ParseMeta(const char *text, SpriteSheetMeta *out)
         return false;
     return out->frameCount <= out->columns * out->rows;
 }
+/* Each frame's bounding box of pixels with any alpha, in atlas coordinates. NULL (draw whole cells)
+   when the image does not cover the grid, since a cell past its edge samples wrapped texels. */
+static Rectangle *OpaqueRects(Image image, const SpriteSheetMeta *m)
+{
+    if (image.width < m->columns * m->cellWidth || image.height < m->rows * m->cellHeight)
+        return NULL;
+    Color *pixels = LoadImageColors(image);
+    Rectangle *rects = calloc((size_t)m->frameCount, sizeof *rects);
+    if (!pixels || !rects)
+    {
+        UnloadImageColors(pixels);
+        free(rects);
+        return NULL;
+    }
+    for (int f = 0; f < m->frameCount; f++)
+    {
+        int cx = f % m->columns * m->cellWidth, cy = f / m->columns * m->cellHeight;
+        int x0 = INT_MAX, y0 = INT_MAX, x1 = -1, y1 = -1;
+        for (int y = 0; y < m->cellHeight; y++)
+            for (int x = 0; x < m->cellWidth; x++)
+                if (pixels[(cy + y) * image.width + cx + x].a)
+                {
+                    x0 = x < x0 ? x : x0;
+                    x1 = x > x1 ? x : x1;
+                    y0 = y < y0 ? y : y0;
+                    y1 = y;
+                }
+        rects[f] = x1 < 0 ? (Rectangle){(float)cx, (float)cy, 0, 0}
+                          : (Rectangle){(float)(cx + x0), (float)(cy + y0), (float)(x1 - x0 + 1), (float)(y1 - y0 + 1)};
+    }
+    UnloadImageColors(pixels);
+    return rects;
+}
 bool SpriteSheetLoad(SpriteSheet *out, const char *imagePath, const char *sheetPath)
 {
     *out = (SpriteSheet){0};
@@ -115,8 +150,23 @@ bool SpriteSheetLoad(SpriteSheet *out, const char *imagePath, const char *sheetP
     CoreFreeFile(text);
     if (!ok)
         return false;
-    Texture2D atlas = {0};
-    if (!CoreLoadTexture(&atlas, imagePath, CoreTextureOptionsDefault()))
+    /* What CoreLoadTexture does, keeping the decoded image long enough to find each frame's opaque
+       area: raylib's LoadTexture is LoadImage plus LoadTextureFromImage, so the upload is the same. */
+    char resolved[1024];
+    const char *actual = CoreResolvePath(imagePath, resolved, sizeof resolved);
+    Image image = actual && FileExists(actual) ? LoadImage(actual) : (Image){0};
+    if (!image.data)
+        return false;
+    Texture2D atlas = LoadTextureFromImage(image);
+    if (atlas.id)
+    {
+        CoreTextureOptions options = CoreTextureOptionsDefault();
+        SetTextureFilter(atlas, options.filter);
+        SetTextureWrap(atlas, options.wrap);
+        out->opaque = OpaqueRects(image, &meta);
+    }
+    UnloadImage(image);
+    if (!atlas.id)
         return false;
     out->atlas = atlas;
     out->meta = meta;
@@ -125,17 +175,35 @@ bool SpriteSheetLoad(SpriteSheet *out, const char *imagePath, const char *sheetP
 void SpriteSheetUnload(SpriteSheet *sheet)
 {
     CoreUnloadTexture(&sheet->atlas);
+    free(sheet->opaque);
     *sheet = (SpriteSheet){0};
+}
+static int ClampFrame(const SpriteSheet *sheet, int frame)
+{
+    if (frame >= sheet->meta.frameCount)
+        frame = sheet->meta.frameCount - 1;
+    return frame < 0 ? 0 : frame;
 }
 Rectangle SpriteSheetFrameRect(const SpriteSheet *sheet, int frame)
 {
-    if (frame < 0)
-        frame = 0;
-    if (frame >= sheet->meta.frameCount)
-        frame = sheet->meta.frameCount - 1;
+    frame = ClampFrame(sheet, frame);
     int column = frame % sheet->meta.columns, row = frame / sheet->meta.columns;
     return (Rectangle){(float)(column * sheet->meta.cellWidth), (float)(row * sheet->meta.cellHeight),
                        (float)sheet->meta.cellWidth, (float)sheet->meta.cellHeight};
+}
+Rectangle SpriteSheetFrameOpaqueRect(const SpriteSheet *sheet, int frame)
+{
+    return sheet->opaque ? sheet->opaque[ClampFrame(sheet, frame)] : SpriteSheetFrameRect(sheet, frame);
+}
+bool SpriteSheetCanTrim(Vector2 corner, float scale)
+{
+    /* rlgl applies its push/pop transform to vertices first, then the modelview (the 2D camera). */
+    Matrix t = rlGetMatrixTransform(), m = rlGetMatrixModelview();
+    if (t.m1 != 0 || t.m4 != 0 || m.m1 != 0 || m.m4 != 0)
+        return false;
+    float sx = m.m0 * t.m0 * scale, sy = m.m5 * t.m5 * scale;
+    float x = m.m0 * (t.m0 * corner.x + t.m12) + m.m12, y = m.m5 * (t.m5 * corner.y + t.m13) + m.m13;
+    return sx >= 1 && sy >= 1 && sx == floorf(sx) && sy == floorf(sy) && x == floorf(x) && y == floorf(y);
 }
 CoreClip SpriteSheetClip(const SpriteSheet *sheet)
 {
@@ -178,6 +246,19 @@ void SpriteSheetDraw(const SpriteSheet *sheet, int frame, SpritePresentation p)
 {
     if (!sheet || !sheet->atlas.id || p.scale < 0) return;
     Rectangle source = SpriteSheetFrameRect(sheet, frame);
+    Vector2 corner = {p.ground.x - sheet->meta.anchorX * p.scale, p.ground.y - sheet->meta.anchorY * p.scale};
+    if (!p.flipX && !p.flipY && p.rotation == 0 && SpriteSheetCanTrim(corner, p.scale))
+    {
+        /* Only the opaque part, offset from the cell's corner: the rest would blend nothing. */
+        Rectangle part = SpriteSheetFrameOpaqueRect(sheet, frame);
+        if (part.width <= 0 || part.height <= 0) return;
+        DrawTexturePro(sheet->atlas, part, (Rectangle){corner.x + (part.x - source.x) * p.scale,
+                       corner.y + (part.y - source.y) * p.scale, part.width * p.scale, part.height * p.scale},
+                       (Vector2){0}, 0, p.tint);
+        return;
+    }
+    /* shortcut: flipped frames draw whole cells, because the flip below shifts the source a cell over
+       (raylib already mirrors a negative width) and so samples the next cell; trim them once fixed. */
     float width = source.width * p.scale, height = source.height * p.scale;
     float anchorX = p.flipX ? source.width - sheet->meta.anchorX : sheet->meta.anchorX;
     float anchorY = p.flipY ? source.height - sheet->meta.anchorY : sheet->meta.anchorY;

@@ -124,6 +124,13 @@ bool CoreCheckCapabilities(CoreRequirements r)
     return true;
 }
 
+int CoreMaxTextureSize(void)
+{
+    GLint size = 0;
+    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &size);
+    return size;
+}
+
 bool CoreCheckGraphicsErrors(const char *where)
 {
     bool ok = true;

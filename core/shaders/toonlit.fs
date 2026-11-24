@@ -13,8 +13,11 @@ uniform vec3 lightDir;    // world-space, points from the surface toward the lig
 uniform vec3 lightColor;
 uniform vec3 ambientColor;
 uniform float toonCutoff; // dot(N,L) at or above this is lit
+uniform int clipGround;
+varying float fragClipHeight;
 void main()
 {
+    if(clipGround!=0 && fragClipHeight<0.0) discard;
     vec4 tex=texture2D(texture0,fragTexCoord);
     if(tex.a<=0.0) discard;
     vec3 n=normalize(fragNormal);

@@ -127,6 +127,9 @@ bool UiTextFieldActive(const UiContext *ui);
 bool UiTextFieldFocused(const UiContext *ui, const char *text);
 void UiLabel(UiContext *ui, UiRect rect, const char *text);
 void UiLabelAligned(UiContext *ui, UiRect rect, const char *text, UiTextAlignment alignment);
+/* Word-wrapped at spaces (a word wider than rect is broken), '\n' a hard break, one line per
+   theme.itemHeight, stopping at rect's bottom. Returns the number of lines drawn. */
+int UiLabelWrapped(UiContext *ui, UiRect rect, const char *text);
 void UiIndent(UiContext *ui, UiRect rect, UiContentFn draw, void *user);
 
 #endif

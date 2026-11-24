@@ -24,12 +24,26 @@ typedef struct SpriteSheet
 {
     Texture2D atlas;
     SpriteSheetMeta meta;
+    /* Per frame, set by SpriteSheetLoad: see SpriteSheetFrameOpaqueRect. NULL in a sheet built by
+       hand, which then draws whole cells; SpriteSheetUnload frees it. */
+    Rectangle *opaque;
 } SpriteSheet;
 /* sheetPath is the plain-text sidecar; imagePath the atlas texture it describes. */
 bool SpriteSheetLoad(SpriteSheet *out, const char *imagePath, const char *sheetPath);
 void SpriteSheetUnload(SpriteSheet *sheet);
 /* Frame's source rectangle within the atlas, in raster order; frame is clamped to [0, frameCount). */
 Rectangle SpriteSheetFrameRect(const SpriteSheet *sheet, int frame);
+/* The part of that rectangle holding pixels with any alpha, found once at load, so a draw can skip
+   the transparent margin of a cell, which costs fill and blends nothing. Zero size when the frame is
+   empty (it draws nothing); the whole frame rectangle when the sheet has no scan (built by hand). */
+Rectangle SpriteSheetFrameOpaqueRect(const SpriteSheet *sheet, int frame);
+/* Whether drawing only the opaque rectangle, at its offset from a cell whose top left is at `corner`
+   drawn at `scale`, gives exactly the pixels of the whole cell under the current rlgl transform and
+   2D camera: when texels land on whole pixels from a whole-pixel corner (zoom 1 or 2, unrotated).
+   Elsewhere (zoom 0.5, say) pixel centres sit on texel edges, where the texture-coordinate rounding of
+   a smaller quad can pick the neighbouring texel, so drawers draw the whole cell there instead.
+   Assumes raylib's one-unit-per-pixel projection. SpriteSheetDraw and IsoMapPieceDraw both ask it. */
+bool SpriteSheetCanTrim(Vector2 corner, float scale);
 /* The clip this sheet describes, for anything that wants to time it itself. */
 CoreClip SpriteSheetClip(const SpriteSheet *sheet);
 /* Elapsed seconds of playback to a frame index, by the one rule in playback.h. */
@@ -59,7 +73,8 @@ typedef struct SpritePresentation { Vector2 ground; float scale, rotation; Color
 typedef struct SpriteDrawItem { const SpriteSheet *sheet; const SpriteAnim *animation; SpritePresentation presentation; uint64_t sequence; } SpriteDrawItem;
 /** Returns a presentation with unit scale, white tint, and an origin-ground position. */
 SpritePresentation SpritePresentationDefault(void);
-/** Draws frame at its anchored ground position with scale, tint, rotation and optional source flips. */
+/** Draws frame at its anchored ground position with scale, tint, rotation and optional source flips.
+    Unflipped and unrotated, only the frame's opaque rectangle is drawn where SpriteSheetCanTrim. */
 void SpriteSheetDraw(const SpriteSheet *sheet, int frame, SpritePresentation presentation);
 /** Draws the current frame of an animation using the same presentation rules as SpriteSheetDraw. */
 void SpriteAnimDraw(const SpriteAnim *anim, SpritePresentation presentation);

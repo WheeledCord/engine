@@ -6,11 +6,14 @@
 // asserts on a value read back: a pixel, a rectangle, a return code. Run with no arguments for the
 // checks that share one window, and with --runner for the ones that need the engine's own loop.
 #define _DEFAULT_SOURCE
+#include "core/capabilities.h"
 #include "core/collision3d.h"
 #include "core/engine.h"
 #include "core/fps_camera.h"
 #include "core/frame_uniforms.h"
 #include "core/iso_grid.h"
+#include "core/iso_map.h"
+#include "core/sprite_bake.h"
 #include "core/network.h"
 #include "core/net_clock.h"
 #include "core/net_sync.h"
@@ -22,6 +25,8 @@
 #include "core/sprite_sheet.h"
 #include "core/texture.h"
 #include "core/playback.h"
+#include "core/pixel_draw.h"
+#include "core/model_import.h"
 #include "core/skeleton.h"
 #include "core/animation.h"
 #include "core/rig_file.h"
@@ -33,10 +38,12 @@
 #include "core/transform.h"
 #include "core/ui.h"
 #include "core/ui_document.h"
+#include "core/ui_containers.h"
 #include "gameplay/runtime.h"
 #include "gameplay/script/script_s7.h"
 #include "gameplay/scene.h"
 #include "rlgl.h"
+#include <GL/gl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1263,6 +1270,28 @@ static bool CountingUpdate(GameplayRuntime *r, double dt, const EngineInput *inp
     return ++updates < 4;
 }
 
+typedef struct PacingProbe
+{
+    double start, idleTime, activeTime;
+    int idleFrames, activeFrames;
+    bool continuous;
+} PacingProbe;
+static bool PacingInit(void *context)
+{
+    ((PacingProbe *)context)->start = GetTime();
+    return true;
+}
+static bool PacingContinuous(void *context) { return ((PacingProbe *)context)->continuous; }
+static bool PacingUpdate(void *context, double dt, const EngineInput *input)
+{
+    (void)input;
+    PacingProbe *probe = context;
+    double elapsed = GetTime() - probe->start;
+    if (elapsed > .5 && elapsed < .95) { probe->idleTime += dt; probe->idleFrames++; }
+    probe->continuous = elapsed >= 1;
+    if (elapsed > 1.2) { probe->activeTime += dt; probe->activeFrames++; }
+    return elapsed < 1.6;
+}
 static int RunnerChecks(void)
 {
     static GameplayRuntime runtime;
@@ -1275,6 +1304,23 @@ static int RunnerChecks(void)
     EngineRunApplication(&app);
     Check(updates > 0 && engineStep == worldStep,
           "gameplay ticks at the rate the engine was actually started with");
+    PacingProbe probe = {0};
+    app = EngineApplicationDefault();
+    app.config.windowFlags = FLAG_WINDOW_HIDDEN;
+    app.config.fixed_dt = 0;
+    app.config.idleFps = 15;
+    app.callbacks.Init = PacingInit;
+    app.callbacks.Update = PacingUpdate;
+    app.NeedsContinuousFrames = PacingContinuous;
+    app.context = &probe;
+    Check(EngineRunApplication(&app) == 0 && probe.idleFrames > 2 && probe.activeFrames > 5 &&
+              probe.idleTime / probe.idleFrames > .045 && probe.activeTime / probe.activeFrames < .035,
+          "idle frame pacing lowers work and continuous activity restores the normal rate");
+    app.config.idleFps = -1;
+    Check(EngineRunApplication(&app) != 0, "negative idle FPS is rejected before creating a window");
+    app.config.idleFps = 0;
+    app.config.backgroundFps = -1;
+    Check(EngineRunApplication(&app) != 0, "negative background FPS is rejected before creating a window");
     printf("REGRESSION TEST (runner) failures=%d checks=%d\n", failures, checks);
     return failures ? 1 : 0;
 }
@@ -1479,7 +1525,7 @@ static void IsoGridChecks(void)
     int count = 0;
     for (int x = 0; x < 8; x++)
         for (int y = 0; y < 8; y++)
-            items[count++] = (IsoDrawItem){{x, y}, NULL};
+            items[count++] = (IsoDrawItem){.hex = {x, y}};
     // Shuffle deterministically, so the sort is doing the work and not the order they went in.
     for (int i = count - 1; i > 0; i--)
     {
@@ -1501,10 +1547,10 @@ static void IsoGridChecks(void)
         IsoHex behind = {4, 4}, front = IsoHexNeighbour(behind, (IsoDir)dir);
         if (IsoHexToScreen(front).y <= IsoHexToScreen(behind).y)
             continue; // a level step: neither is in front, nothing to prove
-        IsoDrawItem pair[2] = {{front, NULL}, {behind, NULL}};
+        IsoDrawItem pair[2] = {{.hex = front}, {.hex = behind}};
         IsoDepthSort(pair, 2);
         coversBoth &= pair[0].hex.x == behind.x && pair[0].hex.y == behind.y;
-        IsoDrawItem swapped[2] = {{behind, NULL}, {front, NULL}};
+        IsoDrawItem swapped[2] = {{.hex = behind}, {.hex = front}};
         IsoDepthSort(swapped, 2);
         coversBoth &= swapped[0].hex.x == behind.x && swapped[0].hex.y == behind.y;
     }
@@ -1513,7 +1559,7 @@ static void IsoGridChecks(void)
     IsoHex level = IsoHexNeighbour((IsoHex){4, 4}, ISO_E);
     Check(IsoHexToScreen(level).y == IsoHexToScreen((IsoHex){4, 4}).y,
           "a level step really is level, so the tie is a real tie");
-    IsoDrawItem tie[2] = {{level, NULL}, {{4, 4}, NULL}}, retie[2] = {{{4, 4}, NULL}, {level, NULL}};
+    IsoDrawItem tie[2] = {{.hex = level}, {.hex = {4, 4}}}, retie[2] = {{.hex = {4, 4}}, {.hex = level}};
     IsoDepthSort(tie, 2);
     IsoDepthSort(retie, 2);
     Check(tie[0].hex.x == retie[0].hex.x && tie[0].hex.y == retie[0].hex.y,
@@ -1583,6 +1629,129 @@ static void SpriteSheetChecks(void)
     SpriteSheetMeta bad = sheet.meta;
     bad.anchorY = bad.cellHeight + 1;
     Check(!SpriteSheetWriteMeta(path, &bad), "an anchor outside its own cell is refused");
+}
+/* Draws `draw` into scratch under `camera` over a fixed backdrop and returns the picture. */
+static Image TrimShot(Camera2D camera, bool overwrite, void (*draw)(const SpriteSheet *, int), const SpriteSheet *sheet, int which)
+{
+    BeginTextureMode(scratch);
+    ClearBackground(overwrite ? RED : (Color){40, 80, 120, 255});
+    BeginMode2D(camera);
+    if (overwrite)
+    {
+        /* Writes every fragment as it is, so a quad's transparent margin shows instead of blending away. */
+        rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD);
+        BeginBlendMode(BLEND_CUSTOM);
+    }
+    draw(sheet, which);
+    if (overwrite)
+        EndBlendMode();
+    EndMode2D();
+    EndTextureMode();
+    return LoadImageFromTexture(scratch.texture);
+}
+static void TrimWholeCell(const SpriteSheet *sheet, int which)
+{
+    Rectangle cell = SpriteSheetFrameRect(sheet, which % 2);
+    Rectangle at = SpriteSheetGroundRect(sheet, (Vector2){100, 100});
+    if (which < 4)
+        DrawTexturePro(sheet->atlas, cell, at, (Vector2){0}, 0, WHITE);
+    else /* scaled 3x and turned 30 degrees about the cell corner, as SpriteSheetDraw places it */
+        DrawTexturePro(sheet->atlas, cell, (Rectangle){100 - 4 * 3, 100 - 8 * 3, 8 * 3, 8 * 3}, (Vector2){0}, 30, WHITE);
+}
+static void TrimSprite(const SpriteSheet *sheet, int which)
+{
+    SpritePresentation p = SpritePresentationDefault();
+    p.ground = (Vector2){100, 100};
+    if (which >= 4) { p.scale = 3; p.rotation = 30; }
+    SpriteSheetDraw(sheet, which % 2, p);
+}
+static void TrimPiece(const SpriteSheet *sheet, int which)
+{
+    IsoMapPiece piece = {.ground = {100, 100}, .sheet = sheet, .frame = which % 2, .sliceFrom = -1e6f, .sliceTo = 1e6f};
+    IsoMapPieceDraw(&piece, WHITE);
+}
+static void SpriteTrimChecks(void)
+{
+    // Two 8x8 cells: frame 0 holds a block at (2..4, 3..5) and one pixel of alpha 1 at (5, 6), frame 1
+    // nothing. Odd offsets would put a trimmed quad's edges through pixel centres at zoom 0.5.
+    Image atlas = GenImageColor(16, 8, BLANK);
+    for (int y = 3; y <= 5; y++)
+        for (int x = 2; x <= 4; x++)
+            ImageDrawPixel(&atlas, x, y, (Color){(unsigned char)(60 * x), (unsigned char)(40 * y), 200, (unsigned char)(x == 3 ? 128 : 255)});
+    ImageDrawPixel(&atlas, 5, 6, (Color){255, 255, 255, 1});
+    char png[256], meta[256];
+    snprintf(png, sizeof png, "%s", Scratch("regression_trim.png"));
+    snprintf(meta, sizeof meta, "%s", Scratch("regression_trim.sheet"));
+    bool written = ExportImage(atlas, png);
+    UnloadImage(atlas);
+    SpriteSheetMeta m = {8, 8, 2, 1, 2, 1.0f, true, 4, 8};
+    SpriteSheet sheet;
+    if (!written || !SpriteSheetWriteMeta(meta, &m) || !SpriteSheetLoad(&sheet, png, meta))
+    {
+        Check(false, "the trim test sheet loads");
+        return;
+    }
+    Rectangle o = SpriteSheetFrameOpaqueRect(&sheet, 0), none = SpriteSheetFrameOpaqueRect(&sheet, 1);
+    Check(o.x == 2 && o.y == 3 && o.width == 4 && o.height == 4,
+          "a frame's opaque rectangle bounds every pixel with any alpha, even alpha 1");
+    Check(none.width == 0 && none.height == 0 && none.x == 8 && none.y == 0,
+          "a frame with no opaque pixel has an empty opaque rectangle at its cell");
+    SpriteSheet byHand = {.atlas = sheet.atlas, .meta = m};
+    Rectangle whole = SpriteSheetFrameOpaqueRect(&byHand, 1);
+    Check(whole.x == 8 && whole.width == 8 && whole.height == 8, "a sheet built by hand draws whole cells");
+
+    // Drawing only the opaque part changes no pixel, at every zoom the games use and turned.
+    const float zooms[] = {.5f, 1, 2};
+    bool same = true;
+    for (int z = 0; z < 3; z++)
+        for (int which = 0; which < 6; which++) /* frames 0 and 1: sprite, map piece, sprite turned */
+        {
+            Camera2D camera = {.offset = {3, 5}, .zoom = zooms[z]};
+            Image expected = TrimShot(camera, false, TrimWholeCell, &sheet, which);
+            Image actual = TrimShot(camera, false, which / 2 == 1 ? TrimPiece : TrimSprite, &sheet, which);
+            Color *e = LoadImageColors(expected), *a = LoadImageColors(actual);
+            int differ = 0;
+            for (int i = 0; i < expected.width * expected.height; i++)
+                differ += !Same(e[i], a[i]);
+            if (differ)
+                printf("trim: zoom %g case %d differs in %d pixels\n", zooms[z], which, differ);
+            same &= !differ;
+            UnloadImageColors(e); UnloadImageColors(a);
+            UnloadImage(expected); UnloadImage(actual);
+        }
+    Check(same, "a trimmed sprite or map piece draws the same pixels as its whole cell");
+
+    // The quad itself covers only the opaque part: under a blend that writes every fragment, the
+    // cell's transparent margin and an empty frame leave the backdrop alone. Cell corner (96, 92).
+    Camera2D flat = {.zoom = 1};
+    for (int piece = 0; piece < 2; piece++)
+    {
+        void (*draw)(const SpriteSheet *, int) = piece ? TrimPiece : TrimSprite;
+        Image shot = TrimShot(flat, true, draw, &sheet, 0);
+        ImageFlipVertical(&shot);
+        bool margin = Same(GetImageColor(shot, 96, 92), RED) && Same(GetImageColor(shot, 103, 99), RED) &&
+                      !Same(GetImageColor(shot, 98, 95), RED);
+        UnloadImage(shot);
+        shot = TrimShot(flat, true, draw, &sheet, 1);
+        ImageFlipVertical(&shot);
+        bool empty = true;
+        for (int y = 92; y < 100; y++)
+            for (int x = 96; x < 104; x++)
+                empty &= Same(GetImageColor(shot, x, y), RED);
+        UnloadImage(shot);
+        Check(margin, piece ? "a map piece's quad stops at its frame's opaque rectangle"
+                            : "a sprite's quad stops at its frame's opaque rectangle");
+        Check(empty, piece ? "a map piece with an empty frame draws nothing" : "an empty sprite frame draws nothing");
+    }
+    // Where texels do not land on whole pixels, the whole cell is drawn so nothing can change.
+    Check(SpriteSheetCanTrim((Vector2){96, 92}, 1) && SpriteSheetCanTrim((Vector2){96, 92}, 2) &&
+              !SpriteSheetCanTrim((Vector2){96.5f, 92}, 1) && !SpriteSheetCanTrim((Vector2){96, 92}, 0.5f),
+          "trimming is exact only at a whole-pixel corner and a whole-number scale");
+    Image half = TrimShot((Camera2D){.zoom = 0.5f}, true, TrimSprite, &sheet, 0);
+    ImageFlipVertical(&half);
+    Check(!Same(GetImageColor(half, 48, 46), RED), "at zoom 0.5 a sprite still draws its whole cell");
+    UnloadImage(half);
+    SpriteSheetUnload(&sheet);
 }
 static void SpritePresentationChecks(void)
 {
@@ -1709,6 +1878,31 @@ static void IsoMoveChecks(void)
     int full = IsoMoverRemainingSteps(&mover);
     IsoMoverTruncate(&mover, full + 50);
     Check(IsoMoverRemainingSteps(&mover) == full, "cutting past the end of a route changes nothing");
+    // A new destination mid-step: the walk carries on from the hex being entered, without a jump,
+    // even when the new route lies back past the hex it left.
+    IsoMoverStop(&mover);
+    mover.hex = (IsoHex){7, 6};
+    mover.hexesPerSecond = 1;
+    IsoMoverGoTo(&mover, &finder, goal, NULL, NULL);
+    IsoMoverUpdate(&mover, 0.5f);
+    IsoHex leaving = mover.hex, entering = mover.path.hexes[mover.step];
+    IsoDir back = (IsoDir)((IsoHexDirection(leaving, entering) + 3) % ISO_DIR_COUNT);
+    IsoHex behind = IsoHexNeighbour(IsoHexNeighbour(leaving, back), back);
+    Vector2 before = IsoMoverScreen(&mover);
+    bool routed = IsoMoverGoTo(&mover, &finder, behind, NULL, NULL);
+    Vector2 after = IsoMoverScreen(&mover);
+    Check(routed && fabsf(after.x - before.x) <= 1 && fabsf(after.y - before.y) <= 1,
+          "a walk sent elsewhere mid-step stays where it is drawn");
+    IsoHex first = mover.hex;
+    for (int i = 0; i < 1000 && IsoHexDistance(first, leaving) == 0 && IsoMoverMoving(&mover); i++)
+    {
+        IsoMoverUpdate(&mover, 0.01f);
+        first = mover.hex;
+    }
+    Check(IsoHexDistance(first, entering) == 0, "a walk sent elsewhere mid-step first enters the hex it was entering");
+    mover.hexesPerSecond = 1000;
+    IsoMoverUpdate(&mover, 1.0f);
+    Check(IsoHexDistance(mover.hex, behind) == 0 && !IsoMoverMoving(&mover), "and then walks to the new destination");
     IsoMoverFree(&mover);
     IsoPathfinderFree(&finder);
 }
@@ -3793,6 +3987,535 @@ static void NetAppearedVanishedChecks(void)
     CoreNetSessionLeave(&host);
 }
 
+static void PixelDrawChecks(void)
+{
+    Vector2 hex[6]; IsoHexCellCorners((IsoHex){0,0},hex);
+    for(int i=0;i<6;i++) { hex[i].x+=40; hex[i].y+=30; }
+    BeginTextureMode(scratch); ClearBackground(BLACK);
+    Check(CoreDrawPixelPath(hex,6,true,WHITE),"pixel hex path accepts native world coordinates");
+    EndTextureMode();
+    Image native=LoadImageFromTexture(scratch.texture); ImageFlipVertical(&native);
+    BeginTextureMode(scratch); ClearBackground(BLACK);
+    BeginMode2D((Camera2D){.zoom=2});
+    CoreDrawPixelPath(hex,6,true,WHITE);
+    EndMode2D(); EndTextureMode();
+    Image zoomed=LoadImageFromTexture(scratch.texture); ImageFlipVertical(&zoomed);
+    bool exact=true; int visible=0;
+    for(int y=0;y<60;y++) for(int x=0;x<80;x++)
+    {
+        Color a=GetImageColor(native,x,y); visible+=a.r>0;
+        for(int sy=0;sy<2;sy++) for(int sx=0;sx<2;sx++)
+            if(!Same(a,GetImageColor(zoomed,x*2+sx,y*2+sy))) exact=false;
+    }
+    Check(exact && visible>60,"world hex at zoom two is an exact nearest 2x native raster, not screen-width GL lines");
+    Texture2D raster=LoadTextureFromImage(native);
+    SetTextureFilter(raster,TEXTURE_FILTER_POINT);
+    const float scales[]={.5f,1,2};
+    for(int z=0;z<3;z++)
+    {
+        Camera2D camera={.offset={3,5},.zoom=scales[z]};
+        BeginTextureMode(scratch); ClearBackground(BLACK); BeginMode2D(camera);
+        DrawTexture(raster,0,0,WHITE); EndMode2D(); EndTextureMode();
+        Image expected=LoadImageFromTexture(scratch.texture);
+        BeginTextureMode(scratch); ClearBackground(BLACK); BeginMode2D(camera);
+        CoreDrawPixelPath(hex,6,true,WHITE); EndMode2D(); EndTextureMode();
+        Image actual=LoadImageFromTexture(scratch.texture);
+        bool matches=true;
+        int ax0=10000,ay0=10000,ax1=-1,ay1=-1,ex0=10000,ey0=10000,ex1=-1,ey1=-1;
+        for(int y=0;y<actual.height;y++) for(int x=0;x<actual.width;x++)
+        {
+            Color a=GetImageColor(actual,x,y),e=GetImageColor(expected,x,y);
+            if(!Same(a,e)) matches=false;
+            if(a.r) { if(x<ax0) ax0=x; if(x>ax1) ax1=x; if(y<ay0) ay0=y; if(y>ay1) ay1=y; }
+            if(e.r) { if(x<ex0) ex0=x; if(x>ex1) ex1=x; if(y<ey0) ey0=y; if(y>ey1) ey1=y; }
+        }
+        if(scales[z]<1)
+            Check(ax1>=0 && abs(ax0-ex0)<=1 && abs(ax1-ex1)<=1 && abs(ay0-ey0)<=1 && abs(ay1-ey1)<=1,
+                  "half zoom preserves sprite-sized bounds; subpixel detail aliases within one screen pixel");
+        else Check(matches,"world pixel path exactly matches nearest sprite raster at native and double zoom");
+        UnloadImage(actual); UnloadImage(expected);
+    }
+    UnloadTexture(raster);
+    UnloadImage(native); UnloadImage(zoomed);
+    BeginTextureMode(scratch); ClearBackground(BLACK);
+    CoreDrawPixelPath(hex,6,true,(Color){255,255,255,128});
+    EndTextureMode();
+    Check(Pixel(scratch,56,26).r<=129,"pixel path corners are not double-blended");
+    Check(!CoreDrawPixelPath(NULL,6,true,WHITE) &&
+          !CoreDrawPixelLine((Vector2){NAN,0},(Vector2){1,1},WHITE) &&
+          !CoreDrawPixelLine((Vector2){0},(Vector2){100000,0},WHITE),
+          "pixel primitive rejects missing, nonfinite and excessive geometry");
+}
+static void DockBoardChecks(void)
+{
+    UiDockApp apps[]={{.id=1,.rect={20,20,64,64}},{.id=2,.rect={150,20,64,64}}};
+    UiDockBoard board={.apps=apps,.count=2,.snapDistance=16,.dragThreshold=5,.gripHeight=10};
+    UiRect screen={0,0,320,240};
+    EngineInput input=Mouse(40,50,true,true,false);
+    UiDockEvent e=UiDockBoardStep(&board,&input,screen);
+    Check(e.mouseCaptured && !e.activated,"dock press captures without activation");
+    input=Mouse(40,50,false,false,true); e=UiDockBoardStep(&board,&input,screen);
+    Check(e.activated==1 && e.mouseCaptured,"dock body activates once on release");
+    input=Mouse(40,50,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(104,50,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(104,50,false,false,true); e=UiDockBoardStep(&board,&input,screen);
+    Check(!e.activated && apps[0].rect.x==86 && apps[0].group==apps[1].group,
+          "drag snaps edge-to-edge to a neighbour, joins its bar, and never activates");
+    input=Mouse(90,23,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(4,3,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(4,3,false,false,true); UiDockBoardStep(&board,&input,screen);
+    Check(apps[0].rect.x==0 && apps[1].rect.x==64 && apps[0].edgeX==-1 && apps[0].edgeY==-1,
+          "grip moves the whole attached bar and snaps to screen corner");
+    input=Mouse(20,35,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(272,215,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(272,215,false,false,true); UiDockBoardStep(&board,&input,screen);
+    Check(apps[0].group!=apps[1].group && apps[0].edgeX==1 && apps[0].edgeY==1,
+          "body drag detaches an app and snaps to bottom-right");
+    input=Mouse(200,100,false,false,false); UiDockBoardStep(&board,&input,(UiRect){0,0,400,300});
+    Check(apps[0].rect.x==336 && apps[0].rect.y==236,"edge pin survives viewport resize");
+    apps[1].id=1; e=UiDockBoardStep(&board,&input,screen);
+    Check(!e.activated && !e.mouseCaptured,"duplicate dock identities rejected");
+    Check(!UiDockBoardStep(NULL,&input,screen).activated,"null dock layout rejected");
+    apps[1].id=2;
+    apps[0]=(UiDockApp){.id=1,.rect={20,20,64,64}};
+    apps[1]=(UiDockApp){.id=2,.rect={150,20,64,64}};
+    Begin(Mouse(40,50,true,true,false)); UiDockBoardControl(&ui,&board);
+    Check(UiCapture(&ui).mouse,"dock UI captures before gameplay input routing"); End();
+    Begin(Mouse(310,200,false,true,false)); UiDockBoardControl(&ui,&board);
+    Check(UiCapture(&ui).mouse,"dock keeps capture while dragged outside its initial rectangle"); End();
+    Begin(Mouse(310,200,false,false,true)); e=UiDockBoardControl(&ui,&board);
+    Check(UiCapture(&ui).mouse && !e.activated,"dock drag release stays captured without activating"); End();
+    UiDockApp bar[]={{.id=1,.group=1,.rect={0,0,64,64}},
+        {.id=2,.group=1,.rect={0,64,64,64}},{.id=3,.group=1,.rect={0,128,64,64}}};
+    board=(UiDockBoard){.apps=bar,.count=3,.snapDistance=12,.dragThreshold=5,.gripHeight=10};
+    input=Mouse(20,95,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(140,95,false,true,false); UiDockBoardStep(&board,&input,screen);
+    Check(bar[2].rect.y==64 && bar[0].group==bar[2].group && bar[1].group!=bar[0].group,
+          "detaching a middle app closes the gap in its old bar");
+    UiDockApp saved[3];
+    bar[0]=(UiDockApp){.id=1,.group=1,.rect={0,0,64,64},.edgeX=-1,.edgeY=-1,.groupHandle=true};
+    bar[1]=(UiDockApp){.id=2,.group=1,.rect={0,64,64,64},.edgeX=-1,.edgeY=-1};
+    bar[2]=(UiDockApp){.id=3,.group=1,.rect={0,128,64,64},.edgeX=-1,.edgeY=-1};
+    board=(UiDockBoard){.apps=bar,.count=3,.snapDistance=12,.dragThreshold=5,
+        .edgeOnly=true,.verticalStack=true,.dragBackup=saved,.dragBackupCount=3};
+    input=Mouse(32,32,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(32,32,false,false,true); e=UiDockBoardStep(&board,&input,screen);
+    Check(e.activated==1,"root handle click activates its menu");
+    input=Mouse(32,32,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(280,75,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(280,75,false,false,true); e=UiDockBoardStep(&board,&input,screen);
+    Check(!e.activated && bar[0].rect.x==256 && bar[0].rect.y==48 &&
+          bar[1].rect.x==256 && bar[1].rect.y==112 && bar[2].rect.y==176 && bar[0].edgeY==1,
+          "root body moves the entire stack to the opposite bottom corner");
+    input=Mouse(280,130,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(155,120,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(155,120,false,false,true); e=UiDockBoardStep(&board,&input,screen);
+    Check(!e.activated && !memcmp(bar,saved,sizeof bar),
+          "middle app floating drop restores all positions, membership and edge pins");
+    input=Mouse(280,75,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(155,75,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(155,75,false,false,true); UiDockBoardStep(&board,&input,screen);
+    Check(!memcmp(bar,saved,sizeof bar),"floating root drop restores the entire stack");
+    input=Mouse(280,130,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(25,130,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(25,130,false,false,true); UiDockBoardStep(&board,&input,screen);
+    Check(bar[1].rect.x==0 && bar[1].edgeX==-1 && bar[1].group!=bar[0].group,
+          "regular app can detach only into another valid edge position");
+    input=Mouse(25,130,true,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(280,191,false,true,false); UiDockBoardStep(&board,&input,screen);
+    input=Mouse(280,191,false,false,true); UiDockBoardStep(&board,&input,screen);
+    Check(bar[1].group==bar[0].group && bar[1].rect.y==176 && bar[0].rect.y==48,
+          "detached app snaps beneath the root's remaining stack");
+    const int corners[4][2]={{0,0},{256,0},{256,48},{0,48}};
+    for(int i=0;i<4;i++)
+    {
+        input=Mouse(bar[0].rect.x+20,bar[0].rect.y+20,true,true,false);
+        UiDockBoardStep(&board,&input,screen);
+        input=Mouse(corners[i][0]+20,corners[i][1]+20,false,true,false);
+        UiDockBoardStep(&board,&input,screen);
+        input=Mouse(corners[i][0]+20,corners[i][1]+20,false,false,true);
+        UiDockBoardStep(&board,&input,screen);
+        Check(bar[0].rect.x==corners[i][0] && bar[0].rect.y==corners[i][1] &&
+              bar[1].rect.x==bar[0].rect.x && bar[2].rect.x==bar[0].rect.x,
+              "root-driven edge stack snaps as one unit at each of the four corners");
+    }
+    board.dragBackupCount=2;
+    e=UiDockBoardStep(&board,&input,screen);
+    Check(!e.mouseCaptured && !e.activated,"edge-only layout rejects undersized rollback scratch");
+}
+
+static void ModelTextureChecks(void)
+{
+    const char *models[] = {"external.fbx", "embedded.fbx", "embedded.glb"};
+    char override[256];
+    snprintf(override, sizeof override, "%s", Scratch("model-override.png"));
+    Image green = GenImageColor(2, 2, GREEN);
+    Check(ExportImage(green, override), "write manual model albedo fixture");
+    UnloadImage(green);
+    Check(!ModelImportSetAlbedo(NULL, override), "null model rejects albedo override");
+    ImportedModel empty = {0};
+    Check(!ModelImportSetAlbedo(&empty, override), "empty model rejects albedo override");
+    for (size_t i = 0; i < sizeof models/sizeof *models; i++)
+    {
+        char path[256];
+        snprintf(path, sizeof path, "tests/regression/fixtures/model-textures/%s", models[i]);
+        ImportedModel model = {0};
+        bool loaded = ModelImport(&model, path, NULL);
+        Check(loaded, "FBX/GLB texture fixture imports");
+        if (!loaded) continue;
+        int material = model.model.meshMaterial[0];
+        MaterialMap original = model.model.materials[material].maps[MATERIAL_MAP_DIFFUSE];
+        Check(original.texture.id != rlGetTextureIdDefault() && original.texture.width == 2,
+              "external FBX and embedded FBX/GLB automatically load base-colour images");
+        Image image = LoadImageFromTexture(original.texture);
+        Color colour = GetImageColor(image, 0, 0);
+        Check(colour.r > colour.g*2 && colour.a == 255, "automatic image pixels reach the GPU");
+        UnloadImage(image);
+        Mesh *meshes = model.model.meshes;
+        Check(ModelImportSetAlbedo(&model, override), "manual albedo loads without reimporting the model");
+        Check(model.model.meshes == meshes && model.originalAlbedo != NULL,
+              "manual override preserves geometry and original materials");
+        bool all = true;
+        for (int m = 0; m < model.model.materialCount; m++)
+            all &= model.model.materials[m].maps[MATERIAL_MAP_DIFFUSE].texture.id == model.albedoOverride.id;
+        Check(all, "override applies to every material");
+        unsigned int retained = model.albedoOverride.id;
+        Check(!ModelImportSetAlbedo(&model, "missing-model-texture.png") && model.albedoOverride.id == retained,
+              "missing override preserves previous valid appearance");
+        Check(ModelImportSetAlbedo(&model, override), "replacing an override is supported");
+        Check(ModelImportSetAlbedo(&model, NULL), "automatic reset restores imported material maps");
+        MaterialMap restored = model.model.materials[material].maps[MATERIAL_MAP_DIFFUSE];
+        Check(restored.texture.id == original.texture.id && restored.color.r == original.color.r &&
+                  !model.albedoOverride.id && !model.originalAlbedo,
+              "reset restores original texture ownership and material tint");
+        image = LoadImageFromTexture(restored.texture);
+        Check(GetImageColor(image, 0, 0).r == colour.r, "original image survives multiple overrides");
+        UnloadImage(image);
+        Check(ModelImportSetAlbedo(&model, override), "active override can be freed with its model");
+        ModelImportFree(&model);
+        ModelImportFree(&model);
+        Check(!model.model.meshes && !model.originalAlbedo && !model.albedoOverride.id,
+              "model free releases override and original maps once and is repeatable");
+    }
+}
+
+static void GroundChunkChecks(void)
+{
+    // Each chunk is its own texture and so its own draw batch: fewer, larger chunks where allowed.
+    static IsoTileset none;
+    IsoMap m = {0};
+    IsoGround g = {0};
+    if (!IsoMapInit(&m, 12, 30, "") || !IsoGroundBuild(&g, &m, &none))
+    {
+        Check(false, "a ground builds for the chunk check");
+        IsoMapFree(&m);
+        return;
+    }
+    int side = CoreMaxTextureSize() >= 1024 ? 512 : 256;
+    Check(g.canvas.width > 512 && g.canvas.height > 512 && g.chunk == side && g.chunks[0].width == side && g.chunks[0].height == side &&
+              g.columns == (g.canvas.width + side - 1) / side,
+          "the ground is cut into 512-texel chunks where the device takes textures of 1024 or more");
+    IsoGroundFree(&g);
+    IsoMapFree(&m);
+}
+static void FogChecks(void)
+{
+    IsoMap m = {0};
+    IsoFog fog = {0};
+    if (!IsoMapInit(&m, 12, 12, "") || !IsoFogBuild(&fog, &m, 2))
+    {
+        Check(false, "a tiny map's fog builds");
+        IsoMapFree(&m);
+        return;
+    }
+    // Read the fog back from its GL_ALPHA8 chunks (raylib cannot), then sample it in world pixels.
+    unsigned char *parts[16] = {0};
+    int count = fog.columns * fog.rows;
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    for (int i = 0; i < count && i < 16; i++)
+    {
+        parts[i] = calloc((size_t)fog.chunks[i].width * (size_t)fog.chunks[i].height, 1);
+        glBindTexture(GL_TEXTURE_2D, fog.chunks[i].id);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_ALPHA, GL_UNSIGNED_BYTE, parts[i]);
+    }
+    glBindTexture(GL_TEXTURE_2D, 0);
+#define FOG_CHUNK(wx, wy) (((int)(wy) - (int)fog.area.y) / fog.chunk * fog.columns + ((int)(wx) - (int)fog.area.x) / fog.chunk)
+#define FOG_ALPHA(wx, wy) parts[FOG_CHUNK(wx, wy)][(((int)(wy) - (int)fog.area.y) % fog.chunk) * fog.chunks[FOG_CHUNK(wx, wy)].width + \
+                                                  ((int)(wx) - (int)fog.area.x) % fog.chunk]
+    Rectangle bounds = IsoMapBounds(&m);
+    Vector2 centre = {floorf(fog.clear.x + fog.clear.width / 2), floorf(fog.clear.y + fog.clear.height / 2)};
+    Check(fog.chunks[0].width > 0 && fog.chunks[0].format == PIXELFORMAT_UNCOMPRESSED_GRAYSCALE,
+          "the fog is kept as one byte a texel");
+    Check(count <= 16 && fog.clear.width > 0 && FOG_ALPHA(centre.x, centre.y) == 0,
+          "a map's fog is clear at its centre");
+    Check(FOG_ALPHA(fog.area.x, fog.area.y) == 255 && FOG_ALPHA(bounds.x - 1, bounds.y + bounds.height / 2) == 255 &&
+              FOG_ALPHA(fog.area.x + fog.area.width - 1, fog.area.y + fog.area.height - 1) == 255,
+          "a map's fog is solid outside its bounds");
+    bool clear = count <= 16;
+    for (int y = (int)fog.clear.y; clear && y < (int)(fog.clear.y + fog.clear.height); y++)
+        for (int x = (int)fog.clear.x; x < (int)(fog.clear.x + fog.clear.width); x++)
+            clear &= FOG_ALPHA(x, y) == 0;
+    Check(clear, "every pixel of the fog's computed clear middle is transparent");
+    // Drawn at zoom 1 from a whole-pixel camera, the clear middle is skipped and the rest is laid
+    // down: under a blend that writes every fragment, the backdrop survives inside the clear middle only.
+    Camera2D camera = {.offset = {160, 120}, .target = centre, .zoom = 1};
+    BeginTextureMode(scratch);
+    ClearBackground(RED);
+    BeginMode2D(camera);
+    rlSetBlendFactors(RL_ONE, RL_ZERO, RL_FUNC_ADD);
+    BeginBlendMode(BLEND_CUSTOM);
+    IsoFogDraw(&fog, (Rectangle){centre.x - 160, centre.y - 120, 320, 240});
+    EndBlendMode();
+    EndMode2D();
+    EndTextureMode();
+    Image shot = LoadImageFromTexture(scratch.texture);
+    ImageFlipVertical(&shot);
+    int inX = (int)(fog.clear.x - centre.x + 160) + 1, inY = (int)(fog.clear.y - centre.y + 120) + 1;
+    int outX = inX - 3;
+    Check(Same(GetImageColor(shot, 160, 120), RED) && Same(GetImageColor(shot, inX, inY), RED) &&
+              GetImageColor(shot, outX, inY).a == FOG_ALPHA(fog.clear.x - 2, fog.clear.y + 1) &&
+              !Same(GetImageColor(shot, outX, inY), RED),
+          "the fog draws around its clear middle and not over it");
+    UnloadImage(shot);
+#undef FOG_ALPHA
+#undef FOG_CHUNK
+    for (int i = 0; i < count && i < 16; i++)
+        free(parts[i]);
+    IsoFogFree(&fog);
+    Check(!fog.chunks && fog.columns == 0, "a freed fog holds nothing");
+    IsoMapFree(&m);
+}
+static void MapQueryCacheChecks(void)
+{
+    IsoMap m = {0};
+    IsoMapQueryCache cache = {0};
+    static IsoTileset set;
+    set.pathCount = set.propCount = 1;
+    set.paths[0].blocking = true;
+    set.props[0].blocking = true;
+    set.props[0].footprintCount = 1;
+    set.props[0].footprint[0] = (IsoHex){0, 0};
+    Check(!IsoMapCachedBlocking(NULL, &m, &set) && !IsoMapCachedRoofRegion(&cache, &m, (IsoTile){0, 0}),
+          "map query caches reject missing storage and uninitialised maps");
+    if (!IsoMapInit(&m, 4, 3, "")) { Check(false, "query cache map allocates"); return; }
+    unsigned char expected[48];
+    IsoMapSetBlock(&m, (IsoTile){1, 1}, 0, 0);
+    IsoMapSetPath(&m, (IsoHex){6, 4}, 0);
+    IsoMapAddProp(&m, (IsoHex){0, 0}, 0);
+    IsoMapBuildBlocking(&m, &set, expected);
+    const unsigned char *actual = IsoMapCachedBlocking(&cache, &m, &set);
+    Check(actual && !memcmp(actual, expected, sizeof expected), "cached blocking equals uncached blocking byte for byte");
+    unsigned builds = cache.blockingBuilds;
+    IsoMapCachedBlocking(&cache, &m, &set);
+    Check(cache.blockingBuilds == builds, "unchanged collision data is built once");
+    m.blocks[(1 * m.width + 1) * ISO_MAP_LEVELS] = -1;
+    set.paths[0].blocking = false;
+    set.props[0].footprint[0] = (IsoHex){1, 0};
+    IsoMapBuildBlocking(&m, &set, expected);
+    actual = IsoMapCachedBlocking(&cache, &m, &set);
+    Check(actual && !memcmp(actual, expected, sizeof expected) && cache.blockingBuilds == builds + 1,
+          "direct map edits and changed tileset footprints invalidate cached collision");
+    IsoMapSetWall(&m, (IsoTile){2, 1}, 0);
+    actual = IsoMapCachedBlocking(&cache, &m, &set);
+    Check(actual && actual[2 * 8 + 4] && actual[2 * 8 + 5] && actual[3 * 8 + 4] && actual[3 * 8 + 5] &&
+              !actual[2 * 8 + 6] && cache.blockingBuilds == builds + 2,
+          "a wall blocks its tile's four hexes and invalidates cached collision");
+    IsoMapSetWall(&m, (IsoTile){2, 0}, 0);
+    IsoMapSetWall(&m, (IsoTile){3, 1}, 0);
+    Check(IsoMapWallMask(&m, (IsoTile){2, 1}) == 3 && IsoMapWallMask(&m, (IsoTile){2, 0}) == 4 &&
+              IsoMapWallMask(&m, (IsoTile){0, 2}) == 0,
+          "a wall's mask is which of its four neighbours have walls");
+    IsoMapSetRoof(&m, (IsoTile){0, 0}, 2, 0);
+    IsoMapSetRoof(&m, (IsoTile){1, 0}, 2, 0);
+    unsigned char roof[12];
+    IsoMapRoofRegion(&m, (IsoTile){0, 0}, roof);
+    actual = IsoMapCachedRoofRegion(&cache, &m, (IsoTile){0, 0});
+    Check(actual && !memcmp(actual, roof, sizeof roof), "cached roof region equals the original flood fill");
+    builds = cache.roofBuilds;
+    IsoMapCachedRoofRegion(&cache, &m, (IsoTile){0, 0});
+    Check(cache.roofBuilds == builds, "stationary roof visibility reuses its region");
+    m.roofs[1] = -1;
+    actual = IsoMapCachedRoofRegion(&cache, &m, (IsoTile){0, 0});
+    Check(actual && actual[0] == 1 && actual[1] == 0 && cache.roofBuilds == builds + 1,
+          "a direct roof edit invalidates the region");
+    actual = IsoMapCachedRoofRegion(&cache, &m, (IsoTile){3, 2});
+    Check(actual && actual[0] == 0, "moving out of a roof region clears hidden tiles");
+    Check(IsoMapResize(&m, 2, 2), "cached map can resize");
+    actual = IsoMapCachedBlocking(&cache, &m, &set);
+    Check(actual && cache.blockingSize == 16, "resizing automatically resizes query storage");
+    IsoMapQueryCacheFree(&cache);
+    IsoMapQueryCacheFree(&cache);
+    Check(!cache.blocking && !cache.hidden, "query cache release is repeatable");
+    IsoMapFree(&m);
+}
+
+static int WallPixels(const IsoMapPiece *pieces, int count)
+{
+    BeginTextureMode(scratch);
+    ClearBackground(BLACK);
+    for (int i = 0; i < count; i++)
+    {
+        IsoMapPiece p = pieces[i];
+        p.ground = (Vector2){160, 140};
+        IsoMapPieceDraw(&p, WHITE);
+    }
+    EndTextureMode();
+    Image image = LoadImageFromTexture(scratch.texture);
+    Color *pixels = LoadImageColors(image);
+    int coloured = 0;
+    for (int i = 0; i < image.width * image.height; i++)
+        if (pixels[i].r > 100)
+            coloured++;
+    UnloadImageColors(pixels);
+    UnloadImage(image);
+    return coloured;
+}
+static void ConnectedWallChecks(void)
+{
+    static IsoTileset set;
+    memset(&set, 0, sizeof set);
+    IsoMap map = {0};
+    IsoMapPiece pieces[64];
+    Check(IsoMapInit(&map, 5, 5, ""), "connected wall map allocates");
+    Image image = GenImageColor(100, 100, RED);
+    Texture2D texture = LoadTextureFromImage(image);
+    UnloadImage(image);
+    set.wallCount = 1;
+    set.walls[0] = (IsoPiece){.hasArt = true,
+                              .wallWidth = .2f,
+                              .wallLevels = 1,
+                              .art = {.atlas = texture, .meta = {100, 100, 1, 1, 1, 1, true, 50, 70}}};
+    Rectangle visible = {-1000, -1000, 2000, 2000};
+    IsoMapSetWall(&map, (IsoTile){2, 2}, 0);
+    int count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    Check(count == 2 && pieces[0].wallShape.cells == (1u << 4),
+          "an isolated wall is one post using two depth slices");
+    Check(pieces[0].sheet == &set.walls[0].art, "connected walls borrow their existing block atlas");
+    int thin = WallPixels(pieces, count);
+    Check(thin > 100 && thin < 1500, "a narrow wall renders clipped surfaces rather than a full cube");
+    set.walls[0].wallWidth = 1;
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    int wide = WallPixels(pieces, count);
+    Check(wide > thin * 2, "wall width changes the rendered footprint without new sprites");
+    set.walls[0].wallWidth = .2f;
+    IsoMapSetWall(&map, (IsoTile){2, 1}, 0);
+    IsoMapSetWall(&map, (IsoTile){3, 2}, 0);
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    IsoWallShape corner = {0};
+    for (int i = 0; i < count; i++)
+        if (pieces[i].index == 12)
+            corner = pieces[i].wallShape;
+    Check(corner.cells == ((1u << 1) | (1u << 4) | (1u << 5)), "wall arms follow the two painted neighbours");
+    for (int y = 1; y <= 3; y++)
+        for (int x = 1; x <= 3; x++)
+            IsoMapSetWall(&map, (IsoTile){x, y}, 0);
+    set.walls[0].wallFilled = true;
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    for (int i = 0; i < count; i++)
+        if (pieces[i].index == 12)
+            corner = pieces[i].wallShape;
+    Check(corner.cells == 511, "filled interior reuses the top over all nine cells");
+    IsoMapPiece centre[2]; int centreCount=0;
+    for(int i=0;i<count && centreCount<2;i++) if(pieces[i].index==12) centre[centreCount++]=pieces[i];
+    Check(centreCount==2 && WallPixels(centre,centreCount)==wide,
+          "merged fill has the same solid silhouette as a full-width block");
+    set.walls[0].wallPlacement = 1;
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    IsoWallShape outward = {0}, inward = {0};
+    for (int i = 0; i < count; i++)
+        if (pieces[i].index == 11)
+            outward = pieces[i].wallShape;
+    set.walls[0].wallPlacement = -1;
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    for (int i = 0; i < count; i++)
+        if (pieces[i].index == 11)
+            inward = pieces[i].wallShape;
+    Check(fabsf(outward.u[1]) < .0001f && fabsf(inward.u[2] - 1) < .0001f,
+          "outward and inward align the wall to opposite edges of its boundary tile");
+    set.walls[0].wallLevels = 2;
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    Check(pieces[0].wallShape.levels == 2, "wall height reuses vertical sections of the same atlas");
+    set.walls[0].wallLevels=8;
+    Vector2 ground=IsoMapTileCentre((IsoTile){2,2});
+    int middle=IsoMapCollectPieces(&map,&set,(Rectangle){ground.x-2,ground.y-150,4,4},pieces,64);
+    bool hasMiddle=false;
+    for(int i=0;i<middle;i++) hasMiddle|=pieces[i].index==12;
+    Check(hasMiddle,"tall walls remain visible when only their middle crosses the viewport");
+    set.walls[0].wallLevels=2;
+
+    IsoMap copy = {0};
+    Check(IsoMapCopy(&copy, &map) && copy.wallCache != map.wallCache,
+          "undo copies own independent wall topology caches");
+    IsoMapFree(&copy);
+    set.walls[0].wallWidth = 0;
+    count = IsoMapCollectPieces(&map, &set, visible, pieces, 64);
+    Check(!pieces[0].wallShape.cells, "legacy wall atlases retain their existing rendering path");
+    set.walls[0].wallWidth = .2f;
+    IsoMapQueryCache query = {0};
+    IsoMapCachedBlocking(&query, &map, &set);
+    unsigned builds = query.blockingBuilds;
+    set.walls[0].wallPlacement = 0;
+    IsoMapCachedBlocking(&query, &map, &set);
+    Check(query.blockingBuilds == builds + 1, "wall placement invalidates cached navigation");
+    IsoMapQueryCacheFree(&query);
+    IsoMapFree(&map);
+    UnloadTexture(texture);
+}
+
+static void SourcePaletteChecks(void)
+{
+    const Color tones[4] = {{20, 16, 8, 255}, {78, 61, 40, 255}, {117, 105, 86, 255}, {235, 221, 190, 255}};
+    Color original[64], pixels[64];
+    for (int i = 0; i < 64; i++)
+        original[i] = tones[i / 16];
+    memcpy(pixels, original, sizeof pixels);
+    SpriteReducePalette(pixels, 64, 2);
+    bool sourceOnly = true, dark = false, bright = false;
+    unsigned selected = 0;
+    for (int i = 0; i < 64; i++)
+    {
+        bool found = false;
+        for (int j = 0; j < 4; j++)
+            if (pixels[i].r == tones[j].r && pixels[i].g == tones[j].g && pixels[i].b == tones[j].b)
+            {
+                found = true;
+                selected |= 1u << j;
+            }
+        sourceOnly &= found;
+        dark |= pixels[i].r == tones[0].r && pixels[i].g == tones[0].g && pixels[i].b == tones[0].b;
+        bright |= pixels[i].r == tones[3].r && pixels[i].g == tones[3].g && pixels[i].b == tones[3].b;
+    }
+    Check(sourceOnly, "palette reduction chooses source colours instead of RGB averages");
+    Check(dark && bright, "palette reduction keeps the source shadow and highlight range");
+    int used = 0;
+    for (int i = 0; i < 4; i++)
+        used += (selected >> i) & 1;
+    Check(used <= 2, "contrast preservation respects the requested palette size");
+    for (int i = 0; i < 64; i++)
+    {
+        pixels[i] = original[i];
+        pixels[i].a = (unsigned char)(i * 4);
+    }
+    pixels[0] = (Color){0, 255, 255, 0};
+    Color transparent = pixels[0];
+    SpriteReducePalette(pixels, 64, 3);
+    bool alpha = true;
+    for (int i = 0; i < 64; i++)
+        alpha &= pixels[i].a == (unsigned char)(i * 4);
+    Check(alpha && !memcmp(&pixels[0], &transparent, sizeof(Color)),
+          "palette reduction preserves alpha and ignores transparent RGB");
+    Color unchanged[4];
+    memcpy(unchanged, tones, sizeof tones);
+    SpriteReducePalette(unchanged, 4, 0);
+    Check(!memcmp(unchanged, tones, sizeof tones), "disabled palette reduction leaves colours unchanged");
+    SpriteReducePalette(NULL, 64, 2);
+    SpriteReducePalette(unchanged, 4, 256);
+    Check(!memcmp(unchanged, tones, sizeof tones),
+          "a palette larger than the input preserves the input exactly");
+    SpriteReducePalette(unchanged, 4, 257);
+    Check(!memcmp(unchanged, tones, sizeof tones), "invalid palette sizes leave the input unchanged");
+}
+
 int main(int argc, char **argv)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -3810,8 +4533,12 @@ int main(int argc, char **argv)
     ActivationChecks();
     FileChecks();
     TextureChecks();
+    SourcePaletteChecks();
     ConventionChecks();
     DeferredChecks();
+    DockBoardChecks();
+    PixelDrawChecks();
+    ModelTextureChecks();
     ScriptChecks();
     NetworkBadSharedTypeChecks();
     NetObjectsChecks();
@@ -3821,10 +4548,15 @@ int main(int argc, char **argv)
     GameCallChecks();
     PlaybackChecks();
     SpriteSheetChecks();
+    SpriteTrimChecks();
     SpritePresentationChecks();
     RowNameChecks();
     SheetCacheChecks();
     IsoGridChecks();
+    GroundChunkChecks();
+    FogChecks();
+    MapQueryCacheChecks();
+    ConnectedWallChecks();
     IsoMoveChecks();
     NetworkChecks();
     NetCommandChecks();

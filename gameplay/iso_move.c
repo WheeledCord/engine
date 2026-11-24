@@ -222,6 +222,25 @@ int IsoMoverRemainingSteps(const IsoMover *mover)
 }
 bool IsoMoverGoTo(IsoMover *mover, IsoPathfinder *finder, IsoHex target, IsoBlockedFn blocked, void *user)
 {
+    if (IsoMoverMoving(mover) && mover->progress > 0)
+    {
+        /* Part-way into a hex: plan from that hex and keep the step under way as the first one, so
+           the drawn position carries on instead of snapping back to the hex it left. A route that
+           turns straight back is just its next step. No route: it still finishes entering the hex. */
+        IsoHex left = mover->hex, entering = mover->path.hexes[mover->step];
+        IsoPath rest = {mover->path.hexes + 1, 0, mover->path.capacity - 1};
+        bool found = IsoPathfinderSolve(finder, &rest, entering, target, blocked, user);
+        if (!found)
+        {
+            rest.hexes[0] = entering;
+            rest.count = 1;
+        }
+        mover->path.hexes[0] = left;
+        mover->path.count = rest.count + 1;
+        mover->step = 1;
+        mover->facing = IsoHexDirection(left, entering);
+        return found;
+    }
     IsoMoverStop(mover);
     if (!IsoPathfinderSolve(finder, &mover->path, mover->hex, target, blocked, user))
         return false;

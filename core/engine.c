@@ -61,7 +61,7 @@ int EngineRunApplication(const EngineApplication *application)
     const EngineConfig *c = &application->config;
     const EngineProject *p = &application->callbacks;
     void *context = application->context;
-    if (c->width <= 0 || c->height <= 0 || c->targetFps < 0 ||
+    if (c->width <= 0 || c->height <= 0 || c->targetFps < 0 || c->idleFps < 0 || c->backgroundFps < 0 ||
         !isfinite(c->fixed_dt) || c->fixed_dt < 0 || !isfinite(c->max_frame_dt) || c->max_frame_dt < 0)
     {
         TraceLog(LOG_ERROR, "Engine: dimensions must be positive; FPS and finite timesteps must be nonnegative");
@@ -97,6 +97,9 @@ int EngineRunApplication(const EngineApplication *application)
     CoreDiagnosticsSetCurrent(&diagnostics);
     EngineInput pending = {0};
     bool running = initialised;
+    double lastActivity = last;
+    int frameLimit = c->targetFps;
+    bool eventWaiting = false;
     while (running && !WindowShouldClose())
     {
         double now = GetTime(), dt = now - last;
@@ -106,10 +109,18 @@ int EngineRunApplication(const EngineApplication *application)
         last = now;
         if (c->max_frame_dt > 0 && dt > c->max_frame_dt)
         {
-            TraceLog(LOG_WARNING, "Frame time clamped from %.3f to %.3f seconds", dt, c->max_frame_dt);
+            if (!eventWaiting)
+                TraceLog(LOG_WARNING, "Frame time clamped from %.3f to %.3f seconds", dt, c->max_frame_dt);
             dt = c->max_frame_dt;
         }
         EngineInput frame = PollInput();
+        bool active = frame.mouseDelta.x != 0 || frame.mouseDelta.y != 0 || frame.wheel != 0 ||
+                      frame.textCount != 0 || IsWindowResized();
+        for (int i = 0; i < CORE_KEY_COUNT; i++)
+            active |= frame.down[i] || frame.pressed[i] || frame.released[i];
+        for (int i = 0; i < CORE_MOUSE_BUTTON_COUNT; i++)
+            active |= frame.mouseDown[i] || frame.mousePressed[i] || frame.mouseReleased[i];
+        if (active) lastActivity = now;
         if (p->FrameInput) p->FrameInput(context, &frame);
         EngineInputCapture capture = {0};
         if (application->BuildUi)
@@ -146,12 +157,31 @@ int EngineRunApplication(const EngineApplication *application)
             EngineInputDrain(&pending);
         }
         diagnostics.fixedBacklog = accumulator;
+        /* Godot main/main.cpp:5086 also lets applications opt into reduced work at rest.
+           Updates retain elapsed time; frame pacing is the only thing this policy changes. */
+        int limit = c->targetFps;
+        bool idle = now - lastActivity >= 0.25 && application->NeedsContinuousFrames &&
+                    !application->NeedsContinuousFrames(context);
+        if (c->idleFps > 0 && idle)
+            limit = limit > 0 && limit < c->idleFps ? limit : c->idleFps;
+        if (c->backgroundFps > 0 && (!IsWindowFocused() || IsWindowMinimized()))
+            limit = limit > 0 && limit < c->backgroundFps ? limit : c->backgroundFps;
+        if (limit != frameLimit) { SetTargetFPS(limit); frameLimit = limit; }
         if (running)
         {
             BeginDrawing();
             ClearBackground(application->clearColor);
             if (p->Draw) p->Draw(context, alpha);
             if (application->BuildUi && !UiRender(application->ui)) { result = 1; running = false; }
+            /* Draw may enqueue a preview or other tool work; decide whether to sleep afterwards. */
+            bool wait = running && c->waitWhenIdle && now - lastActivity >= 0.25 &&
+                        application->NeedsContinuousFrames && !application->NeedsContinuousFrames(context);
+            if (wait != eventWaiting)
+            {
+                if (wait) EnableEventWaiting();
+                else DisableEventWaiting();
+                eventWaiting = wait;
+            }
             EndDrawing();
         }
     }

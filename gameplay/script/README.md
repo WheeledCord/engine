@@ -147,3 +147,8 @@ C-only for now.
 
 `CoreFillUVBackground` and the rest of `core/uv_bake.h` are offline tooling: they run in the texture
 baker, before a game exists, and have no meaning at runtime.
+
+`iso_wall_internal.h` is internal map-rendering and collision plumbing. Its cache, borrowed
+atlas surfaces and batched polygon helpers have no independently owned script object or useful
+standalone script operation. Wall styles are authored in `.tileset` files and consumed through
+the existing map pipeline.

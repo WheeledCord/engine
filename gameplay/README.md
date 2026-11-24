@@ -115,6 +115,11 @@ their own positions.
 
 ## Routing and walking a hex grid
 
+`iso_map_spawn` spawns the entities a `core/iso_map` map's object layer places, as a scene file
+spawns its own: each object's kind names a class, gets `hex`, its kind's fields and then its own,
+and a `position` at the hex's world point when the class takes one (every scripted entity does).
+A missing class or a refused field is logged and that object skipped.
+
 `iso_move` plans and walks routes over the hex grid in `core/iso_grid.h`. `IsoPathfinder` is an A*
 workspace sized once and reused, because a search that allocates is one a turn cannot afford often;
 `IsoPathfinderSolve` fills an `IsoPath`, and `IsoMover` walks it, turning to face each step.

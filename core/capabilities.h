@@ -18,4 +18,6 @@ typedef struct CoreRequirements
 } CoreRequirements;
 bool CoreCheckCapabilities(CoreRequirements requirements);
 bool CoreCheckGraphicsErrors(const char *where);
+/* GL_MAX_TEXTURE_SIZE of the current context: the widest texture it accepts, in texels. */
+int CoreMaxTextureSize(void);
 #endif

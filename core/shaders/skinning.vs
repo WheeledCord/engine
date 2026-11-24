@@ -11,10 +11,14 @@ attribute vec4 vertexBoneIds;
 attribute vec4 vertexBoneWeights;
 uniform mat4 mvp;
 uniform mat4 matNormal;
+uniform mat4 matModel;
+uniform mat4 clipTransform;
+varying float fragClipHeight;
 uniform mat4 boneMatrices[CORE_BONE_CAPACITY];
 varying vec2 fragTexCoord;
 varying vec4 fragColor;
 varying vec3 fragNormal;
+varying float fragHeight; // world height, for sprite_bake's height pass
 void main()
 {
     vec4 p=vec4(vertexPosition,1.0);
@@ -28,7 +32,9 @@ void main()
           +vertexBoneWeights.y*(mat3(boneMatrices[int(vertexBoneIds.y)])*vertexNormal)
           +vertexBoneWeights.z*(mat3(boneMatrices[int(vertexBoneIds.z)])*vertexNormal)
           +vertexBoneWeights.w*(mat3(boneMatrices[int(vertexBoneIds.w)])*vertexNormal);
+    fragClipHeight=(clipTransform*skinned).y;
     fragTexCoord=vertexTexCoord;
+    fragHeight=(matModel*skinned).y;
     fragColor=vertexColor;
     fragNormal=normalize(mat3(matNormal)*n);
     gl_Position=mvp*skinned;

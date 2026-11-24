@@ -7,8 +7,11 @@
 varying vec2 fragTexCoord;
 varying vec3 fragNormal;
 uniform sampler2D texture0;
+uniform int clipGround;
+varying float fragClipHeight;
 void main()
 {
+    if(clipGround!=0 && fragClipHeight<0.0) discard;
     if(texture2D(texture0,fragTexCoord).a<=0.0) discard;
     vec3 n=normalize(fragNormal);
     gl_FragColor=vec4(n*0.5+0.5,1.0);

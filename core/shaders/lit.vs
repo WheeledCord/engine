@@ -11,12 +11,18 @@ attribute vec3 vertexNormal;
 attribute vec4 vertexColor;
 uniform mat4 mvp;
 uniform mat4 matNormal;
+uniform mat4 matModel;
+uniform mat4 clipTransform;
+varying float fragClipHeight;
 varying vec2 fragTexCoord;
 varying vec4 fragColor;
 varying vec3 fragNormal;
+varying float fragHeight; // world height, for sprite_bake's height pass
 void main()
 {
+    fragClipHeight=(clipTransform*vec4(vertexPosition,1.0)).y;
     fragTexCoord=vertexTexCoord;
+    fragHeight=(matModel*vec4(vertexPosition,1.0)).y;
     fragColor=vertexColor;
     fragNormal=normalize(mat3(matNormal)*vertexNormal);
     gl_Position=mvp*vec4(vertexPosition,1.0);

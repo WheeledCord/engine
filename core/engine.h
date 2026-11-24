@@ -13,6 +13,8 @@ typedef struct EngineConfig
 {
     const char *title;
     int width, height, targetFps;
+    int idleFps, backgroundFps; /* zero disables the corresponding lower frame limit */
+    bool waitWhenIdle; /* opt-in tools: sleep until window/input events when no continuous frames are needed */
     double fixed_dt;     /* zero: variable-only; positive: accumulator */
     double max_frame_dt; /* zero: no clamp; positive: explicit catch-up time clamp */
     unsigned int windowFlags;
@@ -37,6 +39,7 @@ typedef struct EngineApplication
     struct UiContext *ui; // Optional; a zero-initialised context gets the default theme.
     void (*BuildUi)(void *context, struct UiContext *ui); // Once before updates; drawing is deferred.
     EngineInputCapture (*CaptureInput)(void *context, const EngineInput *frame); // Extra project routing.
+    bool (*NeedsContinuousFrames)(void *context); // Optional; true keeps idleFps from taking effect.
 } EngineApplication;
 
 /**
